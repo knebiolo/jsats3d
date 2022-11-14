@@ -242,11 +242,11 @@ class beacon_epoch():
             curr_lag = i[1]['lag']                                             # get the current lag
             if curr_lag < 0.5 * self.pulseRate:                                # if the current lag is less than 1/2 the transmission rate, we are in the same epoch
                 self.host_dat.at[i[0],'metronome_transmission'] = transNo      # set value
-                print ("Beacon trnasmission %s"%(transNo))
+                #print ("Beacon trnasmission %s"%(transNo))
             else:                                                              # if it isn't, we are in the next epoch
                 transNo = transNo + 1                                          # increase transmission number enumerator by 1
                 self.host_dat.at[i[0],'metronome_transmission'] = transNo      # set value        
-                print ("Beacon tramsmission %s"%(transNo))
+                #print ("Beacon tramsmission %s"%(transNo))
         #self.host_dat[['Tag_ID','Rec_ID','timeStamp','metronome_transmission']].to_csv(os.path.join(self.scratchWS,'check.csv'),index = False)
         conn = sqlite3.connect(self.projectDB, timeout = 30.0)
         c = conn.cursor()
