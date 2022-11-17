@@ -1367,58 +1367,58 @@ class position():
                 r0Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == ref].X_t.values[0],
                             self.ephemeris[self.ephemeris.Rec_ID == ref].Y_t.values[0],
                             z_at_t(t_ref,ref)]) #(X,Y,Z of reciever 0)
-                print ("The position of receiver 0 is %s"%(r0Pos))
+                #print ("The position of receiver 0 is %s"%(r0Pos))
                 self.z_translation = r0Pos[2]
                 r1Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r1].X_t.values[0],
                             self.ephemeris[self.ephemeris.Rec_ID == r1].Y_t.values[0],
                             z_at_t(t1,r1)]) #(X,Y,Z of reciever 1)
-                print ("The position of receiver 1 is %s"%(r1Pos))      
+                #print ("The position of receiver 1 is %s"%(r1Pos))      
                 r2Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r2].X_t.values[0],
                             self.ephemeris[self.ephemeris.Rec_ID == r2].Y_t.values[0],
                             z_at_t(t2,r2)]) #(X,Y,Z of reciever 2)
-                print ("The position of receiver 2 is %s"%(r2Pos))                            
+                #print ("The position of receiver 2 is %s"%(r2Pos))                            
                 r3Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r3].X_t.values[0],
                             self.ephemeris[self.ephemeris.Rec_ID == r3].Y_t.values[0],
                             z_at_t(t3,r3)]) #(X,Y,Z of reciever 3)         
-                print ("The position of receiver 3 is %s"%(r3Pos))
+                #print ("The position of receiver 3 is %s"%(r3Pos))
                                           
                 # create matrices, equation 3a Deng 2011
                 #R = np.matrix(np.vstack(((r1Pos - r0Pos),(r2Pos - r0Pos),(r3Pos - r0Pos))))
                 R = np.matrix(np.array([[r1Pos[0]-r0Pos[0],r2Pos[0]-r0Pos[0],r3Pos[0]-r0Pos[0]],[r1Pos[1]-r0Pos[1],r2Pos[1]-r0Pos[1],r3Pos[1]-r0Pos[1]],[r1Pos[2]-r0Pos[2],r2Pos[2]-r0Pos[2],r3Pos[2]-r0Pos[2]]]))
-                print ("Posisition Matrix R \n %s"%(R))
+                #print ("Posisition Matrix R \n %s"%(R))
                 # vertical matrix of time of arrival differences (TOADs) between receiver i and reference receiver #1
                 tdoa_1 = np.round(t1 - t_ref,6)                                    # difference in time of arrival between current receiver and reference receiver
                 tdoa_2 = np.round(t2 - t_ref,6)
                 tdoa_3 = np.round(t3 - t_ref,6)              
                 t = np.matrix(np.vstack((tdoa_1,tdoa_2,tdoa_3)))               # column matrix of tdoa's                                                     
-                print ("Print T matrix \n %s"%(t))           
+                #print ("Print T matrix \n %s"%(t))           
                 # calculate speed of sound 
                 #temps = []
                 # for i in self.interpolator:                                    # for each temperature interpolator....
                 #     temps.append(self.interpolator[i](t_ref))                  # get the temperature at time and append to temps list
                 #avg_C = np.nanmean(temps)                                      # calculate the mean and ignore nan
                 avg_C = self.interpolator(t_ref)
-                print ("Current temperature = %s" %(avg_C))
+                #print ("Current temperature = %s" %(avg_C))
                 SoS = sos(avg_C)                                               # calculate the speed of sound at the current temperature
-                print  ("Current Speed of Sound = %s"%(SoS))
+                #print  ("Current Speed of Sound = %s"%(SoS))
                 
                 # vertical matrix of b, equation 3a Deng 2011
                 b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
                 b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2) 
                 b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)  
                 b = np.matrix(np.vstack((b1,b2,b3)))
-                print ("B matrix \n %s"%(b))
+                #print ("B matrix \n %s"%(b))
                 
                 # solve for T_0 equations 5 and 5a Deng 2011
                 try:
                     a = SoS**4 * t.T * R.I * R.T.I * t - SoS**2    
                     p = -0.5 * SoS**2 * t.T * R.I * R.T.I * b 
                     q = 0.25 * b.T * R.I * R.T.I * b
-                    print ('a = %s, p = %s, q = %s'%(a,p,q))
+                    #print ('a = %s, p = %s, q = %s'%(a,p,q))
                     # Solve for ToA
                     T_0a = (-p + np.sqrt(p**2 - a*q))/a
                     T_0b = (-p - np.sqrt(p**2 - a*q))/a
-                    print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
+                    #print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
                     # solve for S = positon of source with equation 4 from Deng 2011
                     if np.sign(T_0a) > 0:
                         S1a = R.I.T * (0.5 * b - SoS**2 * t * T_0a)
@@ -1432,11 +1432,11 @@ class position():
                                                     tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
                         SolutionA = SolutionA.append(row)
                         del row            
-                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                        print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
+                        #print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                        #print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
                         
                     else:
-                        print ("No solution A found time step %s"%(j))
+                        #print ("No solution A found time step %s"%(j))
                         row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','negative time of arrival - no soluiton','']]), columns = Solution_Cols)
                         SolutionA = SolutionA.append(row)
                         
@@ -1452,19 +1452,19 @@ class position():
                                                     tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
                         SolutionB = SolutionB.append(row)
                         del row
-                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                        print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
+                        #print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                        #print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
                     else:
-                        print ("No solution B found time step %s"%(j))
+                        #print ("No solution B found time step %s"%(j))
                         row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','negative time of arrival - no soluiton','']]), columns = Solution_Cols)
                         SolutionA = SolutionA.append(row)
                 except:
-                    print ("Singular matrix encountered, no solution at transmission %s"%(j))
+                    #print ("Singular matrix encountered, no solution at transmission %s"%(j))
                     row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
                     SolutionA = SolutionA.append(row)
 
             else:
-                print ("Not enough receivers for a solution at time step %s"%(j))
+                #print ("Not enough receivers for a solution at time step %s"%(j))
                 row = pd.DataFrame(np.array([[j,'','','','','','','','','','not enough receivers for solution','']]), columns = Solution_Cols)
                 SolutionA = SolutionA.append(row)
                 SolutionB = SolutionB.append(row)                

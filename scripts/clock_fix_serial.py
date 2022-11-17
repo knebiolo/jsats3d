@@ -39,7 +39,7 @@ for i in recList:
     jsats3d.clock_fix(clock_fix_object)
     print ("Finished Processing Receiver %s"%(i))
     
-#jsats3d.epoch_fix_data_management(outputWS,dbDir)
+jsats3d.epoch_fix_data_management(outputWS,dbDir)
 
 print ("All receivers processed, proceed to positioning")
 print ("Clock drift idnetification and detrending took %s seconds to compile"%(round(time.time() - ts,4)))
