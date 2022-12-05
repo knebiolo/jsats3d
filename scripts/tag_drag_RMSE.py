@@ -20,9 +20,9 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 # identify WS
-algWS = r"J:\3870\013\Calcs\Paper\Output"
+algWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output"
 tagWS = r"J:\3870\013\Calcs\Old\Data"
-outputWS = r"J:\3870\013\Calcs\Paper\Output"
+outputWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output"
 print ("connected to workspaces")
 
 # import data

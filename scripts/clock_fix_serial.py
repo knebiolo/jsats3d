@@ -14,32 +14,27 @@ warnings.filterwarnings('ignore')
 import time
 
 ts = time.time()
-outputWS = r"J:\3870\013\Calcs\Paper\Output\Scratch"
-figureWS = r"J:\3870\013\Calcs\Paper\Output\Figures"
-inputWS = r"J:\3870\013\Calcs\Paper\Data"
-dbName = 'cowlitz_2018_paper.db'
+outputWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output\Scratch"
+figureWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output\Figures"
+inputWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output"
+dbName = 'cowlitz_test.db'
 dbDir = os.path.join(inputWS,dbName)
 #dbDir = r"C:\Users\Kevin Nebiolo\Desktop\cowlitz_tagDrag.db"
 
-#recList = ['R01','R02','R03','R04','R05','R06','R07','R08','R09']
-#recList = ['R04','R05','R06','R07','R08','R09']
-#recList = ['R01','R02','R03']
-recList = ['R03']
+recList = ['R08']
 
-
-analysisRecs = ['R01','R02','R03','R04','R05','R06','R07','R08','R09']
-#analysisRecs = ['R04','R05','R06','R07','R08','R09']
+analysisRecs = ['R04','R05','R06','R07','R08','R09']
 
 # create a clock fix data objects
 
 print ("Start processing receivers")
 for i in recList:
-    clock_fix_object = jsats3d.clock_fix_object(i,analysisRecs,dbDir,outputWS,figureWS, multipath_filter = 'KNN') 
+    clock_fix_object = jsats3d.clock_fix_object(i,analysisRecs,dbDir,outputWS,figureWS) 
     print ("created preliminary data objects for receiver %s"%(i))
     jsats3d.clock_fix(clock_fix_object)
     print ("Finished Processing Receiver %s"%(i))
     
-jsats3d.epoch_fix_data_management(outputWS,dbDir)
+#jsats3d.epoch_fix_data_management(outputWS,dbDir)
 
 print ("All receivers processed, proceed to positioning")
 print ("Clock drift idnetification and detrending took %s seconds to compile"%(round(time.time() - ts,4)))

@@ -29,6 +29,11 @@ from sklearn import tree
 from sklearn.cluster import KMeans
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn import mixture
+from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
+from sklearn.neighbors import NearestNeighbors
+from itertools import combinations
+
 #import plotly.graph_objects as go
 #import skkda
 #from sklearn.mixture import GMM
@@ -288,8 +293,8 @@ class multipath_data_object():
         # get this tag's pulse rate from the project database
         tagSQL = "SELECT pulseRate, TagType from tblTag WHERE Tag_ID = '%s'"%(tag)
         tagDat = pd.read_sql(tagSQL, con = conn)
-        self.pulseRate = tagDat.pulseRate.values[0]
-        self.tagType = tagDat.TagType.values[0]
+        self.pulseRate = tagDat.at[0,'pulseRate']
+        self.tagType = tagDat.at[0,'TagType']
         self.master_receiver = pd.read_sql('SELECT masterReceiver from tblStudyParameters',con = conn).masterReceiver.values[0]
         # get data for this tag across all receivers
         if metronome == True:
@@ -426,16 +431,19 @@ def multipath_2(multipath_object):
             conn = sqlite3.connect(multipath_object.projectDB, timeout = 30.0)
             c = conn.cursor()
             # create an index on tblMetronomeUnfiltered 
-            c.execute('''CREATE INDEX idx_combined_metronome_filtered ON tblMetronomeFiltered (Rec_ID, Tag_ID, seconds)''')
+            #c.execute('''CREATE INDEX idx_combined_metronome_filtered ON tblMetronomeFiltered (Rec_ID, Tag_ID, seconds)''')
             conn.commit()
             c.close()
          
-def multipath_data_management(inputWS,projectDB,primary = True):
+def multipath_data_management(inputWS,projectDB,primary = True, metronome = False):
     # As soon as I figure out how to do this function is moot.
     if primary == True:
         tblName = 'tblDetectionFilterPrimary'
     else:
         tblName = 'tblDetectionFilterSecondary'
+    if metronome == True:
+        tblName = 'tblMetronomeSecondFiltered'
+
     files = os.listdir(inputWS)
     conn = sqlite3.connect(projectDB)
     c = conn.cursor()
@@ -454,81 +462,89 @@ def multipath_data_management(inputWS,projectDB,primary = True):
     conn.commit()              
     c.close()               
 
-def mulitpath_classifier(tag,projectDB,outputWS,beacon = False, method = None):
+def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = None):
     # get data 
     conn = sqlite3.connect(projectDB)
     c = conn.cursor()
-    dat = pd.read_sql('SELECT * FROM tblDetectionFilterPrimary WHERE Tag_ID == "%s"'%(tag),con = conn)
-    if beacon == True:
-        rec_ID = pd.read_sql('SELECT Rec_ID FROM tblReceiver WHERE Tag_ID == "%s"'%(tag),con = conn).Rec_ID.values[0]
+
+        
+    if metronome == False:
+        dat = pd.read_sql('SELECT * FROM tblDetectionFilterPrimary WHERE Tag_ID == "%s"'%(tag),con = conn)
+    else:
+        dat = pd.read_sql('SELECT * FROM tblMetronomeFiltered WHERE Tag_ID == "%s"'%(tag),con = conn)
+        rec_ID = pd.read_sql('SELECT Rec_ID from tblReceiver WHERE Tag_ID == "%s"'%(tag),con = conn).Rec_ID.values[0]
+    
     c.close()
-    dat = dat[dat.SNR > 0.0]
+    dat = dat[dat.SNR > 0]
     if len(dat) > 0:
         recs = dat.Rec_ID.unique()
         for i in recs:
             rec_dat = dat[dat.Rec_ID == i]
+            
             # set indices
             rec_dat.set_index('transNo',inplace = True,drop = False)
             rec_dat.sort_index(inplace = True)
 
-
-            # let's make a classifier, if we have training data make a supervised, if not, make an unsupervised 
-       
-            if beacon == False:
-                train_dat = rec_dat[(rec_dat.SNR > 0.0)]
-            else:
-                train_dat = rec_dat[(rec_dat.Rec_ID != rec_ID) & (rec_dat.SNR > 0.0)]
+            if metronome == True:
+                rec_dat = rec_dat[(rec_dat.Rec_ID != rec_ID)]
+                       
+            multi = rec_dat[rec_dat.multipath == 1]
+            primary = rec_dat[rec_dat.multipath == 0]
             
-            print ("Identify multipath detections masquerading as primary detections with a k-means")
-           
-            train_idx = train_dat[train_dat.det_rank > 1.0].index.tolist()     # training data occurs when we have a primary detection and known multipath - aka, any detection with a detection rank greater than 1
-            #train_dat = train_dat.loc[train_idx]                               # get the indices for these rows 
-            #train_dat = []
-            # there could multipath detections that masquerade as primary detections - run a k-means and compare means
-            multi = train_dat[train_dat.multipath == 1]
-            primary = train_dat[train_dat.multipath == 0]
-            if len(train_dat) >100 and len(multi) > 0: 
+            if len(rec_dat) >100 and len(multi) > 0: 
+                '''there could be epochs where the primary detection was missed
+                and a multipath detection was incorrectly attributed to a primary
+                detection.  Explore the use of DBSCAN to identify multiple clusters                
+                '''
                 # there could multipath detections that masquerade as primary detections - run a k-means and compare means
                 # normalize so data plays nice with k-means
                 primary[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(primary[['Amplitude','NBW','SNR']])
                 multi[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(multi[['Amplitude','NBW','SNR']])
-                
-                # run k-means on primary detections with 2 clusters
-                kmeans = KMeans(n_clusters = 2, random_state = 0).fit(primary[['amp_n','nbw_n','snr_n']])
-                primary['klabels'] = kmeans.labels_
-    
-                cluster0 = kmeans.cluster_centers_[0]
-                cluster1 = kmeans.cluster_centers_[1]
-    
-    
-                known_means = np.mean(multi[['amp_n','nbw_n','snr_n']], axis = 0)
-                
-                '''we want to remove the group closest to the known multipath detection.
-                but, K-means isn't smart, the group closest to known multipath detections 
-                could be made up of poor good detections and we would be throwing out data.
-                Therefore, we need a threshold, we should only remove the group if it
-                is within a distance of 0.5 from the known multipath detections'''
-                
-                dist0 = np.linalg.norm(cluster0 - known_means)
-                dist1 = np.linalg.norm(cluster1 - known_means)
-                min_dist = np.min([dist0,dist1])
-    
-                
-                if dist0 < dist1:
-                    if dist0 > 0.5 * min_dist:
-                        primary = primary[primary.klabels != 0]
-                        print ("Removing mislabeled multipath")
-                    else:
-                        print ("No difference found between cluster and known multipath")
-                else:
-                    if dist1 > 0.5 * min_dist:
-                        primary = primary[primary.klabels != 1]
-                        print ("Removing mislabeled multipath")
-                    else:
-                        print ("No difference found between cluster and known multipath")
+            
+                # getting a memory error with large dataframes - chunk it
 
-                #primary.drop(['klabels'], axis = 1, inplace = True) 
-                train_dat = primary.append(multi)
+                if len(rec_dat) > 5000:
+                    primary_filtered = pd.DataFrame()
+                    chunks = np.arange(0,10,1)
+                    primary['chunk'] = np.random.choice(chunks,len(primary))
+                    for chunk in chunks:
+                        chunk_df = primary[primary.chunk == chunk]
+                        
+                        # calculate distance to 20 nearest neighbors
+                        neighbors = NearestNeighbors(n_neighbors=20)
+                        neighbors_fit = neighbors.fit(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)
+                        distances, indices = neighbors_fit.kneighbors(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)       
+                        distances = np.sort(distances, axis=0) 
+                        
+                        # calculate some extreme distances
+                        ext_dist = np.quantile(distances, q = [0.1,0.4,0.75,0.80,0.90,0.95,0.99])
+                        
+                        # apply dbscan and plot clusters
+                        test = DBSCAN(eps = ext_dist[5] ,min_samples = 6, metric = 'euclidean').fit(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)
+                        
+                        # apply labels to the chunked dataset
+                        chunk_df['dbscan_cluster'] = test.labels_
+                        
+                        # # 3d plot
+                        # fig = plt.figure(figsize = (6,6))
+                        # ax = fig.add_subplot(111,projection = '3d')
+                        # ax.scatter(chunk_df.Amplitude.values, chunk_df.SNR.values, chunk_df.NBW.values,c = chunk_df.dbscan_cluster)
+                        # plt.show()
+                        
+                        # remove non clusters and then get cluster with min median signal to noise ratio
+                        chunk_df = chunk_df[chunk_df != -1]
+                        clst_cnt = chunk_df.groupby(['dbscan_cluster'])['NBW'].min()
+                        chunk_df = chunk_df[chunk_df.dbscan_cluster == clst_cnt.idxmin()]
+                        
+                        chunk_df.drop(['dbscan_cluster'], axis = 1, inplace = True) 
+
+                        # paste to filtered data
+                        primary_filtered = primary_filtered.append(chunk_df)
+                else:
+                    primary_filtered = primary
+                        
+ 
+                train_dat = primary_filtered.append(multi)
     
                 print ("Generate training and testing datasets")
                 # generate training data and test data
@@ -617,6 +633,15 @@ def mulitpath_classifier(tag,projectDB,outputWS,beacon = False, method = None):
                     rec_dat[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(rec_dat[['Amplitude','NBW','SNR']])
                     rec_dat['multipath_prediction'] = classifier.predict(rec_dat[['amp_n','nbw_n','snr_n']]) # predict classes of unknown detections
                 
+                
+                # fig = plt.figure(figsize = (6,6))
+                # ax = fig.add_subplot(111,projection = '3d')
+                # ax.scatter(primary_filtered.Amplitude.values, primary_filtered.SNR.values, primary_filtered.NBW.values, c = 'black')
+                # ax.scatter(multi.Amplitude.values, multi.SNR.values, multi.NBW.values, c = 'red')
+
+                # plt.show()
+                
+                
                 primary = rec_dat[rec_dat.multipath_prediction == 0]
                 mutli = rec_dat[rec_dat.multipath_prediction == 1]
                 # 3d plot
@@ -629,67 +654,42 @@ def mulitpath_classifier(tag,projectDB,outputWS,beacon = False, method = None):
                 ax.set_xlabel('Amplitude')
                 ax.set_ylabel('Signal to Noise Ratio')
                 ax.set_zlabel('Noise in Bandwidth')
-                #plt.savefig(os.path.join(multipath_object.scratchWS,"filter_variables_%s.png"%(i)),bbox_inches = 'tight')
                 plt.show()
-                
-            else: # if we don't have any training data, perform a supervised classifier
-                # a gaussian mixture model is like a k-means except it is statistical 
-                print ("Not enough training data to run a supervised classifier - let's try our luck with a GMM")
-                rec_dat[['amp_s','nbw_s','snr_s']] = preprocessing.scale(rec_dat[['Amplitude','NBW','SNR']])
-                if len(rec_dat) > 50:
-                    gmm = mixture.GaussianMixture(n_components = 2).fit(rec_dat[['amp_s','nbw_s','snr_s']])
-                    probs = gmm.predict_proba(rec_dat[['amp_s','nbw_s','snr_s']])    
-                    # classify each row - decision model is simple, whichever has the larger probability 
-                    classArr = []
-                    for j in probs:
-                        if j[0] > j[1]:
-                            classArr.append('A')
-                        else:
-                            classArr.append('B')
-                    rec_dat['DetClass'] = classArr
-                           
-                    # ok, so we have two detection classes, which one is better?  The one with the larger SNR
-                    A = rec_dat[rec_dat.DetClass == 'A']
-                    A_mean = np.median(A.SNR.values)
-                    B = rec_dat[rec_dat.DetClass == 'B']
-                    B_mean = np.median(B.SNR.values)
-                    rec_dat.reset_index(drop = True,inplace = True)
-                    rec_dat.set_index('DetClass',drop = False,inplace = True)
-                    if A_mean > B_mean: # the detection class with a larger SNR is the obvious choice
-                        rec_dat.loc['A','multipath_prediction'] = 0
-                        rec_dat.loc['B','multipath_prediction'] = 1                    
-                    else:
-                        rec_dat.loc['A','multipath_prediction'] = 1
-                        rec_dat.loc['B','multipath_prediction'] = 0             
-           
-    
-                    # perform some data management 
-                    rec_dat.reset_index(drop = True,inplace = True)
-                    rec_dat.drop('DetClass',axis = 1,inplace = True)
+            # if we don't have any training data, perform an unsupervised classifier    
+            else: 
+                if len(rec_dat) > 1:
+                    # normalize so data plays nice with DBSCAN
+                    rec_dat[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(rec_dat[['Amplitude','NBW','SNR']])
+                    
+                    # calculate euclidean distance between interpolated observations
+                    euc_dist = np.sqrt(np.power(np.diff(rec_dat.Amplitude),2)+np.power(np.diff(rec_dat.NBW),2)+np.power(np.diff(rec_dat.SNR),2))
+                    ext_dist = np.quantile(euc_dist,[0.90,0.95,0.99])
+                    
+                    # apply dbscan and plot clusters
+                    test = DBSCAN(eps = np.abs(ext_dist[0]),
+                                  min_samples = len(primary)//2, 
+                                  metric = 'euclidean').fit(np.vstack((rec_dat.Amplitude,
+                                                                       rec_dat.NBW,
+                                                                       rec_dat.SNR)).T)
+                    
+                    rec_dat['multipath_prediction'] = test.labels_
+                    
+                    # 3d plot
+                    fig = plt.figure(figsize = (6,6))
+                    ax = fig.add_subplot(111,projection = '3d')
+                    ax.scatter(rec_dat.Amplitude.values, rec_dat.SNR.values, rec_dat.NBW.values,c = test.labels_)
+                    ax.set_xlabel('Amplitude')
+                    ax.set_ylabel('Signal to Noise Ratio')
+                    ax.set_zlabel('Noise in Bandwidth')
+                    #plt.savefig(os.path.join(multipath_object.scratchWS,"filter_variables_%s.png"%(i)),bbox_inches = 'tight')
+                    plt.show()
+                    
+                    # remove DBSCAN points that are not within the main cluster
+                    rec_dat = rec_dat[rec_dat['multipath_prediction'] != -1] 
                 else:
-                    rec_dat['multipath_prediction'] = np.repeat(0,len(rec_dat))
-                    
-                primary = rec_dat[rec_dat.multipath_prediction == 0]
-                mutli = rec_dat[rec_dat.multipath_prediction == 1]
-                # 3d plot
-                fig = plt.figure(figsize = (6,6))
-                ax = fig.add_subplot(111,projection = '3d')
-                ax.plot(primary.amp_s.values, primary.snr_s.values, primary.nbw_s.values,'ko', label = 'primary')
-                ax.plot(mutli.amp_s.values, mutli.snr_s.values, mutli.nbw_s.values,'ro', alpha = 0.2,label = 'multipath')
+                    rec_dat['multipath_prediction'] = np.zeros(len(rec_dat))
 
-                    
-                ax.legend()
-                ax.set_xlabel('Amplitude')
-                ax.set_ylabel('Signal to Noise Ratio')
-                ax.set_zlabel('Noise in Bandwidth')
-                #plt.savefig(os.path.join(multipath_object.scratchWS,"filter_variables_%s.png"%(i)),bbox_inches = 'tight')
-                plt.show()
-                
-                #rec_dat['multipath_prediction'] = np.zeros(len(rec_dat))
-            if beacon == True:
-               host_idx = rec_dat[rec_dat.Rec_ID == rec_ID].index
-               rec_dat.fillna(0,inplace = True)
-               #rec_dat.loc[host_idx,'multipath_prediction'] = 0
+
             # export data 
             rec_dat.to_csv(os.path.join(outputWS,'multipath_predict_%s_at_%s.csv'%(tag,i)), index = False, float_format='%.6f')
 
@@ -727,9 +727,7 @@ def sos(temp):
 
 class clock_fix_object():
     '''Python class object for the storage of clock fix data.'''
-    def __init__(self,curr_receiver,receiver_list,projectDB,scratchWS,figureWS, multipath_filter = None):
-        # optional argurments
-        self.multipath_filter = multipath_filter
+    def __init__(self,curr_receiver,receiver_list,projectDB,scratchWS,figureWS):
         
         # connect to project database
         conn = sqlite3.connect(projectDB, timeout = 30.0)
@@ -740,7 +738,7 @@ class clock_fix_object():
         sql = 'SELECT * FROM tblReceiver WHERE Rec_ID = "%s"'%(self.current_receiver)
         curr_rec_dat = pd.read_sql(sql, con = conn)
         
-        self.current_tag_id = curr_rec_dat.Tag_ID.values[0]        
+        self.current_tag_id = curr_rec_dat.at[0,'Tag_ID']        
         self.receiver_list = receiver_list
         self.projectDB = projectDB
         
@@ -765,7 +763,7 @@ class clock_fix_object():
         self.ref_elev = self.receivers[self.receivers.Rec_ID == self.master_clock_rec_ID].Ref_Elev.values[0] # what is the Z elevation in the receiver table referencing?
         
         # get time of transmission
-        sql = "SELECT transNo, seconds FROM tblMetronomeFiltered WHERE Rec_ID = '%s' AND Tag_ID = '%s' AND multipath = 0"%(self.master_clock_rec_ID,self.master_clock_tag_ID)
+        sql = "SELECT transNo, seconds FROM tblMetronomeFiltered WHERE Rec_ID = '%s' AND Tag_ID = '%s' AND multipath == 0"%(self.master_clock_rec_ID,self.master_clock_tag_ID)
         self.ToT = pd.read_sql_query(sql,con = conn) 
         print ("Returned %s number of rows for Receiver %s at %s"%(len(self.ToT),self.master_clock_rec_ID,self.current_receiver))
         self.ToT.rename(columns = {'seconds':'ToT'},inplace = True)
@@ -785,7 +783,7 @@ class clock_fix_object():
         self.WSELfun = interp1d(WSELdf.seconds,WSELdf.WSEL,kind = 'linear')
         
         # get multipath filtered recapture data from the master clock
-        dataSQL = 'SELECT * FROM tblMetronomeFiltered WHERE Rec_ID = "%s" AND Tag_ID = "%s" AND multipath = 0'%(self.current_receiver,self.master_clock_tag_ID)
+        dataSQL = 'SELECT * FROM tblMetronomeSecondFiltered WHERE Rec_ID = "%s" AND Tag_ID = "%s" AND multipath_prediction == 0'%(self.current_receiver,self.master_clock_tag_ID)
         self.clock_data = pd.read_sql(dataSQL,con = conn)
         #self.clock_data['transNo'] = self.clock_data.transNo
         self.clock_data['lag'] = self.clock_data.seconds.diff()                # calculate the lag in seconds between the previous detection and the current one
@@ -794,181 +792,6 @@ class clock_fix_object():
         self.scratchWS = scratchWS
         self.figureWS = figureWS  
         c.close()
-        if self.current_receiver != self.master_clock_rec_ID:
-            # if we are multipath filtering, get training data and train a classifier
-            if self.multipath_filter != None:
-                self.train_dat = pd.read_sql('SELECT * FROM tblMetronomeFiltered WHERE Rec_ID = "%s"'%(self.current_receiver), con = conn)
-                # set indices
-                self.train_dat.set_index('transNo',inplace = True,drop = False)
-                self.train_dat.sort_index(inplace = True)
-                #self.train_dat = self.train_dat[self.train_dat.SNR > 0.0]
-                self.train_dat['lag'] = self.train_dat.seconds.diff()                # calculate the lag in seconds between the previous detection and the current one
-                self.train_dat['leap'] = np.abs(self.train_dat.seconds.diff(-1))     # calculate the lag in seconds between the next detection and the current one               
-                self.train_dat.dropna(inplace = True)
-    
-                print ("Identify multipath detections masquerading as primary detections with a k-means")
-               
-                # there could multipath detections that masquerade as primary detections - run a k-means and compare means
-                multi = self.train_dat[self.train_dat.multipath == 1]
-                primary = self.train_dat[self.train_dat.multipath == 0]
-                
-                # normalize so data plays nice with k-means
-                primary[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(primary[['Amplitude','NBW','SNR']])
-                multi[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(multi[['Amplitude','NBW','SNR']])
-                primary[['amp_s','nbw_s','snr_s']] = preprocessing.scale(primary[['Amplitude','NBW','SNR']])
-                multi[['amp_s','nbw_s','snr_s']] = preprocessing.scale(multi[['Amplitude','NBW','SNR']])
-
-                # # 3d plot
-                # fig = plt.figure(figsize = (6,6))
-                # ax = fig.add_subplot(111,projection = '3d')
-                # ax.plot(primary.amp_s.values, primary.snr_s.values, primary.nbw_s.values,'ko', label = 'primary')
-                # ax.plot(multi.amp_s.values, multi.snr_s.values, multi.nbw_s.values,'ro', alpha = 0.2,label = 'multipath')
-
-                # ax.legend()
-                # ax.set_xlabel('Amplitude')
-                # ax.set_ylabel('Signal to Noise Ratio')
-                # ax.set_zlabel('Noise in Bandwidth')
-                # plt.show()                
-                
-                # run k-means on primary detections with 2 clusters
-                kmeans = KMeans(n_clusters = 2, random_state = 0).fit(primary[['amp_n','nbw_n','snr_n']])
-                primary['klabels'] = kmeans.labels_
-    
-                cluster0 = kmeans.cluster_centers_[0]
-                cluster1 = kmeans.cluster_centers_[1]
-    
-
-    
-                known_means = np.mean(multi[['amp_n','nbw_n','snr_n']], axis = 0)
-                
-                '''we want to remove the group closest to the known multipath detection.
-                but, K-means isn't smart, the group closest to known multipath detections 
-                could be made up of poor good detections and we would be throwing out data.
-                Therefore, we need a threshold, we should only remove the group if it
-                is within a distance of 0.5 from the known multipath detections'''
-                
-                dist0m = np.linalg.norm(cluster0 - known_means)
-                dist1m = np.linalg.norm(cluster1 - known_means)
-                dist =np.linalg.norm(cluster0 - cluster1)
-                
-                primary['multipath'] = np.zeros(len(primary))
-                
-                if dist0m < dist1m:
-                    if dist0m < 0.50 * dist:
-                        primary.loc[primary.klabels == 0,'multipath'] = 1
-                        print ("Removing mislabeled multipath")
-                    else:
-                        print ("No difference found between cluster and known multipath")
-                else:
-                    if dist1m < 0.50 * dist:
-                        primary.loc[primary.klabels == 1,'multipath'] = 1
-                        print ("Removing mislabeled multipath")
-                    else:
-                        print ("No difference found between cluster and known multipath")
-                
-                # fig = plt.figure(figsize = (6,6))
-                # ax = fig.add_subplot(111,projection = '3d')
-                # ax.plot(primary[primary.klabels == 1].amp_s.values, 
-                #         primary[primary.klabels == 1].snr_s.values, 
-                #         primary[primary.klabels == 1].nbw_s.values,
-                #         'ko',alpha = 0.2, label = 'k-means primary')
-                # ax.plot(primary[primary.klabels == 0].amp_s.values, 
-                #         primary[primary.klabels == 0].snr_s.values, 
-                #         primary[primary.klabels == 0].nbw_s.values,
-                #         'bo', alpha = 0.2,label = 'k-means multipath')
-                # ax.plot(multi.amp_s.values, 
-                #         multi.snr_s.values, 
-                #         multi.nbw_s.values,
-                #         'ro', alpha = 0.2,label = 'known multipath')
-
-                # ax.legend()
-                # ax.set_xlabel('Amplitude')
-                # ax.set_ylabel('Signal to Noise Ratio')
-                # ax.set_zlabel('Noise in Bandwidth')
-                # plt.show()
-                
-                primary = primary[primary.multipath == 0]
-                #primary.drop(['klabels'], axis = 1, inplace = True) 
-                self.train_dat = primary.append(multi)
-    
-                print ("Generate training and testing datasets")
-                # generate training data and test data
-                X = self.train_dat[['Amplitude','NBW','SNR']]
-                
-                # normalize or scale so it plays nice with whatever algorithm you end up using
-                X_scaled = preprocessing.scale(X)
-                X_norm = preprocessing.normalize(X) 
-                
-                X_train_s, X_test_s, y_train_s, y_test_s = train_test_split(X_scaled,
-                                                                    self.train_dat[['multipath']],
-                                                                    test_size = 0.3,
-                                                                    random_state = 111)
-                
-                X_train_n, X_test_n, y_train_n, y_test_n = train_test_split(X_norm,
-                                                        self.train_dat[['multipath']],
-                                                        test_size = 0.3,
-                                                        random_state = 111)
-                
-                # now - let's 
-                if self.multipath_filter == 'SVM':
-                    # create support vector machine classifier
-                    svc = SVC(kernel = 'rbf', C = 1E10)
-                    print ("Fit a support vector machine classifier")
-                    # train a model using the training data from above
-                    svc.fit(X_train_s,y_train_s)
-                    # make a prediction 
-                    y_pred = svc.predict(X_test_s)
-                    
-                    # evaluate that model
-                    print("Accuracy for the %s SVC was:"%(self.current_receiver), metrics.accuracy_score(y_test_s,y_pred))
-                    print("Precision for the %s SVC was:"%(self.current_receiver), metrics.precision_score(y_test_s,y_pred))
-                    print("Recall for the %s SVC was:"%(self.current_receiver), metrics.recall_score(y_test_s,y_pred))
-                    self.classifier = svc            
-                
-                elif self.multipath_filter == 'NB':
-                    # create gaussian Naive Bayes classifier
-                    nb = GaussianNB()
-                    print ("Fit a Naive Bayes classifier")
-                    # train a model using the training data from above
-                    nb.fit(X_train_s,y_train_s)
-                    # make a prediction 
-                    y_pred = nb.predict(X_test_s)
-                    
-                    # evaluate that model
-                    print("Accuracy for the %s NB was:"%(self.current_receiver), metrics.accuracy_score(y_test_s,y_pred))
-                    print("Precision for the %s NB was:"%(self.current_receiver), metrics.precision_score(y_test_s,y_pred))
-                    print("Recall for the %s NB was:"%(self.current_receiver), metrics.recall_score(y_test_s,y_pred))
-                    self.classifier = nb
-                
-                elif self.multipath_filter == 'CART':
-                    # create decision tree classifier
-                    tre = tree.DecisionTreeClassifier()
-                    # train a model using the training data from above
-                    tre.fit(X_train_n,y_train_n)
-                    # make a prediction 
-                    y_pred = tre.predict(X_test_n)
-                    
-                    # evaluate that model
-                    print("Accuracy for the %s CART was:"%(self.current_receiver), metrics.accuracy_score(y_test_n,y_pred))
-                    print("Precision for the %s CART was:"%(self.current_receiver), metrics.precision_score(y_test_n,y_pred))
-                    print("Recall for the %s CART was:"%(self.current_receiver), metrics.recall_score(y_test_n,y_pred))
-                    self.classifier = tre 
-                
-                elif self.multipath_filter == 'KNN':
-                    # create k-nearest neighbor classifier
-                    knn = KNeighborsClassifier(n_neighbors = 2)
-                    # train a model using the training data from above
-                    knn.fit(X_train_s,y_train_s)
-                    # make a prediction 
-                    y_pred = knn.predict(X_test_s)
-                    
-                    # evaluate that model
-                    print("Accuracy for the %s KNN was:"%(self.current_receiver), metrics.accuracy_score(y_test_s,y_pred))
-                    print("Precision for the %s KNN was:"%(self.current_receiver), metrics.precision_score(y_test_s,y_pred))
-                    print("Recall for the %s KNN was:"%(self.current_receiver), metrics.recall_score(y_test_s,y_pred))
-                    self.classifier = knn
-                else:
-                    raise Exception ("Invalid algorithm, must be of type: SVM, NB or CART")
             
   
 
@@ -1019,46 +842,9 @@ def clock_fix(clock_fix_object):
             to_pos = np.array([row['x2'],row['y2'],row['z2']])
             return np.linalg.norm(to_pos - from_pos) 
         receiver_dat['dist'] = receiver_dat.apply(dist_fun,axis = 1)
-        receiver_dat = receiver_dat[receiver_dat.SNR > 0.0] 
+        #receiver_dat = receiver_dat[receiver_dat.SNR > 0.0] 
         receiver_dat.sort_values(by = 'seconds', ascending = True, inplace = True) # sort values by microsecond since epoch
 
-        
-        if clock_fix_object.current_receiver != clock_fix_object.master_clock_rec_ID:
-            if clock_fix_object.multipath_filter != None:
-                if len(clock_fix_object.train_dat) > 0:
-                    # first let's get training data
-                    if clock_fix_object.multipath_filter == 'SVM' or clock_fix_object.multipath_filter == 'NB' or clock_fix_object.multipath_filter == 'KNN':
-                        receiver_dat[['amp_s','nbw_s','snr_s']] = preprocessing.scale(receiver_dat[['Amplitude','NBW','SNR']])
-                        receiver_dat['multipath_prediction'] = clock_fix_object.classifier.predict(receiver_dat[['amp_s','nbw_s','snr_s']]) # predict classes of unknown detections
-                    else:
-                        receiver_dat[['amp_n','nbw_n','snr_n']] = preprocessing.normalize(receiver_dat[['Amplitude','NBW','SNR']])
-                        receiver_dat['multipath_prediction'] = clock_fix_object.classifier.predict(receiver_dat[['amp_n','nbw_n','snr_n']]) # predict classes of unknown detections
-
-                    primary = receiver_dat[receiver_dat.multipath_prediction == 0]
-                    multi = receiver_dat[receiver_dat.multipath_prediction == 1]
-    
-                    # 3d plot
-                    fig = plt.figure(figsize = (6,6))
-                    ax = fig.add_subplot(111,projection = '3d')
-                    if clock_fix_object.multipath_filter == 'SVM' or clock_fix_object.multipath_filter == 'NB' or clock_fix_object.multipath_filter == 'KNN':
-                        ax.plot(primary.amp_s.values, primary.snr_s.values, primary.nbw_s.values,'ko', label = 'primary')
-                        ax.plot(multi.amp_s.values, multi.snr_s.values, multi.nbw_s.values,'ro', alpha = 0.2,label = 'multipath')
-
-                    else:
-                        ax.plot(primary.amp_n.values, primary.snr_n.values, primary.nbw_n.values,'ko', label = 'primary')
-                        ax.plot(multi.amp_n.values, multi.snr_n.values, multi.nbw_n.values,'ro', alpha = 0.2,label = 'multipath')
-
-                    ax.legend()
-                    ax.set_xlabel('Amplitude')
-                    ax.set_ylabel('Signal to Noise Ratio')
-                    ax.set_zlabel('Noise in Bandwidth')
-                    plt.savefig(os.path.join(clock_fix_object.figureWS,"filter_variables_in3space_f%s_t%s.png"%(clock_fix_object.master_clock_rec_ID,clock_fix_object.current_receiver)),bbox_inches = 'tight')
-                    plt.show()
-        
-                    receiver_dat  = primary
-                    del primary, multi
-            
-        print ("After multipath removal, clock dat is %s records long"%(len(receiver_dat)))
         if len(receiver_dat) > 0:
             #print (receiver_dat[['transNo','Rec_ID','Tag_ID','seconds','lag','leap']].head(20))
             receiver_dat = receiver_dat[receiver_dat.transNo != 0] 
@@ -1086,8 +872,7 @@ def clock_fix(clock_fix_object):
             receiver_dat['TDoA'] = (receiver_dat.seconds - receiver_dat.ToT)       # calculate time difference in arrival (s) between the time of transmission at beacon tag i and time of arrival at receiver j    
             receiver_dat['TDoAlag'] = receiver_dat.TDoA.diff()                     # calculate the lag in seconds between the previous detection and the current one
             
-            
-            
+   
             if clock_fix_object.current_receiver != clock_fix_object.master_clock_rec_ID:                                                        # if receiver j isn't attached to beacon i, make a plot and save to csv           
                 '''check initial TDoA and quantify translation error.  If the receiving clock
                 was ahead of the master clock at the onset of the study, the master receiver will
@@ -1112,7 +897,7 @@ def clock_fix(clock_fix_object):
                             
                 # calculate the error or residual in time of arrival (measured - expected) 
                 receiver_dat['ToA_error'] = receiver_dat.seconds - receiver_dat.ToA_expected # ToA error in seconds
-                receiver_dat = receiver_dat[np.abs(receiver_dat.ToA_error)<5]
+                #receiver_dat = receiver_dat[np.abs(receiver_dat.ToA_error)<5]
                 receiver_dat['TDoA_error'] = receiver_dat.TDoA - receiver_dat.TDoA_expected # TDoA error in seconds
                 #receiver_dat = receiver_dat[np.abs(receiver_dat.ToA_error) < 10 ]
 
@@ -1124,16 +909,50 @@ def clock_fix(clock_fix_object):
                                                               
                 # calculate the mreasued distance difference of arrival 
                 receiver_dat['DDoA'] = receiver_dat.SoS * receiver_dat.TDoA
+                
+                '''This is where we will put in DBSCAN to remove any last multipath
+                that could bias clock synchronization.                
+                '''
+                iters = 5
+                for i in np.arange(0,iters,1):
+                    
+                    # find first and last time step
+                    t_min = receiver_dat.seconds.min()
+                    t_max = receiver_dat.seconds.max()
+                    
+                    # create time series
+                    ts = np.arange(t_min,t_max,clock_fix_object.master_pulse_rate)
+                    #ts = np.arange(t_min,t_max,17.)
+                    
+                    # create linear interpolator
+                    f = interp1d(receiver_dat.seconds,receiver_dat.DDoA,kind = 'linear',bounds_error = False, fill_value = 'extrapolate')
+                    
+                    # interpolate DDoA
+                    ddoa = f(ts)
+                                    
+                    # # calculate euclidean distance between interpolated observations
+                    euc_dist = np.sqrt(np.power(np.diff(ts),2)+np.power(np.diff(ddoa),2))
+                    ext_dist = pd.DataFrame(euc_dist).quantile(q = [0.90,0.95,0.96,0.97,0.98,0.99]).values
+                    
+                    # apply dbscan and plot clusters and get progressively less strict
+                    if i == 0:
+                        test = DBSCAN(eps = ext_dist[0],min_samples = 3, metric = 'euclidean').fit(np.vstack((ts,ddoa)).T)                      
+                    else:
+                        test = DBSCAN(eps = ext_dist[1],min_samples = 3, metric = 'euclidean').fit(np.vstack((ts,ddoa)).T)                     
+                    
+                    # create a dataframe of time, ddoa, and labels, identify the first new label 
+                    results = pd.DataFrame.from_dict({'ts':ts,'ddoa':ddoa,'class_':test.labels_})
+                    
+                    # create step function to interpolate multipath
+                    good_bad = np.where(results.class_ <0 , 0, 1)
+                    multi_pred = interp1d(ts,good_bad,kind = 'next', bounds_error = False, fill_value = 'extrapolate')
+                    
+                    # remove DBSCAN multipath 
+                    receiver_dat['DBSCAN_multi'] = multi_pred(receiver_dat.seconds)
+                    receiver_dat = receiver_dat[receiver_dat['DBSCAN_multi'] == 1] 
+                
                 receiver_dat['deltaDDoA'] = receiver_dat.DDoA.diff() 
-                #receiver_dat['DDoA_Diff2'] = receiver_dat.deltaDDoA.diff()
-                #receiver_dat = receiver_dat[(receiver_dat.deltaDDoA > receiver_dat.deltaDDoA.quantile(0.20)) & (receiver_dat.deltaDDoA < receiver_dat.deltaDDoA.quantile(0.80))]
-                #fuck
-                #receiver_dat = receiver_dat[(receiver_dat.deltaDDoA == 0)]
-                clock_fix_object.receiver_dat = receiver_dat
-
-                #receiver_dat.to_csv(os.path.join(clock_fix_object.scratchWS,'receiver_dat.csv'))
-                
-                
+                 
                 clock_fix_object.receiver_dat = receiver_dat                       # write clock fix to object
 
                 # make a plot showing how bad of a problem it is
@@ -1156,12 +975,13 @@ def clock_fix(clock_fix_object):
                 ax2.text(clock_fix_object.receivers[clock_fix_object.receivers.Rec_ID == clock_fix_object.master_clock_rec_ID].X_t.values[0]+0.25,clock_fix_object.receivers[clock_fix_object.receivers.Rec_ID == clock_fix_object.master_clock_rec_ID].Y_t.values[0]+0.25,'%s'%(clock_fix_object.master_clock_rec_ID))
                 ax2.text(clock_fix_object.receivers[clock_fix_object.receivers.Rec_ID == clock_fix_object.current_receiver].X_t.values[0]+0.25,clock_fix_object.receivers[clock_fix_object.receivers.Rec_ID == clock_fix_object.current_receiver].Y_t.values[0]+0.25,'%s'%(clock_fix_object.current_receiver))
                 ax2.legend(title = 'Stationary Receivers')
-                #plt.show()
+                plt.show()
                 plt.savefig(os.path.join(clock_fix_object.figureWS,'ClockDrift_f%s_t%s.png'%(clock_fix_object.master_clock_rec_ID,clock_fix_object.current_receiver)),bbox_inches = 'tight')        
                 
                 # let's see if we can fix that error 
                 clock_fix_object.receiver_dat = receiver_dat 
                 receiver_dat.sort_values(by = 'seconds',inplace = True)
+                
                 # Fit picewise linear to error line:
                 residual = interp1d(receiver_dat.seconds.values,receiver_dat.ToA_error.values,kind = 'linear',bounds_error = False, fill_value = 9999)  # create a function for the residual at time of arrival  
                 receiver_dat['seconds_residual_predicted'] = residual(receiver_dat.seconds)   # predict the residual and visually confirm with plot            
@@ -1183,7 +1003,7 @@ def clock_fix(clock_fix_object):
                 curr_rec_dat['seconds_fix'] = curr_rec_dat.seconds - curr_rec_dat.seconds_residual
                 firstDet = curr_rec_dat.seconds_fix.min()                        # find the first ever detection of this tag
                 curr_rec_dat['timeDiff'] = curr_rec_dat.seconds_fix.values - firstDet # calculate the difference between the time and the first detection
-    
+
                 #curr_rec_dat = curr_rec_dat[(curr_rec_dat.seconds_fix > min_temp_time) & (curr_rec_dat.seconds_fix < max_temp_time)]
                 times = curr_rec_dat.seconds_fix.values
     
@@ -1196,27 +1016,16 @@ def clock_fix(clock_fix_object):
                 # export data to csv
                 curr_rec_dat.to_csv(os.path.join(clock_fix_object.scratchWS,'receiver_%s_epoch_fix.csv'%(clock_fix_object.current_receiver)), index = False, float_format='%.6f')
                 receiver_dat.to_csv(os.path.join(clock_fix_object.figureWS,'receiver_%s_clock_fix.csv'%(clock_fix_object.current_receiver)), float_format='%.6f')  
-                
-                # # Make a plot, show measured error vs interpolated error 
-                # fig = plt.figure(figsize = (6,4))
-                # ax = fig.add_subplot(111)
-                # ax.plot(receiver_dat.seconds_fix,receiver_dat.ToA_error,'b-', label = 'measured error')
-                # ax.plot(curr_rec_dat.seconds_fix,curr_rec_dat.seconds_residual,'r--',label = 'interpolated error')
-                # plt.legend()
-                # ax.set_ylabel('Residual')
-                # ax.set_xlabel('transmission')
-                # #plt.show() 
-                # plt.savefig(os.path.join(clock_fix_object.figureWS,'measured_vs_interpolated_error_check_%s_t%s.png'%(clock_fix_object.master_clock_rec_ID,clock_fix_object.current_receiver)),bbox_inches = 'tight')
-    
-                # # Make a plot, show measured v expected TDoA
-                # fig = plt.figure(figsize = (6,4))
-                # ax = fig.add_subplot(111)
-                # ax.plot(receiver_dat.transNo,receiver_dat.TDoA,'b-', label = 'measured TDoA')
-                # ax.plot(receiver_dat.transNo,receiver_dat.TDoA_expected,'r-',label = 'expected TDoA')
-                # plt.legend()
-                # ax.set_ylabel('Residual')
-                # ax.set_xlabel('transmission')
-                # #plt.show() 
+                    
+                # Make a plot, show measured v expected TDoA
+                fig = plt.figure(figsize = (6,4))
+                ax = fig.add_subplot(111)
+                ax.plot(receiver_dat.transNo,receiver_dat.TDoA,'b-', label = 'measured TDoA')
+                ax.plot(receiver_dat.transNo,receiver_dat.TDoA_expected,'r-',label = 'expected TDoA')
+                plt.legend()
+                ax.set_ylabel('Residual')
+                ax.set_xlabel('transmission')
+                #plt.show() 
                 # plt.savefig(os.path.join(clock_fix_object.figureWS,'measured_vs_expected_TDoA_%s_t%s.png'%(clock_fix_object.master_clock_rec_ID,clock_fix_object.current_receiver)),bbox_inches = 'tight')
     
                 
@@ -1284,9 +1093,9 @@ class position():
         c = conn.cursor()
         self.tag_data = pd.DataFrame()
         for i in self.resolved_clocks:
-            #dat = pd.read_sql('SELECT * FROM tblDetectionFilterSecondary WHERE Tag_ID = "%s" AND Rec_ID = "%s" AND multipath = 0 AND multipath_prediction = 0'%(self.tag,i), con = conn)
-            dat = pd.read_sql('SELECT * FROM tblDetectionFilterSecondary WHERE Tag_ID = "%s" AND Rec_ID = "%s" AND multipath = 0'%(self.tag,i), con = conn)
-
+            dat = pd.read_sql('SELECT * FROM tblDetectionFilterSecondary WHERE Tag_ID = "%s" AND Rec_ID = "%s"'%(self.tag,i), con = conn)
+            dat = dat[dat.multipath != 1]
+            dat = dat[dat.multipath_prediction != 1]
             self.tag_data = self.tag_data.append(dat)
             
         # build an ephemeris
@@ -1322,7 +1131,7 @@ class position():
 
         c.close()
     
-    def Deng(self):
+    def Deng(self,print_output = False):
         def point_in_hull(point,hull):
             tolerance = 1e-12
             return all(
@@ -1331,7 +1140,7 @@ class position():
 
 
 
-        Solution_Cols = ['transNo','r0','r1','r2','r3','X','Y','Z','T01','ToA','comment','in_hull']
+        Solution_Cols = ['transNo','solNo','r0','r1','r2','r3','X','Y','Z','T01','ToA','comment','in_hull']
         
         SolutionA = pd.DataFrame(columns = Solution_Cols)
         SolutionB = pd.DataFrame(columns = Solution_Cols)
@@ -1342,130 +1151,185 @@ class position():
             tDat['timeStampFix'] = pd.to_datetime(tDat.seconds_fix, unit = 's')
             tDat['timeStampOriginal'] = pd.to_datetime(tDat.seconds, unit = 's')
             if len(tDat) >= 4: # in a perfect world, we have enogh receivers with enough observations to calculate a solution, we need at least 4
-                #print tDat[['transNoFix','Rec_ID','timeStampOriginal','timeStampFix']]
-                #fuck
-                # find the reference receiver - aka one with first recapture - time difference of arrival and all 
-                tDat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
-                ref = tDat.iloc[0].Rec_ID                                      # our reference time is the first time of arrival
-                r1 = tDat.iloc[1].Rec_ID
-                r2 = tDat.iloc[2].Rec_ID
-                r3 = tDat.iloc[3].Rec_ID                                       # we only need 4 for Deng's exact solution, this will do
-                t_ref = tDat.seconds_fix.iloc[0]                                 # time of arrival 1
-                t1 = tDat.seconds_fix.iloc[1]
-                t2 = tDat.seconds_fix.iloc[2]
-                t3 = tDat.seconds_fix.iloc[3]                               # time of arrival 4
-                # get positional data of receivers
-                def z_at_t(t,Rec_ID):
-                    elev_ref = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Ref_Elev.values[0]
-                    if elev_ref == 'BM':
-                        return self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
-                    else:
-                        Zt = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
-                        #t_Z = self.benchmark_elev - Zt
-                        return Zt
-                        
-                r0Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == ref].X_t.values[0],
-                            self.ephemeris[self.ephemeris.Rec_ID == ref].Y_t.values[0],
-                            z_at_t(t_ref,ref)]) #(X,Y,Z of reciever 0)
-                #print ("The position of receiver 0 is %s"%(r0Pos))
-                self.z_translation = r0Pos[2]
-                r1Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r1].X_t.values[0],
-                            self.ephemeris[self.ephemeris.Rec_ID == r1].Y_t.values[0],
-                            z_at_t(t1,r1)]) #(X,Y,Z of reciever 1)
-                #print ("The position of receiver 1 is %s"%(r1Pos))      
-                r2Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r2].X_t.values[0],
-                            self.ephemeris[self.ephemeris.Rec_ID == r2].Y_t.values[0],
-                            z_at_t(t2,r2)]) #(X,Y,Z of reciever 2)
-                #print ("The position of receiver 2 is %s"%(r2Pos))                            
-                r3Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r3].X_t.values[0],
-                            self.ephemeris[self.ephemeris.Rec_ID == r3].Y_t.values[0],
-                            z_at_t(t3,r3)]) #(X,Y,Z of reciever 3)         
-                #print ("The position of receiver 3 is %s"%(r3Pos))
-                                          
-                # create matrices, equation 3a Deng 2011
-                #R = np.matrix(np.vstack(((r1Pos - r0Pos),(r2Pos - r0Pos),(r3Pos - r0Pos))))
-                R = np.matrix(np.array([[r1Pos[0]-r0Pos[0],r2Pos[0]-r0Pos[0],r3Pos[0]-r0Pos[0]],[r1Pos[1]-r0Pos[1],r2Pos[1]-r0Pos[1],r3Pos[1]-r0Pos[1]],[r1Pos[2]-r0Pos[2],r2Pos[2]-r0Pos[2],r3Pos[2]-r0Pos[2]]]))
-                #print ("Posisition Matrix R \n %s"%(R))
-                # vertical matrix of time of arrival differences (TOADs) between receiver i and reference receiver #1
-                tdoa_1 = np.round(t1 - t_ref,6)                                    # difference in time of arrival between current receiver and reference receiver
-                tdoa_2 = np.round(t2 - t_ref,6)
-                tdoa_3 = np.round(t3 - t_ref,6)              
-                t = np.matrix(np.vstack((tdoa_1,tdoa_2,tdoa_3)))               # column matrix of tdoa's                                                     
-                #print ("Print T matrix \n %s"%(t))           
-                # calculate speed of sound 
-                #temps = []
-                # for i in self.interpolator:                                    # for each temperature interpolator....
-                #     temps.append(self.interpolator[i](t_ref))                  # get the temperature at time and append to temps list
-                #avg_C = np.nanmean(temps)                                      # calculate the mean and ignore nan
-                avg_C = self.interpolator(t_ref)
-                #print ("Current temperature = %s" %(avg_C))
-                SoS = sos(avg_C)                                               # calculate the speed of sound at the current temperature
-                #print  ("Current Speed of Sound = %s"%(SoS))
-                
-                # vertical matrix of b, equation 3a Deng 2011
-                b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
-                b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2) 
-                b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)  
-                b = np.matrix(np.vstack((b1,b2,b3)))
-                #print ("B matrix \n %s"%(b))
-                
-                # solve for T_0 equations 5 and 5a Deng 2011
-                try:
-                    a = SoS**4 * t.T * R.I * R.T.I * t - SoS**2    
-                    p = -0.5 * SoS**2 * t.T * R.I * R.T.I * b 
-                    q = 0.25 * b.T * R.I * R.T.I * b
-                    #print ('a = %s, p = %s, q = %s'%(a,p,q))
-                    # Solve for ToA
-                    T_0a = (-p + np.sqrt(p**2 - a*q))/a
-                    T_0b = (-p - np.sqrt(p**2 - a*q))/a
-                    #print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
-                    # solve for S = positon of source with equation 4 from Deng 2011
-                    if np.sign(T_0a) > 0:
-                        S1a = R.I.T * (0.5 * b - SoS**2 * t * T_0a)
-                        point = np.array([r0Pos[0] + S1a.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
-                        in_hull = point_in_hull(point,self.convex_hull)
-                        row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,
-                                                      r0Pos[0] + S1a.item(0),
-                                                    r0Pos[1] + S1a.item(1),
-                                                    r0Pos[2] + S1a.item(2),
-                                                    T_0a.item(0),
-                                                    tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
-                        SolutionA = SolutionA.append(row)
-                        del row            
-                        #print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                        #print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
-                        
-                    else:
-                        #print ("No solution A found time step %s"%(j))
-                        row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                        SolutionA = SolutionA.append(row)
-                        
-                    if np.sign(T_0b) > 0:
-                        S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
-                        point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
-                        in_hull = point_in_hull(point,self.convex_hull)
-                        row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,
-                                                      r0Pos[0] + S1b.item(0),
-                                                    r0Pos[1] + S1b.item(1),
-                                                    r0Pos[2] + S1b.item(2),
-                                                    T_0b.item(0),
-                                                    tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
-                        SolutionB = SolutionB.append(row)
-                        del row
-                        #print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                        #print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
-                    else:
-                        #print ("No solution B found time step %s"%(j))
-                        row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                        SolutionA = SolutionA.append(row)
-                except:
-                    #print ("Singular matrix encountered, no solution at transmission %s"%(j))
-                    row = pd.DataFrame(np.array([[j,ref,r1,r2,r3,'','','','','','singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
-                    SolutionA = SolutionA.append(row)
+                if print_output == True:
+                    print (len(tDat))
 
+                '''
+                If there are more than 4 receivers, there is more than 1 solution - 
+                The overall solution is the centroid of all possible solutions.
+                
+                Produce a dataframe for each combination (t,X,Y,Z),
+                then group by transmission number and calculate mean:
+                    Cx, Cy, Cz as our final XYZ
+                '''
+                tDat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
+                tDat['rank'] = tDat.seconds_fix.rank()
+                tDat.set_index('Rec_ID', drop = False, inplace = True)
+                tested = []
+                
+                for combo in list(combinations(tDat.Rec_ID.values,4)):
+                    
+                    ''' we need to test if this combination has already been tested.
+                    create a sub dataframe from combination, sort by seconds,and convert 
+                    to tuple.  If this tuple doesn't already exist in the list of 
+                    tested combinations - calculate a position'''
+                    
+                    row1 = tDat[(tDat.Rec_ID == combo[0])]
+                    row2 = tDat[(tDat.Rec_ID == combo[1])]
+                    row3 = tDat[(tDat.Rec_ID == combo[2])]
+                    row4 = tDat[(tDat.Rec_ID == combo[3])]
+                    
+                    sub_dat = pd.concat([row1,row2,row3,row4])
+                    sub_dat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
+                    recs = tuple(sub_dat.Rec_ID.values)
+                    sol_no = 0
+                    
+                    if recs not in tested:
+                        
+                        # find the reference receiver - aka one with first recapture - time difference of arrival and all 
+                        
+                        ref = sub_dat.iloc[0].Rec_ID                                      # our reference time is the first time of arrival
+                        r1 = sub_dat.iloc[1].Rec_ID
+                        r2 = sub_dat.iloc[2].Rec_ID
+                        r3 = sub_dat.iloc[3].Rec_ID                                       # we only need 4 for Deng's exact solution, this will do
+                        t_ref = sub_dat.seconds_fix.iloc[0]                                 # time of arrival 1
+                        t1 = sub_dat.seconds_fix.iloc[1]
+                        t2 = sub_dat.seconds_fix.iloc[2]
+                        t3 = sub_dat.seconds_fix.iloc[3]                               # time of arrival 4
+                        # get positional data of receivers
+                        def z_at_t(t,Rec_ID):
+                            elev_ref = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Ref_Elev.values[0]
+                            if elev_ref == 'BM':
+                                return self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
+                            else:
+                                Zt = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
+                                #t_Z = self.benchmark_elev - Zt
+                                return Zt
+                                
+                        r0Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == ref].X_t.values[0],
+                                    self.ephemeris[self.ephemeris.Rec_ID == ref].Y_t.values[0],
+                                    z_at_t(t_ref,ref)]) #(X,Y,Z of reciever 0)
+                        if print_output == True:
+                            print ("The position of receiver %s is %s"%(ref,r0Pos))
+                        self.z_translation = r0Pos[2]
+                        r1Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r1].X_t.values[0],
+                                    self.ephemeris[self.ephemeris.Rec_ID == r1].Y_t.values[0],
+                                    z_at_t(t1,r1)]) #(X,Y,Z of reciever 1)
+                        if print_output == True:
+                            print ("The position of receiver %s is %s"%(r1,r1Pos))      
+                        r2Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r2].X_t.values[0],
+                                    self.ephemeris[self.ephemeris.Rec_ID == r2].Y_t.values[0],
+                                    z_at_t(t2,r2)]) #(X,Y,Z of reciever 2)
+                        if print_output == True:
+                            print ("The position of receiver %s is %s"%(r2,r2Pos))                            
+                        r3Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r3].X_t.values[0],
+                                    self.ephemeris[self.ephemeris.Rec_ID == r3].Y_t.values[0],
+                                    z_at_t(t3,r3)]) #(X,Y,Z of reciever 3)         
+                        if print_output == True:
+                            print ("The position of receiver %s is %s"%(r3,r3Pos))
+                                                  
+                        # create matrices, equation 3a Deng 2011
+                        #R = np.matrix(np.vstack(((r1Pos - r0Pos),(r2Pos - r0Pos),(r3Pos - r0Pos))))
+                        R = np.matrix(np.array([[r1Pos[0]-r0Pos[0],r2Pos[0]-r0Pos[0],r3Pos[0]-r0Pos[0]],[r1Pos[1]-r0Pos[1],r2Pos[1]-r0Pos[1],r3Pos[1]-r0Pos[1]],[r1Pos[2]-r0Pos[2],r2Pos[2]-r0Pos[2],r3Pos[2]-r0Pos[2]]]))
+                        if print_output == True:
+                            print ("Posisition Matrix R \n %s"%(R))
+                        # vertical matrix of time of arrival differences (TOADs) between receiver i and reference receiver #1
+                        tdoa_1 = np.round(t1 - t_ref,6)                                    # difference in time of arrival between current receiver and reference receiver
+                        tdoa_2 = np.round(t2 - t_ref,6)
+                        tdoa_3 = np.round(t3 - t_ref,6)              
+                        t = np.matrix(np.vstack((tdoa_1,tdoa_2,tdoa_3)))               # column matrix of tdoa's                                                     
+                        if print_output == True:
+                            print ("Print T matrix \n %s"%(t))           
+                        # calculate speed of sound 
+                        avg_C = self.interpolator(t_ref)
+                        if print_output == True:
+                            print ("Current temperature = %s" %(avg_C))
+                        SoS = sos(avg_C)                                               # calculate the speed of sound at the current temperature
+                        if print_output == True:
+                            print  ("Current Speed of Sound = %s"%(SoS))
+                        
+                        # vertical matrix of b, equation 3a Deng 2011
+                        b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
+                        b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2) 
+                        b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)  
+                        b = np.matrix(np.vstack((b1,b2,b3)))
+                        if print_output == True:
+                            print ("B matrix \n %s"%(b))
+                        
+                        # solve for T_0 equations 5 and 5a Deng 2011
+                        try:
+                            a = SoS**4 * t.T * R.I * R.T.I * t - SoS**2    
+                            p = -0.5 * SoS**2 * t.T * R.I * R.T.I * b 
+                            q = 0.25 * b.T * R.I * R.T.I * b
+                            if print_output == True:
+                                print ('a = %s, p = %s, q = %s'%(a,p,q))
+                            # Solve for ToA
+                            T_0a = (-p + np.sqrt(p**2 - a*q))/a
+                            T_0b = (-p - np.sqrt(p**2 - a*q))/a
+                            if print_output == True:
+                                print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
+                            # solve for S = positon of source with equation 4 from Deng 2011
+                            if np.sign(T_0a) > 0:
+                                S1a = R.I.T * (0.5 * b - SoS**2 * t * T_0a)
+                                point = np.array([r0Pos[0] + S1a.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
+                                in_hull = point_in_hull(point,self.convex_hull)
+                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
+                                                              r0Pos[0] + S1a.item(0),
+                                                            r0Pos[1] + S1a.item(1),
+                                                            r0Pos[2] + S1a.item(2),
+                                                            T_0a.item(0),
+                                                            tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
+                                SolutionA = SolutionA.append(row)
+                                del row  
+                                if print_output == True:
+                                    print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                    print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
+                                
+                            else:
+                                if print_output == True:
+                                    print ("No solution A found time step %s"%(j))
+                                row = pd.DataFrame(np.array([[j,sol_no, ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
+                                SolutionA = SolutionA.append(row)
+                                
+                            if np.sign(T_0b) > 0:
+                                S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
+                                point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
+                                in_hull = point_in_hull(point,self.convex_hull)
+                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
+                                                              r0Pos[0] + S1b.item(0),
+                                                            r0Pos[1] + S1b.item(1),
+                                                            r0Pos[2] + S1b.item(2),
+                                                            T_0b.item(0),
+                                                            tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
+                                SolutionB = SolutionB.append(row)
+                                del row
+                                if print_output == True:
+                                    print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                    print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
+                            else:
+                                if print_output == True:
+                                    print ("No solution B found time step %s"%(j))
+                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
+                                SolutionA = SolutionA.append(row)
+
+                        except:
+                            if print_output == True:
+                                fuck
+                                print ("Singular matrix encountered, no solution at transmission %s"%(j))
+                            row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
+                            SolutionA = SolutionA.append(row)
+
+                        #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
+                        # increase solution counter for this timestep by 1
+                        sol_no = sol_no + 1
+                        # append combination to tested list    
+                        tested.append(recs)
+
+                        
             else:
-                #print ("Not enough receivers for a solution at time step %s"%(j))
-                row = pd.DataFrame(np.array([[j,'','','','','','','','','','not enough receivers for solution','']]), columns = Solution_Cols)
+                if print_output == True:
+                    print ("Not enough receivers for a solution at time step %s"%(j))
+                row = pd.DataFrame(np.array([[j,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,'not enough receivers for solution','']]), columns = Solution_Cols)
                 SolutionA = SolutionA.append(row)
                 SolutionB = SolutionB.append(row)                
             
@@ -1474,7 +1338,16 @@ class position():
             pos2 = np.asarray(row['nextPos'])
             return np.linalg.norm(pos1-pos2)
         
-
+        SolutionA['transNo'] = pd.to_numeric(SolutionA['transNo'])
+        SolutionA['X'] = pd.to_numeric(SolutionA['X'])
+        SolutionA['Y'] = pd.to_numeric(SolutionA['Y'])
+        SolutionA['Z'] = pd.to_numeric(SolutionA['Z'])
+        SolutionA['ToA'] = pd.to_numeric(SolutionA['ToA'])
+        SolutionB['transNo'] = pd.to_numeric(SolutionB['transNo'])
+        SolutionB['X'] = pd.to_numeric(SolutionB['X'])
+        SolutionB['Y'] = pd.to_numeric(SolutionB['Y'])
+        SolutionB['Z'] = pd.to_numeric(SolutionB['Z'])
+        SolutionB['ToA'] = pd.to_numeric(SolutionB['ToA'])
 
         self.DengSolutionA_unfiltered = SolutionA
         self.DengSolutionB_unfiltered = SolutionB 
@@ -1483,106 +1356,123 @@ class position():
         SolutionB.to_csv(os.path.join(self.outputWS,"%s_solutionB.csv"%(self.tag)))
 #            SolutionA3.to_csv(os.path.join(outputWS,'Production','Files',"%s_solutionA_filtered.csv"%(i)))
 #            SolutionB3.to_csv(os.path.join(outputWS,'Production','Files',"%s_solutionB_filtered.csv"%(i)))
-    def trajectory_plot_Deng(self, hull_filter = False,rolling_avg_window = None, kalman_filter = False):
+    def trajectory_plot_Deng(self, hull_filter = False, beacon = False):
 
         def distB(row):
             pos1 = np.asarray(row['pos'])
             pos2 = np.asarray(row['prevPos'])
             return np.linalg.norm(pos1-pos2)
         # get solution A
-        solA = self.DengSolutionA_unfiltered[self.DengSolutionA_unfiltered.comment == 'solution found']
-        solA['X'] = solA.X.astype(np.float32)
-        solA['Y'] = solA.Y.astype(np.float32)
-        solA['Z'] = solA.Z.astype(np.float32)
-        solA['ToA'] = solA.ToA.astype(np.float32)        
-
-        solA = solA[(solA.X > -50) & (solA.X < 50)]
-        solA = solA[(solA.Y > -50) & (solA.Y < 50)] 
-
-        
+        solA = self.DengSolutionA_unfiltered[self.DengSolutionA_unfiltered.comment == 'solution found']         
+       
         # get solution B
-        solB = self.DengSolutionB_unfiltered[self.DengSolutionB_unfiltered.comment == 'solution found']
-        solB['X'] = solB.X.astype(np.float32)
-        solB['Y'] = solB.Y.astype(np.float32)
-        solB['Z'] = solB.Z.astype(np.float32)
-        solB['ToA'] = solB.ToA.astype(np.float32)                   
-
-        solB = solB[(solB.X > -50) & (solB.X < 50)]
-        solB = solB[(solB.Y > -50) & (solB.Y < 50)] 
+        solB = self.DengSolutionB_unfiltered[self.DengSolutionB_unfiltered.comment == 'solution found']                 
 
         if hull_filter == True:
             solA = solA[solA.in_hull == True]
             solB = solB[solB.in_hull == True]
         
-        if rolling_avg_window != None:
-            solA['Xbar']= solA.X.rolling(window = rolling_avg_window).mean()
-            solA['Ybar']= solA.Y.rolling(window = rolling_avg_window).mean()
-            solA['Zbar']= solA.Z.rolling(window = rolling_avg_window).mean()
-            solB['Xbar']= solB.X.rolling(window = rolling_avg_window).mean()
-            solB['Ybar']= solB.Y.rolling(window = rolling_avg_window).mean()
-            solB['Zbar']= solB.Z.rolling(window = rolling_avg_window).mean()
-            
-        if kalman_filter == True:
-            # if Kalman filter is true, apply a filter to the points
-            def kf_predict(X, P, A, Q, B, U):
-                X = np.dot(A, X) + np.dot(B, U)
-                P = np.dot(A, np.dot(P, A.T)) + Q
-                return (X + P)
-            
-            def kf_update(X, P, Y, H, R):
-                IM = np.dot(H, X)
-                IS = R + np.dot(H, np.dot(P, H.T))
-                K = np.dot(P, np.dot(H.T, np.linalg.inv(IS)))
-                X = X + np.dot(K, (Y - IM))
-                P = P - np.dot(K, np.dot(IS, K.T))
-                LH = gauss_pdf(Y, IM, IS)
-                return (X, P, K, IM, IS, LH)
-            
-            def gauss_pdf(X, M, S):
-                if M.shape()[1] == 1:
-                    DX = X - np.tile(M, X.shape()[1])
-                    E = 0.5 * np.sum(DX * (np.dot(np.linalg.inv(S), DX)), axis=0)
-                    E = E + 0.5 * M.shape()[0] * np.log(2 * np.pi) + 0.5 * np.log(np.det(S))
-                    P = np.exp(-E)
-                elif X.shape()[1] == 1:
-                    DX = np.tile(X, M.shape()[1])- M
-                    E = 0.5 * sum(DX * (np.dot(np.linalg.inv(S), DX)), axis=0)
-                    E = E + 0.5 * M.shape()[0] * np.log(2 * np.pi) + 0.5 * np.log(np.det(S))
-                    P = np.exp(-E)
-                else:
-                    DX = X-M
-                    E = 0.5 * np.dot(DX.T, np.dot(np.linalg.inv(S), DX))
-                    E = E + 0.5 * M.shape()[0] * np.log(2 * np.pi) + 0.5 * np.log(np.det(S))
-                    P = np.exp(-E)
-                return (P[0],E[0]) 
-                
+        # get centroids of positions by transmission number for plotting
+        solA_Cx = solA.groupby(['transNo'])['X'].mean()
+        solA_Cy = solA.groupby(['transNo'])['Y'].mean()
+        solA_Cz = solA.groupby(['transNo'])['Z'].mean()
+        solB_Cx = solB.groupby(['transNo'])['X'].mean()
+        solB_Cy = solB.groupby(['transNo'])['Y'].mean()
+        solB_Cz = solB.groupby(['transNo'])['Z'].mean()
 
-                                                           
-        fig = plt.figure()
+        # make a figure
+        fig = plt.figure(figsize = (4,4))
         ax = fig.add_subplot(111,projection = '3d')
         ax.scatter(self.ephemeris.X_t.values,self.ephemeris.Y_t.values,self.ephemeris.Z_t.values, c = 'k')
         if len(solB) > 0:
-            if rolling_avg_window == None:
-                ax.plot(solB.X.values,solB.Y.values,solB.Z.values, c = 'dimgray')    # true data
-                #ax.plot(solA.X.values,solA.Y.values,solA.Z.values, c = 'cyan')    # true data
-
-                #ax.scatter(solB.X.values[0],solB.Y.values[0],solB.Z.values[0],c = 'green')#, s = 12)
-                #ax.scatter(solB.X.values[-1],solB.Y.values[-1],solB.Z.values[-1],c = 'red')# ,s = 12)
-            else:
-                ax.plot(solB.Xbar.values,solB.Ybar.values,solB.Zbar.values, c = 'dimgray')    # true data
-                #ax.plot(solA.Xbar.values,solA.Ybar.values,solA.Zbar.values, c = 'cyan')    # true data
-
-                #ax.scatter(solB.Xbar.values[0],solB.Ybar.values[0],solB.Zbar.values[0],c = 'green')#, s = 12)
-                #ax.scatter(solB.Xbar.values[-1],solB.Ybar.values[-1],solB.Zbar.values[-1],c = 'red')# ,s = 12)
-                                
-
+            if beacon == True:
+                ax.scatter(solA_Cx, solA_Cy, solA_Cz, c = 'green')
+                ax.scatter(solB_Cx, solB_Cy, solB_Cz, c = 'cyan')    # true data
+            else:    
+                #ax.plot(solA_Cx, solA_Cy, solA_Cz, c = 'dimgray')    # true data
+                ax.plot(solB_Cx, solB_Cy, solB_Cz, c = 'dimgray')    # true data
+                
         ax.set_xlim(-50,50)
         ax.set_ylim(-50,50)
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
                 
-        plt.show()        
+        plt.show()    
+        
+        if beacon == True:
+
+            # # A solutions
+            Xa = solA_Cx.X.mean()
+            Ya = solA_Cy.Y.mean()
+            Za = solA_Cz.Z.mean()
+    
+            # B solutions
+            Xb = solB_Cx.X.mean()
+            Yb = solB_Cy.Y.mean()
+            Zb = solB_Cz.Z.mean()
+    
+            # print
+            print ("A solution of %s at %s,%s,%s"%(self.tag,np.round(Xa,2),np.round(Ya,2),np.round(Za,2)))
+            print ("B solution of %s at %s,%s,%s"%(self.tag,np.round(Xb,2),np.round(Yb,2),np.round(Zb,2)))
+    
+            # # make lattice plot for pubs
+            figSize = (8,6)
+            plt.figure()
+            fig, axs = plt.subplots(2,3,tight_layout = True,figsize = figSize)
+            
+            # histogram of positions
+            axs[0,0].hist(solA_Cx,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[0,0].set_xlabel('X')
+            axs[0,0].set_title('A Solution X')
+            
+            axs[0,1].hist(solA_Cy,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[0,1].set_xlabel('Y')
+            axs[0,1].set_title('A Solution Y')  
+            
+            axs[0,2].hist(solA_Cz,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[0,2].set_xlabel('Z')
+            axs[0,2].set_title('A Solution Z')
+            
+            axs[1,0].hist(solB_Cx,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[1,0].set_xlabel('X')
+            axs[1,0].set_title('B Solution X')
+            
+            axs[1,1].hist(solB_Cy,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[1,1].set_xlabel('Y')
+            axs[1,1].set_title('B Solution Y')  
+            
+            axs[1,2].hist(solB_Cz,
+                          density = True,
+                          color = 'grey',
+                          edgecolor='black',
+                          linewidth=0.1)
+            axs[1,2].set_xlabel('Z')
+            axs[1,2].set_title('B Solution Z') 
+            
+            plt.show()
+
+
        
 def positions_data_management(pos_type,inputWS,projectDB):
     # As soon as I figure out how to do this function is moot.

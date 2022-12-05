@@ -17,9 +17,10 @@ warnings.filterwarnings('ignore')
 import time
 
 ts = time.time()
-outputWS = r"J:\3870\013\Calcs\Paper\Output"
-inputWS = r"J:\3870\013\Calcs\Paper\Data"
-dbName = 'cowlitz_2018_paper.db'
+outputWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output\Scratch"
+figureWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output\Figures"
+inputWS = r"C:\Users\knebiolo\Desktop\jsats with DBSCAN\Output"
+dbName = 'cowlitz_test.db'
 dbDir = os.path.join(inputWS,dbName)
 #dbDir = r"C:\Users\Kevin Nebiolo\Desktop\cowlitz_tagDrag.db"
 print ("Starting Beacon Tag Transmission Enumeration")
@@ -39,6 +40,8 @@ print ("Creating multipath data object for metronome data")
 metronome_multipath = jsats3d.multipath_data_object(metronome,dbDir,outputWS,metronome = True) 
 print ("Multipath filter metronome multipath data object")
 jsats3d.multipath_2(metronome_multipath)
+jsats3d.multipath_classifier(metronome,dbDir,outputWS,beacon = True, metronome = True, method = 'KNN')
+jsats3d.multipath_data_management(outputWS,dbDir,beacon_multipath = True)         # add data to database
 
 
 print ("All tags processed, proceed to clock fixing")
