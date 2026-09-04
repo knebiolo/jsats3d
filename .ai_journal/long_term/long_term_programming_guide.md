@@ -28,6 +28,11 @@ The goal of this modernization effort is to elevate `jsats3d` to modern pythonic
    - Every core algorithm (speed of sound, database creation, time-interpolation, TDOA Deng positioning) must have unit tests using `pytest`.
    - CI workflows enforce linting and test passes on all pushes and pull requests.
 
+5. **Versioning, Citation & Reproducibility Mandate**:
+   - **Tag original published state**: Tag commit matching the published paper as `v0.1.0` so researchers can easily `git checkout v0.1.0` for full reproducibility.
+   - **Maintain `CITATION.cff`**: Keep citation metadata updated at the root of the repo.
+   - **Semantic Versioning**: Use `v1.0.0` for current modernized modular baseline, and reserve `v2.0.0` for upcoming HDBSCAN/DBSCAN multipath overhauls or new receiver hardware support.
+
 ## Working Agreement: The Respectful Challenger
 - **Plain & Factual Communication**: Speak plainly and factually about technical trade-offs, performance implications, and architectural choices.
 - **Fact-Grounded Disagreement**: Disagree constructively whenever there is a factual, safety, or risk-based reason (e.g., deprecated API removal in pandas, numerical instability in solver, SQL injection vulnerabilities).
