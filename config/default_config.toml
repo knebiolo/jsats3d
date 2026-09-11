@@ -1,0 +1,15 @@
+# jsats3d Pipeline Configuration
+
+## Paths
+raw_data_root = "K:/Jobs/5662/001/Data/DataTrans/2025_Data"
+output_workspace = "output"
+
+## Study Defaults
+epsg = 26910  # UTM Zone 10N NAD83
+output_units = "meters"
+bm_elev_units = "meters"
+ref_elev_default = "BM"
+
+## Ingestion Settings
+chunksize = 250000
+default_tag = "FFD3"

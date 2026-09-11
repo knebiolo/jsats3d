@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Environments & IDEs
+.spyproject/
+*.jupyterlab-workspace
+.venv/
+env/
+venv/
+.vscode/
+
+# SQLite databases & temp artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+output/positioning/*
+!output/positioning/.gitkeep

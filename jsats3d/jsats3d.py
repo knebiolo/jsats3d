@@ -112,7 +112,8 @@ def temp_interpolator(projectDB,interp_type):
     c.close() 
     temp['timeStamp'] = pd.to_datetime(temp.timeStamp)
     temp.sort_values('timeStamp', inplace = True)
-    seconds = pd.DatetimeIndex(temp.timeStamp).astype(np.int64)/1.0e9
+    time_values = temp.timeStamp.astype("datetime64[ns]").astype(np.int64)
+    seconds = time_values.astype(np.float64)/1.0e9
     temp['seconds'] = seconds.values
     temp.drop_duplicates('seconds',keep = 'first',inplace = True)
     temp.set_index('seconds',inplace = True,drop = False)
