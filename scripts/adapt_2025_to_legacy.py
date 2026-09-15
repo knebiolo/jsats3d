@@ -31,6 +31,17 @@ def parse_args():
     parser.add_argument("--output-db", default=default_output)
     parser.add_argument("--chunksize", type=int, default=250_000)
     parser.add_argument("--tag", help="Only stage one tag code")
+    parser.add_argument(
+        "--beacon-window",
+        nargs=2,
+        metavar=("START", "END"),
+        help="Stage configured local beacon detections in this datetime window",
+    )
+    parser.add_argument(
+        "--drop-incomplete-receivers",
+        action="store_true",
+        help="Exclude receivers missing beacon Tag_ID or complete X/Y/Z geometry",
+    )
     parser.add_argument("--config-xlsx", default=os.path.join(root, "CowlitzAT2025_Data_Deliverables", "1_array_metadata", "cowlitz_2025_AT_config.xlsx"))
     parser.add_argument("--covariate-csv", default=os.path.join(root, "Master Covariate Table", "2025 Master Covariate Table_20251212.csv"))
     parser.add_argument(
@@ -46,6 +57,7 @@ def load_receiver_table(gps_path, config_path):
     gps = gps.dropna(subset=["receiverName", "easting", "northing"])
     gps = gps.groupby("receiverName", as_index=False)[["easting", "northing"]].median()
     config = pd.read_excel(config_path)
+    config.columns = config.columns.astype(str).str.strip()
     config = config.rename(columns={
         "Receiver Name": "Rec_ID",
         "Beacon Tag Code": "BeaconTag_ID",
@@ -81,6 +93,49 @@ def load_receiver_table(gps_path, config_path):
     return receivers
 
 
+def load_beacon_registry(config_path):
+    config = pd.read_excel(config_path)
+    config.columns = config.columns.astype(str).str.strip()
+    config = config.rename(columns={
+        "Receiver Name": "Rec_ID",
+        "Beacon Tag Code": "Tag_ID",
+        "Beacon Tag Period (sec)": "pulseRate",
+    })
+    registry = config[["Rec_ID", "Tag_ID", "pulseRate"]].copy()
+    registry["Rec_ID"] = registry["Rec_ID"].astype("string").str.strip()
+    registry["Tag_ID"] = registry["Tag_ID"].astype("string").str.strip()
+    registry["pulseRate"] = pd.to_numeric(registry["pulseRate"], errors="coerce")
+    registry = registry.dropna(subset=["Rec_ID", "Tag_ID"])
+    return registry.drop_duplicates("Tag_ID")
+
+
+def parse_beacon_window(beacon_window):
+    if beacon_window is None:
+        return None
+    start, end = pd.to_datetime(beacon_window, errors="raise")
+    if end < start:
+        raise ValueError("Beacon window END precedes START")
+    return start, end
+
+
+def drop_incomplete_receivers(receiver_table):
+    required = ("Tag_ID", "X", "Y", "Z")
+    incomplete = receiver_table[receiver_table[list(required)].isna().any(axis=1)].copy()
+    dropped_rows = []
+    for row in incomplete.itertuples(index=False):
+        missing = [field for field in required if pd.isna(getattr(row, field))]
+        dropped_rows.append({"Rec_ID": row.Rec_ID, "reason": "missing " + ", ".join(missing)})
+    kept = receiver_table.dropna(subset=list(required)).copy()
+    return kept, pd.DataFrame(dropped_rows, columns=["Rec_ID", "reason"])
+
+
+def apply_tag_pulse_rates(tags, beacon_registry, ffd3_rate=3.33):
+    result = tags.merge(beacon_registry[["Tag_ID", "pulseRate"]], on="Tag_ID", how="left")
+    result["pulseRate"] = pd.to_numeric(result["pulseRate"], errors="coerce")
+    result.loc[result["Tag_ID"] == "FFD3", "pulseRate"] = ffd3_rate
+    return result
+
+
 def load_environment(covariate_path):
     columns = ["DateTime", "BB_TPU_Surface_t", "FBS_Surface_t", "NSC.CZD_WTR_EL.F_CV"]
     covariates = pd.read_csv(covariate_path, usecols=columns)
@@ -93,13 +148,19 @@ def load_environment(covariate_path):
     return temperature, wsel
 
 
-def normalize_detection(chunk, tag_type, tag_filter=None):
+def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, beacon_tags=None):
     missing = set(DETECTION_COLUMNS) - set(chunk.columns)
     if missing:
         raise ValueError("Missing detection columns: %s" % sorted(missing))
     result = chunk.rename(columns=DETECTION_COLUMNS).copy()
     if tag_filter is not None:
         result = result[result["Tag_ID"].astype(str).str.strip() == tag_filter]
+    if beacon_tags is not None:
+        result = result[result["Tag_ID"].astype(str).str.strip().isin(beacon_tags)]
+    if beacon_window is not None:
+        start, end = beacon_window
+        parsed = pd.to_datetime(result["timeStamp"], errors="coerce")
+        result = result[(parsed >= start) & (parsed <= end)]
     if result.empty:
         return pd.DataFrame(columns=[
             "timeStamp", "seconds", "Tag_ID", "Rec_ID", "FreqOff", "Amplitude",
@@ -107,7 +168,7 @@ def normalize_detection(chunk, tag_type, tag_filter=None):
         ])
     result["timeStamp"] = pd.to_datetime(result["timeStamp"], errors="coerce")
     result = result.dropna(subset=["timeStamp", "Tag_ID", "Rec_ID"])
-    result["seconds"] = result["timeStamp"].astype("int64") / 1e9
+    result["seconds"] = result["timeStamp"].astype("datetime64[ns]").astype("int64") / 1e9
     result["Tag_ID"] = result["Tag_ID"].astype(str).str.strip()
     result["Rec_ID"] = result["Rec_ID"].astype(str).str.strip()
     result["Amplitude"] = pd.to_numeric(result["Amplitude"], errors="coerce")
@@ -124,7 +185,15 @@ def normalize_detection(chunk, tag_type, tag_filter=None):
     ]]
 
 
-def write_detection_tables(connection, detection_dir, chunksize, tag_filter=None, filenames=None):
+def write_detection_tables(
+    connection,
+    detection_dir,
+    chunksize,
+    tag_filter=None,
+    filenames=None,
+    beacon_window=None,
+    beacon_tags=None,
+):
     tag_types = {
         "master_df_test.csv": "study",
         "master_df_study.csv": "study",
@@ -142,7 +211,16 @@ def write_detection_tables(connection, detection_dir, chunksize, tag_filter=None
             continue
         first_chunk = True
         for chunk in pd.read_csv(path, chunksize=chunksize):
-            normalized = normalize_detection(chunk, tag_type, tag_filter)
+            file_tag_filter = None if filename == "master_df_beacon.csv" else tag_filter
+            file_beacon_tags = beacon_tags if filename == "master_df_beacon.csv" else None
+            file_beacon_window = beacon_window if filename == "master_df_beacon.csv" else None
+            normalized = normalize_detection(
+                chunk,
+                tag_type,
+                file_tag_filter,
+                file_beacon_window,
+                file_beacon_tags,
+            )
             if normalized.empty:
                 continue
             normalized.to_sql(
@@ -161,6 +239,11 @@ def write_detection_tables(connection, detection_dir, chunksize, tag_filter=None
 
 def main():
     args = parse_args()
+    beacon_window = parse_beacon_window(args.beacon_window)
+    beacon_registry = load_beacon_registry(args.config_xlsx)
+    local_beacons = set(beacon_registry["Tag_ID"])
+    if beacon_window is not None and "master_df_beacon.csv" not in args.files:
+        args.files = list(args.files) + ["master_df_beacon.csv"]
     gps_path = os.path.join(
         os.path.dirname(args.detection_dir), "4_gps_datasets", "master_df_gps.csv"
     )
@@ -170,14 +253,23 @@ def main():
     connection = sqlite3.connect(args.output_db)
     try:
         tags, detected_receivers, row_count = write_detection_tables(
-            connection, args.detection_dir, args.chunksize, args.tag, args.files
+            connection,
+            args.detection_dir,
+            args.chunksize,
+            args.tag,
+            args.files,
+            beacon_window,
+            local_beacons if beacon_window is not None else None,
         )
         receiver_table = load_receiver_table(gps_path, args.config_xlsx)
         receiver_table = receiver_table[receiver_table.Rec_ID.isin(detected_receivers)]
+        dropped_receivers = pd.DataFrame(columns=["Rec_ID", "reason"])
+        if args.drop_incomplete_receivers:
+            receiver_table, dropped_receivers = drop_incomplete_receivers(receiver_table)
         receiver_table.to_sql("tblReceiver", connection, if_exists="replace", index=False)
 
         tags = tags.rename(columns={"TagTypeSource": "TagType"})
-        tags["pulseRate"] = np.nan
+        tags = apply_tag_pulse_rates(tags, beacon_registry)
         tags.to_sql("tblTag", connection, if_exists="replace", index=False)
 
         temperature, wsel = load_environment(args.covariate_csv)
@@ -186,7 +278,7 @@ def main():
         study_parameters = pd.DataFrame([{
             "UTC_Conv": np.nan,
             "BM_Elev": np.nan,
-            "BM_Elev_Units": "unknown",
+            "BM_Elev_Units": "feet",
             "Output_Units": "meters",
             "masterReceiver": None,
             "synch_time_start": None,
@@ -202,7 +294,10 @@ def main():
     print("Tags: %s" % len(tags))
     print("Receivers with GPS: %s" % len(receiver_table))
     print("Tag filter: %s" % (args.tag or "all tags"))
-    print("Warnings: pulseRate and receiver signal fields remain unavailable")
+    print("Dropped receivers: %s" % len(dropped_receivers))
+    if not dropped_receivers.empty:
+        print(dropped_receivers.to_string(index=False))
+    print("Warnings: UTC_Conv, BM_Elev, masterReceiver, sync window, and unavailable signal fields remain unresolved")
 
 
 if __name__ == "__main__":

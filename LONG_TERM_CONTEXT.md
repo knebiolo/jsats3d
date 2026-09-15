@@ -64,6 +64,10 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | 2026-09-13 | Use DBSCAN for new ATS multipath filtering | New data lacks legacy classifier features |
 | 2026-09-13 | Work only on feature branch | Protect `main` and existing legacy projects |
 | 2026-09-14 | Treat FFD3 pulse rate as approximately 3 seconds pending static-hold measurement | PM provided approximate rate; exact rate requires code-based measurement from static holds |
+| 2026-09-15 | Use 3.33 seconds as provisional FFD3 pulse rate in staging only | Measured static-hold median; pending PM confirmation and not a final study-wide parameter |
+| 2026-09-15 | Store WSEL in source feet with `BM_Elev_Units=feet` | Legacy runtime converts WSEL when output units are meters |
+| 2026-09-15 | Stage local beacon rows through an explicit bounded datetime window | Avoid loading all beacon detections and prevent unbounded epoch assumptions |
+| 2026-09-15 | Drop incomplete receivers only when explicitly requested | Preserve raw metadata by default and report each dropped receiver/reason |
 
 ## Established Methods
 - Stage single tags or chunked detections into SQLite containing `tblTag`, `tblReceiver`, `tblDetectionRaw`, `tblInterpolatedTemp`, `tblWSEL`, `tblStudyParameters`.
@@ -87,6 +91,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - `FFD3` pulse rate is approximately 3 seconds; exact interval remains pending measurement from static holds.
 - CHN receivers lack GPS / static coordinates in config.
 - Synchronization parameters remain provisional pending PM guidance on the new synchronization approach.
+- FFD3 staging now includes bounded local-beacon rows, but master receiver and synchronization parameters remain unresolved.
 - No approved permanent regression dataset selected yet.
 
 ## Completed Milestones

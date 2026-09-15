@@ -11,6 +11,12 @@ from jsats3d.multipath_interface import (
     require_features,
 )
 from scripts.measure_tag_intervals import measure_intervals
+from scripts.adapt_2025_to_legacy import (
+    apply_tag_pulse_rates,
+    drop_incomplete_receivers,
+    normalize_detection,
+    parse_beacon_window,
+)
 from jsats3d.sync_readiness import assess_sync_readiness
 
 
@@ -155,6 +161,39 @@ class Test2025Contracts(unittest.TestCase):
         epochs = pd.DataFrame({"Tag_ID": ["B1"] * 4, "Rec_ID": ["R01", "R02", "R03", "R04"], "seconds": [100.0] * 4, "transNo": [1] * 4})
         result = assess_sync_readiness(detections, receivers, temperature, epochs)
         self.assertTrue(result.ready)
+
+    def test_adapter_sets_provisional_ffd3_rate_and_registry_rates(self):
+        tags = pd.DataFrame({"Tag_ID": ["FFD3", "B1"], "TagTypeSource": ["study", "beacon"]})
+        registry = pd.DataFrame({"Tag_ID": ["B1"], "pulseRate": [60.0]})
+        result = apply_tag_pulse_rates(tags, registry)
+        self.assertEqual(result.set_index("Tag_ID").loc["FFD3", "pulseRate"], 3.33)
+        self.assertEqual(result.set_index("Tag_ID").loc["B1", "pulseRate"], 60.0)
+
+    def test_adapter_beacon_window_selects_only_requested_tags_and_time(self):
+        chunk = pd.DataFrame({
+            "dateTime": ["2025-06-05 00:00:00", "2025-06-05 00:00:02", "2025-06-05 00:00:04"],
+            "tagCode": ["B1", "B2", "B1"], "amp": [1, 2, 3],
+            "receiverName": ["R1", "R1", "R1"], "event": [True, True, True],
+        })
+        result = normalize_detection(
+            chunk,
+            "beacon",
+            beacon_window=parse_beacon_window(["2025-06-05 00:00:01", "2025-06-05 00:00:03"]),
+            beacon_tags={"B2"},
+        )
+        self.assertEqual(result.Tag_ID.tolist(), ["B2"])
+
+    def test_adapter_drops_incomplete_receivers_with_reasons(self):
+        receivers = pd.DataFrame({
+            "Rec_ID": ["R1", "R2"], "Tag_ID": ["B1", None],
+            "X": [1.0, 2.0], "Y": [1.0, 2.0], "Z": [1.0, None],
+            "X_t": [1.0, 2.0], "Y_t": [1.0, 2.0], "Z_t": [1.0, None],
+            "Ref_Elev": ["BM", "BM"],
+        })
+        kept, dropped = drop_incomplete_receivers(receivers)
+        self.assertEqual(kept.Rec_ID.tolist(), ["R1"])
+        self.assertEqual(dropped.Rec_ID.tolist(), ["R2"])
+        self.assertIn("Tag_ID", dropped.reason.iloc[0])
 
 
 if __name__ == "__main__":

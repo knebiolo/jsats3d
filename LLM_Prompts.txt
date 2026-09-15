@@ -92,36 +92,46 @@ Cite the legacy line number that reads the value.
 Audit table:
 | # | Item | Result | Line | Note |
 |---|------|--------|------|------|
-| 1 | pulseRate | | | |
-| 2 | receiver Tag_ID | | | |
-| 3 | receiver XYZ | | | |
-| 4 | masterReceiver | | | |
-| 5 | BM_Elev | | | |
-| 6 | UTC_Conv | | | |
-| 7 | BM_Elev_Units | | | |
-| 8 | temp coverage | | | |
-| 9 | WSEL coverage | | | |
-| 10 | beacon rows staged | | | |
-| 11 | receiver beacons in tblTag | | | |
-| 12 | SNR null / 2025 path | | | |
+| 1 | pulseRate | PASS | 209, 295, 750, 1128 | 32/32 rows populated; FFD3 set to provisional 3.33 seconds from static-hold median. |
+| 2 | receiver Tag_ID | PASS | 213 | 0 NULL after `--drop-incomplete-receivers`; 9 receivers dropped with reasons. |
+| 3 | receiver XYZ | PASS | 1107 | 24 staged receivers have complete X/Y/Z/X_t/Y_t/Z_t. |
+| 4 | masterReceiver | BLOCKED | 762 | NULL. Owner must identify synchronization reference under new approach. |
+| 5 | BM_Elev | BLOCKED | 779, 1116 | NULL. Owner must provide benchmark elevation and vertical datum. |
+| 6 | UTC_Conv | BLOCKED | study parameter reads | NULL. Owner must confirm time convention. |
+| 7 | BM_Elev_Units | PASS | 783 | `feet`; WSEL values remain in feet for legacy runtime conversion. |
+| 8 | temp coverage | FAIL | 120 | Detection span begins 2025-06-05; temperature begins 2025-06-17. Missing 2025-06-05 through 2025-06-16 coverage. |
+| 9 | WSEL coverage | FAIL | 786, 1119 | Detection span begins 2025-06-05; WSEL begins 2025-06-17. Missing 2025-06-05 through 2025-06-16 coverage. |
+| 10 | beacon rows staged | PASS | beacon_epoch / clock_fix | 2,991,006 local-beacon rows staged inside 2025-06-05 through 2025-06-16 window. |
+| 11 | receiver beacons in tblTag | PASS | 763 | All 24 staged receiver beacon IDs appear in `tblTag` with `TagType=beacon`. |
+| 12 | SNR null / 2025 path | PASS | 466 | 2,998,556/2,998,556 SNR values NULL; legacy classifier is excluded and ATS-2025 path is required. |
 
 Applied:
- A.
- B.
- C.
- D.
+ A. Set `BM_Elev_Units` to `feet`; WSEL remains unconverted.
+ B. Populated configured beacon pulse rates and set FFD3 to provisional 3.33 seconds.
+ C. Added `--beacon-window START END`; staged local beacon IDs in the June 5–16 window with chunked reads.
+ D. Added `--drop-incomplete-receivers`; dropped 9 receivers and reported reasons.
 
 Blocked (owner questions, verbatim):
- -
+ - What receiver/tag should populate `masterReceiver` for the new synchronization approach?
+ - What benchmark elevation and vertical datum should populate `BM_Elev`?
+ - What UTC conversion and synchronization window should be used?
+ - What authoritative temperature/WSEL data covers 2025-06-05 through 2025-06-16?
 
-Tests: (count passed / failed)
+Tests: 19 passed / 0 failed (full suite).
 
 Files touched:
- -
+ - `scripts/adapt_2025_to_legacy.py`
+ - `scripts/legacy_readiness_audit.py`
+ - `tests/test_2025_contracts.py`
+ - `output/legacy_readiness_audit.md`
+ - `docs/2025_processing_contract.md`
+ - `LONG_TERM_CONTEXT.md`
+ - `.ai_journal/session/2026-09-15_next_execution_steps.md`
+ - `LLM_Prompts.txt`
 
-Commit hash:
+Commit hash: `160eee1` (amended response hash pending)
 
 Ethan's notes:
- -
+ - Rebuilt `jsats3d_2025_FFD3_manager_demo.db` with 7,550 FFD3 rows plus 2,991,006 local-beacon rows. No raw files were modified. Downstream synchronization and positioning remain blocked by missing June 5–16 environmental coverage and owner-supplied synchronization parameters.
 
 --- END RESPONSE 001 ---
