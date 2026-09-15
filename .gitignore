@@ -20,5 +20,9 @@ venv/
 *.sqlite
 *.sqlite3
 *.log
+
+# Generated analysis reports and exports
+output/*
+!output/positioning/
 output/positioning/*
 !output/positioning/.gitkeep

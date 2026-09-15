@@ -60,10 +60,17 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | 2026-09-10 | Build isolated adapter script `adapt_2025_to_legacy.py` | Avoid breaking legacy `jsats3d.py` |
 | 2026-09-10 | Leave missing raw signal metrics as `NULL` | Do not fabricate artificial `SNR`/`NBW` |
 | 2026-09-11 | Normalize datetime resolution in `jsats3d.py` | Prevent pandas datetime nanosecond/second integer scale mismatch |
+| 2026-09-13 | Preserve paper/2019/DBSCAN dataset as regression reference | Maintain legacy parity while changing code |
+| 2026-09-13 | Use DBSCAN for new ATS multipath filtering | New data lacks legacy classifier features |
+| 2026-09-13 | Work only on feature branch | Protect `main` and existing legacy projects |
+| 2026-09-14 | Treat FFD3 pulse rate as approximately 3 seconds pending static-hold measurement | PM provided approximate rate; exact rate requires code-based measurement from static holds |
 
 ## Established Methods
 - Stage single tags or chunked detections into SQLite containing `tblTag`, `tblReceiver`, `tblDetectionRaw`, `tblInterpolatedTemp`, `tblWSEL`, `tblStudyParameters`.
 - Project WGS84 coordinates to EPSG:26910 easting/northing.
+- Maintain a known legacy dataset for regression and parity checks.
+- Apply pulse-rate blanking before DBSCAN when pulse rate is known.
+- Use 3D point clouds, voxel density, plan-view heat maps, depth histograms, and kernel density utilization distributions for fish-space visualization.
 
 ## Project Conventions
 - Coordinates: UTM Zone 10N NAD83 (EPSG:26910), meters.
@@ -73,11 +80,14 @@ Production client acoustic telemetry data processing, clock synchronization, and
 ## Persistent Assumptions
 - Beacon tag periods in config workbook are authoritative.
 - `FFD3` is mobile validation tag, not stationary receiver beacon.
+- Legacy paper/2019/DBSCAN results remain reference outputs until replacement parity is demonstrated.
 
 ## Known Limitations
 - Missing `SNR` and `NBW` prevents legacy ML/DBSCAN multipath filtering from operating unchanged.
-- `FFD3` pulse rate not documented in config workbook.
+- `FFD3` pulse rate is approximately 3 seconds; exact interval remains pending measurement from static holds.
 - CHN receivers lack GPS / static coordinates in config.
+- Synchronization parameters remain provisional pending PM guidance on the new synchronization approach.
+- No approved permanent regression dataset selected yet.
 
 ## Completed Milestones
 - Formatted 2025 datasets into legacy SQLite schema (`jsats3d_2025_FFD3_manager_demo.db`).
