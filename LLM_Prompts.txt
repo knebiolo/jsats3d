@@ -134,4 +134,20 @@ Commit hash: `9bfc43e` (pushed implementation commit)
 Ethan's notes:
  - Rebuilt `jsats3d_2025_FFD3_manager_demo.db` with 7,550 FFD3 rows plus 2,991,006 local-beacon rows. No raw files were modified. Downstream synchronization and positioning remain blocked by missing June 5–16 environmental coverage and owner-supplied synchronization parameters.
 
+Additional consolidated findings:
+ - Gate 0 schema audit: all four detection deliverables use `dateTime`, `tagCode`, `amp`, `receiverName`, and `event`. Sampled timestamps contain six fractional digits. No `SNR`, `NBW`, `FreqOff`, `Pascals`, or `Celsius` fields were delivered.
+ - Raw detection files available: `master_df_test.csv`, `master_df_study.csv`, `master_df_beacon.csv`, and `master_df_unknown.csv`. The files contain no source-row, receiver-type, upstream-filter, or other complete provenance fields.
+ - FFD3 timing: overall observed interval approximately 3.34 seconds; DB-1 through DB-5 static-hold median approximately 3.326 seconds. The 3.33-second staging value is provisional and requires PM confirmation.
+ - Controlled validation: DB-1 through DB-5 contain 245-335 FFD3 detections across 17-21 receivers. These are the strongest available static-hold candidates. Several drag windows have zero or one detecting receiver and cannot be treated as usable truth without further review.
+ - Beacon coverage: 39 configured beacon IDs; 37 detected; configured IDs `2008` and `2010` had zero detections. Six broadly detected IDs (`1F14`, `1F38`, `1F5A`, `1F71`, `1F94`, `1FCD`) lack local receiver assignments and may be array-wide candidates, but identity and periods are unconfirmed.
+ - Receiver inventory: 37 unique configured receiver names, 8 dynamic-GPS receivers, and 34 receivers in the FFD3 test file. Current filtered staging contains 24 complete receivers. Geometry has rank 3. ZOI01-ZOI04 are valid 3D receivers but are not the only geometry-complete candidates.
+ - Coordinate provenance: configured versus deployment-wide dynamic-GPS medians differ by approximately 7.1 m median and 13.1 m maximum. During DB-1 through DB-5, differences range approximately 1.4-11.9 m with a 3.0 m median. Coordinate authority and time matching remain unresolved.
+ - Environmental coverage: FFD3 detections span June 5-16, while temperature and WSEL begin June 17. The separate temperature-string file has the same start date. No extrapolation was performed.
+ - Event field: FFD3 has 7,373 `True` and 177 `False` values. `event=False` correlates with low/zero amplitude, but event rates vary from 0% to 100% by receiver. Meaning remains undocumented and it is not used as a universal quality label.
+ - Legacy compatibility: output table names and detection columns can be preserved, but legacy KNN cannot run faithfully because it requires populated SNR. ATS-2025 mode, pluggable filtering, explicit rejection accounting, and synchronization-readiness checks are implemented.
+ - Prior DBSCAN review: legacy experiment used interpolated DDoA, unscaled time/DDoA Euclidean distance, `eps` near 37, and `min_samples=3`. These are exploratory legacy values and were not copied into 2025 processing.
+ - Current hard blockers: owner-approved master receiver or new synchronization reference, beacon identity and periods, benchmark elevation, vertical datum, UTC conversion, synchronization window, authoritative June 5-16 temperature/WSEL, coordinate authority, raw-versus-cleaned provenance, receiver gain/threshold metadata, and interpretation of `event`.
+ - Review artifacts: `docs/2025_owner_input_checklist.md`, `docs/2025_processing_contract.md`, `output/legacy_readiness_audit.md`, `output/beacon_coverage_audit.csv`, `output/arraywide_beacon_intervals.csv`, `output/beacon_amplitude_audit.csv`, `output/ffd3_validation_windows.csv`, `output/ffd3_static_hold_intervals.csv`, `output/receiver_3d_readiness.csv`, `output/receiver_coordinate_audit.csv`, and `output/2025_preflight_audit.txt`.
+ - Validation status after Prompt 001: 19 tests passed, modified scripts compiled, and `git diff --check` passed. Raw data remained read-only.
+
 --- END RESPONSE 001 ---
