@@ -1,0 +1,127 @@
+LLM_Prompts.txt
+================
+Round-trip file between Ethan's local LLM (Copilot) and Claude Code.
+Workflow: Claude writes a prompt below. Ethan runs it locally. The local LLM
+writes its findings in the RESPONSE block for that prompt. Ethan commits and
+pushes to ENM_jsat3d_edits. Claude reads the response and writes the next prompt.
+
+Rules for the local LLM:
+- Work only on branch ENM_jsat3d_edits. Never modify main.
+- Raw data under K:\Jobs\5662\001\Data\DataTrans\2025_Data is read only.
+- Read LONG_TERM_CONTEXT.md and the newest .ai_journal/session file first.
+- Do not invent physical values. Mark them BLOCKED with the exact owner question.
+- Fill the RESPONSE block in place. Do not delete the prompt.
+
+
+########################################################################
+PROMPT 001  (2026-09-15)  Legacy readiness audit and adapter fixes
+########################################################################
+
+STATUS: [ ] not started   [ ] in progress   [ ] done
+
+--- TASK ---
+
+Audit jsats3d_2025_FFD3_manager_demo.db against legacy jsats3d/jsats3d.py
+runtime requirements. Write results to output/legacy_readiness_audit.md.
+Then make the fixes listed under APPLY and rerun the audit.
+
+--- AUDIT ---
+For each item report PASS, FAIL, or BLOCKED (needs owner input).
+Cite the legacy line number that reads the value.
+
+ 1. tblTag.pulseRate non-null for every row
+    (read at jsats3d.py lines 209, 295, 750, 1128).
+ 2. tblReceiver.Tag_ID non-null for every receiver
+    (line 213 does .values[0]; empty result raises IndexError).
+ 3. tblReceiver X, Y, Z, X_t, Y_t, Z_t non-null for every receiver
+    (line 1107 ConvexHull fails on NaN).
+ 4. tblStudyParameters.masterReceiver non-null and matches a Rec_ID
+    in tblReceiver (line 762).
+ 5. tblStudyParameters.BM_Elev non-null (lines 779, 1116).
+ 6. tblStudyParameters.UTC_Conv non-null.
+ 7. tblStudyParameters.BM_Elev_Units equals "feet" or "meters", not
+    "unknown" (line 783 checks == 'feet' to convert WSEL).
+ 8. tblInterpolatedTemp min timeStamp <= min tblDetectionRaw.timeStamp
+    and max >= max (line 120 uses bounds_error=True; out of range raises).
+ 9. tblWSEL covers the same detection span
+    (interp1d at lines 786 and 1119, no fill_value).
+10. tblDetectionRaw contains beacon tag rows, not only FFD3
+    (beacon_epoch and clock_fix need beacon detections at host and
+    adjacent receivers).
+11. Every tblReceiver.Tag_ID appears in tblTag with TagType = "beacon".
+12. tblDetectionRaw.SNR is entirely NULL. Report it. Confirm
+    multipath_classifier (line 466) is not on the 2025 path and
+    multipath_2 or DBSCAN is.
+
+--- APPLY (in order, then rerun audit) ---
+
+ A. In scripts/adapt_2025_to_legacy.py set BM_Elev_Units to "feet"
+    because NSC.CZD_WTR_EL.F_CV is in feet. Leave WSEL values
+    unconverted; legacy converts at runtime.
+ B. Populate tblTag.pulseRate from config workbook beacon periods for
+    beacon tags. Set FFD3 to 3.33 and record in the journal that this
+    is the measured static-hold median, provisional until PM confirms.
+ C. Add a --beacon-window START END option to the adapter that stages
+    master_df_beacon.csv rows for the configured local beacon IDs only,
+    restricted to the given datetime window. Stage 2025-06-05 to
+    2025-06-16 alongside FFD3. Keep chunked reading. Do not scan all
+    46M rows into the DB.
+ D. Add a --drop-incomplete-receivers flag that excludes receivers with
+    NULL Tag_ID or NULL X/Y/Z from tblReceiver and reports which were
+    dropped and why.
+
+--- DO NOT APPLY ---
+ - Do not invent masterReceiver, BM_Elev, UTC_Conv, or synch window.
+   Mark BLOCKED with the exact owner question.
+ - Do not extrapolate temperature or WSEL outside their data range.
+   Mark BLOCKED and state the missing date range.
+ - Do not fill SNR, NBW, FreqOff with fabricated values.
+
+--- FINISH ---
+ - python -m unittest discover -s tests
+ - Add tests for B, C, D.
+ - Write the session journal entry.
+ - Update LONG_TERM_CONTEXT.md standing decisions.
+ - Fill the RESPONSE block below.
+ - Commit to ENM_jsat3d_edits: "Legacy readiness audit and adapter fixes"
+ - Push.
+
+--- RESPONSE 001 ---
+(local LLM writes here)
+
+Audit table:
+| # | Item | Result | Line | Note |
+|---|------|--------|------|------|
+| 1 | pulseRate | | | |
+| 2 | receiver Tag_ID | | | |
+| 3 | receiver XYZ | | | |
+| 4 | masterReceiver | | | |
+| 5 | BM_Elev | | | |
+| 6 | UTC_Conv | | | |
+| 7 | BM_Elev_Units | | | |
+| 8 | temp coverage | | | |
+| 9 | WSEL coverage | | | |
+| 10 | beacon rows staged | | | |
+| 11 | receiver beacons in tblTag | | | |
+| 12 | SNR null / 2025 path | | | |
+
+Applied:
+ A.
+ B.
+ C.
+ D.
+
+Blocked (owner questions, verbatim):
+ -
+
+Tests: (count passed / failed)
+
+Files touched:
+ -
+
+Commit hash:
+
+Ethan's notes:
+ -
+
+--- END RESPONSE 001 ---
