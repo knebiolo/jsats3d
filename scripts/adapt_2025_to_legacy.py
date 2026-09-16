@@ -17,7 +17,31 @@ DETECTION_COLUMNS = {
     "tagCode": "Tag_ID",
     "amp": "Amplitude",
     "receiverName": "Rec_ID",
+    "event": "Event",
+    "diagCode": "Internal",
+    "temp": "RawTemperature",
+    "pressure": "Pressure",
+    "tilt": "Tilt",
+    "vBatt": "BatteryVoltage",
+    "bitPeriod": "BitPeriod",
+    "threshold": "Threshold",
+    "receiverType": "ReceiverType",
+    "firmwareVersion": "FirmwareVersion",
+    "fileFormatVersion": "FileFormatVersion",
+    "sourceFile": "SourceFile",
+    "sourceRow": "SourceRow",
 }
+
+LEGACY_DETECTION_COLUMNS = [
+    "timeStamp", "seconds", "Tag_ID", "Rec_ID", "FreqOff", "Amplitude",
+    "NBW", "SNR", "Valid", "Pascals", "Celsius", "TagTypeSource",
+]
+
+ATS_EXTENSION_COLUMNS = [
+    "Event", "Internal", "SigStr", "RawTemperature", "Pressure", "Tilt",
+    "BatteryVoltage", "BitPeriod", "Threshold", "ReceiverType",
+    "FirmwareVersion", "FileFormatVersion", "SourceFile", "SourceRow",
+]
 
 
 def parse_args():
@@ -149,10 +173,17 @@ def load_environment(covariate_path):
 
 
 def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, beacon_tags=None):
-    missing = set(DETECTION_COLUMNS) - set(chunk.columns)
+    required_input = {"dateTime", "tagCode", "receiverName"}
+    missing = required_input - set(chunk.columns)
     if missing:
         raise ValueError("Missing detection columns: %s" % sorted(missing))
+    if "amp" not in chunk and "sigStr" not in chunk:
+        raise ValueError("Missing detection signal column: expected amp or sigStr")
     result = chunk.rename(columns=DETECTION_COLUMNS).copy()
+    if "sigStr" in result:
+        result["SigStr"] = pd.to_numeric(result["sigStr"], errors="coerce")
+        if "Amplitude" not in result:
+            result["Amplitude"] = result["SigStr"]
     if tag_filter is not None:
         result = result[result["Tag_ID"].astype(str).str.strip() == tag_filter]
     if beacon_tags is not None:
@@ -162,10 +193,7 @@ def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, be
         parsed = pd.to_datetime(result["timeStamp"], errors="coerce")
         result = result[(parsed >= start) & (parsed <= end)]
     if result.empty:
-        return pd.DataFrame(columns=[
-            "timeStamp", "seconds", "Tag_ID", "Rec_ID", "FreqOff", "Amplitude",
-            "NBW", "SNR", "Valid", "Pascals", "Celsius", "TagTypeSource",
-        ])
+        return pd.DataFrame(columns=LEGACY_DETECTION_COLUMNS + ATS_EXTENSION_COLUMNS)
     result["timeStamp"] = pd.to_datetime(result["timeStamp"], errors="coerce")
     result = result.dropna(subset=["timeStamp", "Tag_ID", "Rec_ID"])
     result["seconds"] = result["timeStamp"].astype("datetime64[ns]").astype("int64") / 1e9
@@ -179,10 +207,10 @@ def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, be
     result["Pascals"] = np.nan
     result["Celsius"] = np.nan
     result["TagTypeSource"] = tag_type
-    return result[[
-        "timeStamp", "seconds", "Tag_ID", "Rec_ID", "FreqOff", "Amplitude",
-        "NBW", "SNR", "Valid", "Pascals", "Celsius", "TagTypeSource",
-    ]]
+    for column in ATS_EXTENSION_COLUMNS:
+        if column not in result:
+            result[column] = pd.NA
+    return result[LEGACY_DETECTION_COLUMNS + ATS_EXTENSION_COLUMNS]
 
 
 def write_detection_tables(
@@ -292,7 +320,7 @@ def main():
     print("Created: %s" % args.output_db)
     print("Detection rows: %s" % row_count)
     print("Tags: %s" % len(tags))
-    print("Receivers with GPS: %s" % len(receiver_table))
+    print("Receivers staged: %s" % len(receiver_table))
     print("Tag filter: %s" % (args.tag or "all tags"))
     print("Dropped receivers: %s" % len(dropped_receivers))
     if not dropped_receivers.empty:

@@ -36,6 +36,9 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | `released_v0.csv` | CSV | PTAGIS release metadata | Inspected |
 | `collected_v0.csv` | CSV | PTAGIS observation metadata | Inspected |
 | `cowlitz_AT_2025_testing_sheets.xlsx` | Excel Workbook | Controlled test track and static hold metadata | Inspected |
+| `2025_Temp_String_Data_5min_interpolated.csv` | CSV | Authoritative temperature string; use `DD_N_0p5`, `DD_N_1p5`, `DD_N_9`, `DD_N_18` | Inspected |
+| `ATS_3017_Internal_Column_Guide.txt` | Text Guide | Decode File Format 2.0 `Internal` clock/status groups | Inspected |
+| `pre_diagnostics.py` / `construct_ATS_dfs` | Legacy Python | Prior ATS raw-file parser reference | Inspected |
 
 ## Durable Structural Facts
 ### `2_AT_detection_datasets`
@@ -68,9 +71,21 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | 2026-09-15 | Store WSEL in source feet with `BM_Elev_Units=feet` | Legacy runtime converts WSEL when output units are meters |
 | 2026-09-15 | Stage local beacon rows through an explicit bounded datetime window | Avoid loading all beacon detections and prevent unbounded epoch assumptions |
 | 2026-09-15 | Drop incomplete receivers only when explicitly requested | Preserve raw metadata by default and report each dropped receiver/reason |
+| 2026-09-16 | Do not use nominal beacon PRI to identify clock jumps or quantify jump magnitude | Beacon PRI has jitter, slight drift, and a catch-up ping approximately every 15.5-16.5 minutes |
+| 2026-09-16 | Use ZOI02 as the central clock reference for the planned 2025 synchronization method | Owner-selected reference from clock synchronization meeting |
+| 2026-09-16 | Correct ZOI02 time jumps without adjusting ZOI02 drift | Planned reference-clock treatment from clock synchronization meeting |
+| 2026-09-16 | Estimate other receiver jumps and drift from beacon TDOA using piecewise regressions | Preserve stable segments between firmware-related clock jumps |
+| 2026-09-16 | Parse raw receiver files into legacy-compatible tables | Raw files contain clock synchronization events and one-second jump flags absent from concatenated deliverables |
+| 2026-09-16 | Use DD_N temperature-string columns as authoritative temperature inputs | PM specified four DD_N depths: 0.5, 1.5, 9, and 18 |
+| 2026-09-16 | Preserve and decode ATS `Internal` during raw parsing | Clock events, counter restarts, offsets, one-second adjustments, and GPS-loss status are encoded there |
+| 2026-09-16 | Retain `SigStr` from raw ATS files as a candidate multipath feature | PM preliminary exploration suggests utility; adoption requires Gate 3 validation |
+| 2026-09-16 | Preserve the legacy core and remove parallel architecture modules | New work is limited to parsers, adapters, diagnostics, and legacy-table-compatible preprocessing |
+| 2026-09-16 | Allow additive ATS columns in legacy tables | Preserve `Internal`, `SigStr`, raw sensor fields, receiver/firmware metadata, and source provenance without changing required legacy columns |
 
 ## Established Methods
 - Stage single tags or chunked detections into SQLite containing `tblTag`, `tblReceiver`, `tblDetectionRaw`, `tblInterpolatedTemp`, `tblWSEL`, `tblStudyParameters`.
+- Preserve required legacy `tblDetectionRaw` columns and add ATS-specific columns when present: `Event`, `Internal`, `SigStr`, `RawTemperature`, `Pressure`, `Tilt`, `BatteryVoltage`, `BitPeriod`, `Threshold`, `ReceiverType`, `FirmwareVersion`, `FileFormatVersion`, `SourceFile`, and `SourceRow`.
+- Map raw ATS `SigStr` unchanged into legacy `Amplitude` while retaining the original `SigStr` column; do not convert or normalize it during ingestion.
 - Project WGS84 coordinates to EPSG:26910 easting/northing.
 - Maintain a known legacy dataset for regression and parity checks.
 - Apply pulse-rate blanking before DBSCAN when pulse rate is known.
@@ -82,7 +97,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Timestamps: UTC/Local datetime strings converted to float seconds since Unix epoch.
 
 ## Persistent Assumptions
-- Beacon tag periods in config workbook are authoritative.
+- Beacon tag periods in the config workbook describe nominal transmission periods only; they are not authoritative timing references for clock-jump detection or magnitude estimation.
 - `FFD3` is mobile validation tag, not stationary receiver beacon.
 - Legacy paper/2019/DBSCAN results remain reference outputs until replacement parity is demonstrated.
 
@@ -92,6 +107,13 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - CHN receivers lack GPS / static coordinates in config.
 - Synchronization parameters remain provisional pending PM guidance on the new synchronization approach.
 - FFD3 staging now includes bounded local-beacon rows, but master receiver and synchronization parameters remain unresolved.
+- Beacon PRI is irregular: jitter and slight drift are present, with a catch-up ping approximately every 15.5-16.5 minutes.
+- Receiver firmware can create time jumps. Raw files identify synchronization events and flagged one-second jumps, but do not report every jump magnitude.
+- Multipath in beacon detections complicates TDOA-based jump and drift estimation.
+- The authoritative DD_N temperature file contains four complete depth columns but still spans 2025-06-17 through 2025-09-17; it does not cover the 2025-06-10 test day.
+- The supplied Internal-column guide applies to File Format 2.0; File Format 3.0 and later require a separate schema.
+- Legacy `construct_ATS_dfs` keeps `temp` and `sigStr` but drops `diagCode`/Internal from detection output, so it cannot be reused unchanged for clock-event parsing.
+- Experimental `pipeline_mode`, `multipath_interface`, and `sync_readiness` modules were removed; they are not part of the legacy-core approach.
 - No approved permanent regression dataset selected yet.
 
 ## Completed Milestones

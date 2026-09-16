@@ -115,18 +115,21 @@ Treat multipath rejection as a first-class design problem, not an adapter
 concern.
 
 ### 4.3 Architectural consequence
-The legacy constraint "preserve `jsats3d.py` contracts, ingest via a
-compatibility adapter" is **relaxed for this project**. The target architecture is:
+The legacy core remains the authoritative runtime. Do not replace it with a
+parallel pipeline architecture. The target architecture is:
 
 - A `receiver_type`-aware ingestion layer (per-model parsers).
-- A **pluggable multipath filter interface**, so the 2019 supervised classifier
-  and the new 2025 filter are swappable implementations behind one contract.
-- A **receiver-class-aware synchronization layer**.
+- Parsers and adapters that write the legacy SQLite table names and required
+  columns, with additive ATS-specific columns where the new hardware provides
+  data the legacy schema did not contain.
+- New preprocessing or synchronization logic implemented outside the legacy
+  core, producing inputs in the format expected by existing legacy functions.
 - The Deng TDOA positioning solver and the kernel density code are reused
   as-is wherever possible — the math did not change, the inputs did.
 
-Preserve legacy math. Do not preserve legacy schema assumptions that encode
-sensor fields the new hardware does not produce.
+Preserve legacy math and core behavior. Do not fabricate legacy sensor fields
+that the new hardware does not produce; leave them NULL and preserve available
+ATS fields such as Internal and SigStr in additive columns.
 
 ---
 
