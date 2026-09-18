@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--output-db", default=default_output)
     parser.add_argument("--chunksize", type=int, default=250_000)
     parser.add_argument("--tag", help="Only stage one tag code")
+    parser.add_argument("--tags", nargs="+", help="Stage multiple tag codes")
     parser.add_argument(
         "--beacon-window",
         nargs=2,
@@ -172,7 +173,7 @@ def load_environment(covariate_path):
     return temperature, wsel
 
 
-def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, beacon_tags=None):
+def normalize_detection(chunk, tag_type, tag_filter=None, tag_filters=None, beacon_window=None, beacon_tags=None):
     required_input = {"dateTime", "tagCode", "receiverName"}
     missing = required_input - set(chunk.columns)
     if missing:
@@ -186,6 +187,8 @@ def normalize_detection(chunk, tag_type, tag_filter=None, beacon_window=None, be
             result["Amplitude"] = result["SigStr"]
     if tag_filter is not None:
         result = result[result["Tag_ID"].astype(str).str.strip() == tag_filter]
+    if tag_filters is not None:
+        result = result[result["Tag_ID"].astype(str).str.strip().isin(tag_filters)]
     if beacon_tags is not None:
         result = result[result["Tag_ID"].astype(str).str.strip().isin(beacon_tags)]
     if beacon_window is not None:
@@ -218,6 +221,7 @@ def write_detection_tables(
     detection_dir,
     chunksize,
     tag_filter=None,
+    tag_filters=None,
     filenames=None,
     beacon_window=None,
     beacon_tags=None,
@@ -246,6 +250,7 @@ def write_detection_tables(
                 chunk,
                 tag_type,
                 file_tag_filter,
+                tag_filters,
                 file_beacon_window,
                 file_beacon_tags,
             )
@@ -285,6 +290,7 @@ def main():
             args.detection_dir,
             args.chunksize,
             args.tag,
+            set(args.tags) if args.tags else None,
             args.files,
             beacon_window,
             local_beacons if beacon_window is not None else None,

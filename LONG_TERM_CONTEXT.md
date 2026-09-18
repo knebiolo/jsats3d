@@ -39,6 +39,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | `2025_Temp_String_Data_5min_interpolated.csv` | CSV | Authoritative temperature string; use `DD_N_0p5`, `DD_N_1p5`, `DD_N_9`, `DD_N_18` | Inspected |
 | `ATS_3017_Internal_Column_Guide.txt` | Text Guide | Decode File Format 2.0 `Internal` clock/status groups | Inspected |
 | `pre_diagnostics.py` / `construct_ATS_dfs` | Legacy Python | Prior ATS raw-file parser reference | Inspected |
+| `raw_data/` | ATS raw receiver CSVs | Raw File Format 2.0 detections, GPS rows, Internal clock evidence, SigStr, sensor fields | Available; target parser smoke-tested |
 
 ## Durable Structural Facts
 ### `2_AT_detection_datasets`
@@ -81,6 +82,8 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | 2026-09-16 | Retain `SigStr` from raw ATS files as a candidate multipath feature | PM preliminary exploration suggests utility; adoption requires Gate 3 validation |
 | 2026-09-16 | Preserve the legacy core and remove parallel architecture modules | New work is limited to parsers, adapters, diagnostics, and legacy-table-compatible preprocessing |
 | 2026-09-16 | Allow additive ATS columns in legacy tables | Preserve `Internal`, `SigStr`, raw sensor fields, receiver/firmware metadata, and source provenance without changing required legacy columns |
+| 2026-09-17 | Restrict raw parsing to exact serials mapped to ZOI01-ZOI11 and CFD01-CFD09 | PM identified 20 receivers relevant to 3D processing; avoid unrelated uploaded receivers |
+| 2026-09-17 | Prefer `_cleaned`, then `_recovered`/`_recovery`, over same-stem original files | PM confirmed corrected files remove corrupt ATS lines that otherwise break processing |
 
 ## Established Methods
 - Stage single tags or chunked detections into SQLite containing `tblTag`, `tblReceiver`, `tblDetectionRaw`, `tblInterpolatedTemp`, `tblWSEL`, `tblStudyParameters`.
@@ -114,6 +117,9 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - The supplied Internal-column guide applies to File Format 2.0; File Format 3.0 and later require a separate schema.
 - Legacy `construct_ATS_dfs` keeps `temp` and `sigStr` but drops `diagCode`/Internal from detection output, so it cannot be reused unchanged for clock-event parsing.
 - Experimental `pipeline_mode`, `multipath_interface`, and `sync_readiness` modules were removed; they are not part of the legacy-core approach.
+- Target 3D raw receiver set contains 20 SR3017 units, all listed as firmware v10.62F in the configuration workbook.
+- June 10 raw folder contains 18 of 20 target serials; CFD05/serial 19033 and ZOI04/serial 20027 are absent from that folder.
+- Raw parser supports only verified File Format 2.0 and fails on unsupported formats.
 - No approved permanent regression dataset selected yet.
 
 ## Completed Milestones

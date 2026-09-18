@@ -99,6 +99,41 @@ Clock correction must separate discontinuous time jumps from continuous clock dr
 - The smoke database staged 23 complete receivers and reported 8 excluded receivers with explicit missing-field reasons.
 - `git diff --check` passed.
 
+## 2026-09-17 Raw Data Availability
+- PM confirmed all raw data is uploaded under `K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data`.
+- PM restricted 3D processing to ZOI01-ZOI11 and CFD01-CFD09.
+- Configuration workbook maps these names to 20 exact SR3017 serial numbers, all listed as firmware v10.62F.
+- Raw filename selection uses exact `SR<serial>` matching to prevent partial matches such as `SR18078` matching `SR18078250610...`.
+- Files ending `_cleaned`, `_recovered`, or `_recovery` are accepted corrected inputs. When an original and corrected file share a stem, selection priority is `_cleaned`, then recovered/recovery, then original.
+- June 10 array-testing folder contains 18 of the 20 target serials. CFD05/19033 and ZOI04/20027 are absent from that folder.
+
+## Raw Parser Implementation
+- Added `scripts/parse_ats_raw_to_legacy.py` for verified ATS File Format 2.0.
+- Parser reads raw files without modifying them and rejects unsupported file formats.
+- Parser writes legacy-compatible detections to `tblDetectionRaw`.
+- Parser writes GPS pseudo-tag rows to `tblGPSRaw`.
+- Parser writes identified clock-event evidence to `tblClockEventRaw`.
+- Legacy detection columns remain present; raw `SigStr` populates legacy `Amplitude` unchanged while also remaining in `SigStr`.
+- Parser preserves raw Internal, decoded Internal groups, clock status markers, offset-change evidence, counter restarts, one-second adjustment evidence, raw sensors, receiver/firmware/file-format metadata, source file, and source row.
+- Parser identifies candidate clock-event boundaries but does not estimate jump magnitude or alter timestamps.
+
+## Raw Parser Validation
+- One-file SR18076 parse succeeded: 150,594 detections, 9,454 GPS rows, and 723 clock-event rows across the source file span.
+- Bounded ZOI02/serial 18078 parse for 2025-06-10 succeeded: 31,763 detections, 1,884 GPS rows, and 209 clock-event rows.
+- ZOI02 parsed span was 2025-06-10 00:00:02.269722 through 2025-06-10 12:10:59.248460.
+- ZOI02 contained 24 offset changes and 44 counter-restart rows in the bounded interval. No one-second adjustment evidence was found in that interval.
+- All 31,763 parsed ZOI02 detections had four-character hexadecimal tag IDs, complete source-file/source-row/Internal provenance, and non-null SigStr.
+- Full 18-file June 10 run was stopped because row-wise parsing was too slow and progress was buffered. No result from that incomplete run is treated as an artifact.
+- Added bounded `--serial` selection for observable per-receiver runs.
+- Full test suite passed: 11 tests. Parser compiled successfully and `git diff --check` passed.
+
+## Next Steps After Raw Parser Validation
+- Run bounded per-serial parses for the remaining target receivers with visible progress.
+- Reconcile detection, GPS, and clock-event counts per source file.
+- Join parser output with legacy `tblTag`, `tblReceiver`, `tblInterpolatedTemp`, `tblWSEL`, and `tblStudyParameters` staging.
+- Review ZOI02 offset changes and counter restarts against beacon TDOA before estimating jump magnitudes.
+- Do not correct timestamps until event semantics and TDOA estimates pass owner review.
+
 ## Parameter Changes With Rationale
 - No numeric synchronization parameter was selected.
 - The reported 15.5-16.5 minute catch-up interval is observational context, not a filter threshold or epoch parameter.
