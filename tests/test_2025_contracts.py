@@ -16,6 +16,9 @@ from scripts.parse_ats_raw_to_legacy import (
     parse_gps_coordinates,
     parse_internal,
 )
+from scripts.dbscan_diagnostic import make_diagnostics
+from scripts.dbscan_diagnostic import sweep_diagnostics
+from scripts.extract_dbscan_features import extract_features
 
 
 class Test2025Adapter(unittest.TestCase):
@@ -106,6 +109,60 @@ class Test2025Adapter(unittest.TestCase):
         latitude, longitude = parse_gps_coordinates("4628.0191 N 12206.4983 W")
         self.assertAlmostEqual(latitude, 46.466985, places=6)
         self.assertAlmostEqual(longitude, -122.108305, places=6)
+
+    def test_dbscan_features_are_diagnostic_and_epoch_local(self):
+        import sqlite3
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as handle:
+            path = handle.name
+        try:
+            connection = sqlite3.connect(path)
+            data = pd.DataFrame({
+                "Tag_ID": ["FFD3"] * 3,
+                "Rec_ID": ["R01"] * 3,
+                "seconds": [10.0, 10.2, 13.5],
+                "timeStamp": ["t1", "t2", "t3"],
+                "SigStr": [180, 210, 190],
+            })
+            data.to_sql("tblDetectionRaw", connection, index=False)
+            connection.close()
+            features = extract_features(path, "FFD3", 3.33)
+            self.assertEqual(len(features), 3)
+            self.assertEqual(features.epoch_number.tolist(), [1, 1, 2])
+            self.assertEqual(features.epoch_rank.tolist(), [0, 1, 0])
+            self.assertAlmostEqual(features.lag_seconds.iloc[1], 0.2)
+            self.assertAlmostEqual(features.relative_sigstr.iloc[1], 0.0)
+        finally:
+            import os
+            os.remove(path)
+
+    def test_dbscan_diagnostic_does_not_filter_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            features_path = Path(directory) / "features.csv"
+            data = pd.DataFrame({
+                "source_rowid": [1, 2, 3], "Tag_ID": ["FFD3"] * 3,
+                "Rec_ID": ["R01"] * 3, "epoch_number": [1, 1, 2],
+                "lag_seconds": [0.0, 0.2, 0.0],
+                "relative_sigstr": [-20.0, 0.0, 0.0],
+            })
+            data.to_csv(features_path, index=False)
+            summary, distances, metadata = make_diagnostics(str(features_path), 3)
+            self.assertEqual(metadata["rows"], 3)
+            self.assertEqual(len(distances), 3)
+            self.assertEqual(len(summary), 1)
+
+    def test_dbscan_sweep_reports_without_filtering_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            features_path = Path(directory) / "features.csv"
+            data = pd.DataFrame({
+                "source_rowid": range(6), "Tag_ID": ["FFD3"] * 6,
+                "Rec_ID": ["R01"] * 6, "epoch_number": [1] * 6,
+                "lag_seconds": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                "relative_sigstr": [0, -1, -2, -3, -4, -5],
+            })
+            data.to_csv(features_path, index=False)
+            sweep = sweep_diagnostics(str(features_path), [0.5], [2, 3, 4])
+            self.assertEqual(len(sweep), 3)
+            self.assertTrue((sweep.input_rows == 6).all())
 
 
 if __name__ == "__main__":

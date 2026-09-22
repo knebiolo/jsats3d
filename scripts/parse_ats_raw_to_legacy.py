@@ -88,6 +88,11 @@ def parse_args():
         dest="tags",
         help="Keep one or more four-character tag IDs",
     )
+    parser.add_argument(
+        "--include-config-beacons",
+        action="store_true",
+        help="Add configured local receiver-beacon tag IDs to the tag filter",
+    )
     return parser.parse_args()
 
 
@@ -377,7 +382,10 @@ def main():
     missing_serials = sorted(set(targets.index) - found_serials)
     start = datetime.fromisoformat(args.start) if args.start else None
     end = datetime.fromisoformat(args.end) if args.end else None
-    tags = frozenset(args.tags) if args.tags else None
+    tags = set(args.tags) if args.tags else set()
+    if args.include_config_beacons:
+        tags.update(load_beacon_registry(args.config_xlsx)["Tag_ID"].dropna().astype(str))
+    tags = frozenset(tags) if tags else None
 
     tasks = []
     for path in files:
