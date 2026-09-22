@@ -9,6 +9,9 @@ import csv
 import os
 import re
 import sqlite3
+from datetime import datetime
+from functools import partial
+from multiprocessing import Pool
 from pathlib import Path
 
 import pandas as pd
@@ -43,6 +46,24 @@ STATUS_MARKERS = {
     "GPS111", "RTC222", "001111", "006600", "007700", "0000SL",
     "999999", "636363",
 }
+
+EPOCH = datetime(1970, 1, 1)
+DT_IDX, TAG_IDX, INTERNAL_IDX = 4, 5, 0
+TILT_IDX, VBATT_IDX, TEMP_IDX, PRESSURE_IDX = 6, 7, 8, 9
+SIGSTR_IDX, BITPERIOD_IDX, THRESHOLD_IDX = 10, 11, 12
+
+DETECTION_DB_COLUMNS = [
+    "timeStamp", "seconds", "Rec_ID", "ReceiverType", "FirmwareVersion",
+    "FileFormatVersion", "SerialNumber", "SourceFile", "SourceRow", "Internal",
+    "InternalGroup1", "InternalGroup2", "InternalGroup3", "InternalFlag",
+    "InternalCounter", "InternalOffset", "InternalStatus", "InternalCounterValue",
+    "InternalOffsetValue", "InternalPositionDifferenceSeconds",
+    "OneSecondAdjustmentEvidence", "ClockStatusMarker", "Tag_ID", "FreqOff",
+    "Amplitude", "NBW", "SNR", "Valid", "Pascals", "Celsius", "TagTypeSource",
+    "Event", "SigStr", "RawTemperature", "Pressure", "Tilt", "BatteryVoltage",
+    "BitPeriod", "Threshold", "OffsetChanged", "CounterRestart",
+    "ClockEventReasons", "GPSFixTimeStamp", "GPSFixLatitude", "GPSFixLongitude",
+]
 
 
 def parse_args():
@@ -187,97 +208,126 @@ def parse_gps_coordinates(value):
     return latitude, longitude
 
 
-def parse_raw_file(path, receiver_name, receiver_type, start=None, end=None, tags=None):
+def _fast_number(value):
+    value = value.strip()
+    if value == "" or value == "N/A":
+        return None
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+
+def _fast_timestamp(value):
+    value = value.strip()
+    try:
+        return datetime.strptime(value, "%m/%d/%Y %H:%M:%S.%f")
+    except ValueError:
+        try:
+            return datetime.strptime(value, "%m/%d/%Y %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, end=None):
+    """Return legacy detection rows as tuples in DETECTION_DB_COLUMNS order."""
     metadata = read_file_metadata(path)
     if metadata["FileFormatVersion"] != "2.0":
         raise ValueError("Unsupported File Format Version in %s: %s" % (path, metadata["FileFormatVersion"]))
-    detections = []
-    gps_rows = []
-    last_gps = {"timeStamp": None, "Latitude": None, "Longitude": None}
+    firmware = metadata["FirmwareVersion"]
+    file_format = metadata["FileFormatVersion"]
+    serial = metadata["SerialNumber"]
+    path_str = str(path)
+    keep_all = tags is None
+    rows = []
+    gps_count = 0
+    clock_count = 0
     previous_offset = None
+    gps_ts = gps_lat = gps_lon = None
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
         for source_row, values in enumerate(csv.reader(stream), start=1):
             if len(values) < 13:
                 continue
-            values = values[:14] + [""] * max(0, 14 - len(values))
-            row = dict(zip(RAW_COLUMNS, values))
-            timestamp = pd.to_datetime(row["DateTime"].strip(), errors="coerce")
-            if pd.isna(timestamp):
+            raw_tag = values[TAG_IDX].strip()
+            if raw_tag == "GPS Fix" or raw_tag == "GPS Clock":
+                timestamp = _fast_timestamp(values[DT_IDX])
+                if timestamp is None:
+                    continue
+                gps_lat, gps_lon = parse_gps_coordinates(values[INTERNAL_IDX])
+                gps_ts = timestamp
+                gps_count += 1
+                continue
+            if len(raw_tag) >= 7 and raw_tag[:3] == "G72":
+                parsed_tag = raw_tag[3:7]
+            else:
+                parsed_tag = raw_tag
+            if not keep_all and parsed_tag not in tags:
+                continue
+            timestamp = _fast_timestamp(values[DT_IDX])
+            if timestamp is None:
                 continue
             if start is not None and timestamp < start:
                 continue
             if end is not None and timestamp > end:
                 continue
-            raw_tag = row["TagCode"].strip()
-            common = {
-                "timeStamp": timestamp,
-                "seconds": timestamp.value / 1e9,
-                "Rec_ID": receiver_name,
-                "ReceiverType": receiver_type,
-                "FirmwareVersion": metadata["FirmwareVersion"],
-                "FileFormatVersion": metadata["FileFormatVersion"],
-                "SerialNumber": metadata["SerialNumber"],
-                "SourceFile": str(path),
-                "SourceRow": source_row,
-                "Internal": row["Internal"].strip(),
-            }
-            if raw_tag in ("GPS Fix", "GPS Clock"):
-                latitude, longitude = parse_gps_coordinates(row["Internal"])
-                last_gps = {"timeStamp": timestamp, "Latitude": latitude, "Longitude": longitude}
-                gps_rows.append({**common, "RecordType": raw_tag, "Latitude": latitude, "Longitude": longitude})
-                continue
-            parsed_tag = parse_tag_code(raw_tag)
-            if tags is not None and parsed_tag not in tags:
-                continue
-            internal = parse_internal(row["Internal"], timestamp)
+            internal = parse_internal(values[INTERNAL_IDX], timestamp)
             if internal is None:
                 continue
-            offset_changed = previous_offset is not None and internal["InternalOffset"] != previous_offset
-            previous_offset = internal["InternalOffset"]
+            offset = internal["InternalOffset"]
+            offset_changed = previous_offset is not None and offset != previous_offset
+            previous_offset = offset
             counter_restart = internal["InternalCounter"] in ("000", "001")
-            event_reasons = []
+            reasons = []
             if offset_changed:
-                event_reasons.append("offset_change")
+                reasons.append("offset_change")
             if counter_restart:
-                event_reasons.append("counter_restart")
+                reasons.append("counter_restart")
             if internal["ClockStatusMarker"]:
-                event_reasons.append("status_marker")
+                reasons.append("status_marker")
             if internal["OneSecondAdjustmentEvidence"]:
-                event_reasons.append("one_second_adjustment_evidence")
-            detection = {
-                **common,
-                **internal,
-                "Tag_ID": parsed_tag,
-                "FreqOff": None,
-                "Amplitude": parse_number(row["SigStr"]),
-                "NBW": None,
-                "SNR": None,
-                "Valid": True,
-                "Pascals": None,
-                "Celsius": None,
-                "TagTypeSource": "raw",
-                "Event": bool(event_reasons),
-                "SigStr": parse_number(row["SigStr"]),
-                "RawTemperature": parse_number(row["Temp"]),
-                "Pressure": parse_number(row["Pressure"]),
-                "Tilt": parse_number(row["Tilt"]),
-                "BatteryVoltage": parse_number(row["VBatt"]),
-                "BitPeriod": row["BitPeriod"].strip(),
-                "Threshold": parse_number(row["Threshold"]),
-                "OffsetChanged": offset_changed,
-                "CounterRestart": counter_restart,
-                "ClockEventReasons": ";".join(event_reasons),
-                "GPSFixTimeStamp": last_gps["timeStamp"],
-                "GPSFixLatitude": last_gps["Latitude"],
-                "GPSFixLongitude": last_gps["Longitude"],
-            }
-            detections.append(detection)
-    return pd.DataFrame(detections), pd.DataFrame(gps_rows)
+                reasons.append("one_second_adjustment_evidence")
+            event = 1 if reasons else 0
+            clock_count += event
+            signal = _fast_number(values[SIGSTR_IDX])
+            rows.append((
+                timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                (timestamp - EPOCH).total_seconds(),
+                receiver_name, receiver_type, firmware, file_format, serial,
+                path_str, source_row, values[INTERNAL_IDX].strip(),
+                internal["InternalGroup1"], internal["InternalGroup2"],
+                internal["InternalGroup3"], internal["InternalFlag"],
+                internal["InternalCounter"], internal["InternalOffset"],
+                internal["InternalStatus"], internal["InternalCounterValue"],
+                internal["InternalOffsetValue"],
+                internal["InternalPositionDifferenceSeconds"],
+                1 if internal["OneSecondAdjustmentEvidence"] else 0,
+                1 if internal["ClockStatusMarker"] else 0,
+                parsed_tag, None, signal, None, None, 1, None, None, "raw",
+                event, signal, _fast_number(values[TEMP_IDX]),
+                _fast_number(values[PRESSURE_IDX]), _fast_number(values[TILT_IDX]),
+                _fast_number(values[VBATT_IDX]), values[BITPERIOD_IDX].strip(),
+                _fast_number(values[THRESHOLD_IDX]),
+                1 if offset_changed else 0, 1 if counter_restart else 0,
+                ";".join(reasons),
+                gps_ts.strftime("%Y-%m-%d %H:%M:%S.%f") if gps_ts else None,
+                gps_lat, gps_lon,
+            ))
+    return rows, gps_count, clock_count
 
 
-def append_frame(connection, table, frame):
-    if not frame.empty:
-        frame.to_sql(table, connection, if_exists="append", index=False)
+def _parse_worker(task, tags=None, start=None, end=None):
+    path_str, receiver_name, receiver_type = task
+    try:
+        rows, gps_count, clock_count = parse_detections(
+            Path(path_str), receiver_name, receiver_type, tags, start, end
+        )
+        return Path(path_str).name, rows, gps_count, clock_count, None
+    except Exception as error:  # loud-but-continue: report and skip the file
+        return Path(path_str).name, [], 0, 0, str(error)
+
 
 
 def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers):
@@ -325,32 +375,43 @@ def main():
         raise ValueError("No target receiver files found")
     found_serials = {SERIAL_PATTERN.match(path.name).group(1) for path in files}
     missing_serials = sorted(set(targets.index) - found_serials)
-    start = pd.to_datetime(args.start, errors="raise") if args.start else None
-    end = pd.to_datetime(args.end, errors="raise") if args.end else None
-    tags = set(args.tags) if args.tags else None
+    start = datetime.fromisoformat(args.start) if args.start else None
+    end = datetime.fromisoformat(args.end) if args.end else None
+    tags = frozenset(args.tags) if args.tags else None
+
+    tasks = []
+    for path in files:
+        serial = SERIAL_PATTERN.match(path.name).group(1)
+        receiver = targets.loc[serial]
+        tasks.append((str(path), receiver["Receiver Name"], receiver["Receiver Model"]))
+
     output = Path(args.output_db)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
     connection = sqlite3.connect(output)
+    connection.execute(
+        "CREATE TABLE tblDetectionRaw (%s)" % ", ".join(DETECTION_DB_COLUMNS)
+    )
+    insert_sql = "INSERT INTO tblDetectionRaw VALUES (%s)" % ", ".join(
+        ["?"] * len(DETECTION_DB_COLUMNS)
+    )
     totals = {"detections": 0, "gps": 0, "clock_events": 0}
+    worker = partial(_parse_worker, tags=tags, start=start, end=end)
+    workers = min(8, (os.cpu_count() or 2))
     try:
-        for path in files:
-            serial = SERIAL_PATTERN.match(path.name).group(1)
-            receiver = targets.loc[serial]
-            detections, gps_rows = parse_raw_file(
-                path,
-                receiver["Receiver Name"],
-                receiver["Receiver Model"],
-                start,
-                end,
-                tags,
-            )
-            append_frame(connection, "tblDetectionRaw", detections)
-            totals["detections"] += len(detections)
-            totals["gps"] += len(gps_rows)
-            totals["clock_events"] += int(detections["Event"].sum()) if not detections.empty else 0
-            print("Parsed %s: %s detections" % (path.name, len(detections)))
+        with Pool(processes=workers) as pool:
+            for name, rows, gps_count, clock_count, error in pool.imap_unordered(worker, tasks):
+                if error is not None:
+                    print("WARNING %s: %s" % (name, error))
+                    continue
+                if rows:
+                    connection.executemany(insert_sql, rows)
+                    connection.commit()
+                totals["detections"] += len(rows)
+                totals["gps"] += gps_count
+                totals["clock_events"] += clock_count
+                print("Parsed %s: %s detections" % (name, len(rows)))
         if args.legacy_db:
             gps_path = os.path.join(
                 os.path.dirname(args.config_xlsx), "..", "4_gps_datasets", "master_df_gps.csv"
