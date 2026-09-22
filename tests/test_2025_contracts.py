@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.measure_tag_intervals import measure_intervals
 from scripts.adapt_2025_to_legacy import (
     apply_tag_pulse_rates,
     drop_incomplete_receivers,
@@ -20,21 +19,6 @@ from scripts.parse_ats_raw_to_legacy import (
 
 
 class Test2025Adapter(unittest.TestCase):
-    def test_interval_measurement_supports_multiple_tags(self):
-        path = "tests/_synthetic_detections.csv"
-        data = pd.DataFrame({
-            "dateTime": ["2025-01-01 00:00:00", "2025-01-01 00:00:03", "2025-01-01 00:00:00", "2025-01-01 00:00:04"],
-            "tagCode": ["A", "A", "B", "B"],
-            "receiverName": ["R1", "R1", "R1", "R1"],
-        })
-        data.to_csv(path, index=False)
-        try:
-            summary = measure_intervals(path, ["A", "B"], 10)
-        finally:
-            import os
-            os.remove(path)
-        self.assertEqual(set(summary["tagCode"]), {"A", "B"})
-
     def test_adapter_sets_provisional_ffd3_rate_and_registry_rates(self):
         tags = pd.DataFrame({"Tag_ID": ["FFD3", "B1"], "TagTypeSource": ["study", "beacon"]})
         registry = pd.DataFrame({"Tag_ID": ["B1"], "pulseRate": [60.0]})

@@ -187,3 +187,22 @@ The K: drive databases generated in earlier sessions were identified as intermed
 6. Run ZOI02 reference-clock analysis.
 7. Apply clock corrections only after TDOA validation.
 8. Run legacy positioning and controlled-test validation.
+
+## Script Cleanup
+
+Removed one-off audit/inspection helpers not needed for the current legacy workflow:
+
+- `audit_detection_schema.py`
+- `audit_final_db.py`
+- `audit_receiver_inventory.py`
+- `inspect_formatted_tables.py`
+- `legacy_readiness_audit.py`
+- `measure_tag_intervals.py`
+
+Retained production/current workflow scripts:
+
+- `parse_ats_raw_to_legacy.py`
+- `adapt_2025_to_legacy.py`
+- Legacy processing drivers for temperature, beacon/metronome, clock fixing, positioning, validation, and reporting.
+
+Validation after cleanup: 10 tests passed, retained adapters compiled, and `git diff --check` passed.
