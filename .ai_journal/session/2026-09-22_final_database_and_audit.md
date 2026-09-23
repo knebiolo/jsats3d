@@ -252,6 +252,16 @@ Validation after cleanup: 10 tests passed, retained adapters compiled, and `git 
 - Produced `output/ffd3_dbscan_summary.csv` and `output/ffd3_dbscan_k_distance.csv`.
 - No detections were filtered, rejected, or written back to the database.
 - No production `eps` was selected.
+
+## All-Tag Eps Attempt
+
+- Added `scripts/dbscan_kdistance_all.py` to summarize configured-period tags.
+- The initial exact all-row k-distance attempt reached large beacon `B32A` (millions of rows) and was stopped before producing an artifact because full-resolution nearest-neighbor calculation was too expensive.
+- No database or detection rows changed.
+- Next implementation must use a bounded, documented representative sample or per-epoch representative points for each tag/receiver; it must not silently downsample.
+- No `eps` or `min_samples` was selected from the stopped run.
+- The first representative-epoch implementation was too broad: it processed every configured-period beacon despite an output name suggesting ZOI02, and was stopped before writing a result. No database changes occurred.
+- Future representative analysis must require explicit `--tag` or receiver scope and report scope before starting.
 - Diagnostic output shows lag is usually near zero, with receiver-level 95th-percentile lag generally below approximately 0.054 seconds; relative SigStr lower tails vary by receiver. These are descriptive results, not a filter threshold.
 - Safe DBSCAN tests passed: 10 tests total.
 
