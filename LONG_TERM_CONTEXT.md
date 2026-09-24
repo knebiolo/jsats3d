@@ -37,11 +37,24 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | `collected_v0.csv` | CSV | PTAGIS observation metadata | Inspected |
 | `cowlitz_AT_2025_testing_sheets.xlsx` | Excel Workbook | Controlled test track and static hold metadata | Inspected |
 | `2025_Temp_String_Data_5min_interpolated.csv` | CSV | Authoritative temperature string; use `DD_N_0p5`, `DD_N_1p5`, `DD_N_9`, `DD_N_18` | Inspected |
+| `Tag Drag Period/DD_N`, `DD_S` HOBO CSVs | CSV | 10/11-depth temperature, 2025-06-02 to 07-10 local, covers tag drag | Inspected 2026-09-24 |
+| `Tag Drag Period/TagDrag_WSE.xlsx` | Excel | Collector entrance S/N levels (ft), 06-05 to 06-17; ~0.9 ft below forebay CZD signal | Inspected 2026-09-24 |
 | `ATS_3017_Internal_Column_Guide.txt` | Text Guide | Decode File Format 2.0 `Internal` clock/status groups | Inspected |
 | `pre_diagnostics.py` / `construct_ATS_dfs` | Legacy Python | Prior ATS raw-file parser reference | Inspected |
 | `raw_data/` | ATS raw receiver CSVs | Raw File Format 2.0 detections, GPS rows, Internal clock evidence, SigStr, sensor fields | Available; target parser smoke-tested |
 
 ## Durable Structural Facts
+### `output/jsats3d_2025_final.db` (verified 2026-09-24, read-only)
+- 22.4 GB; `tblDetectionRaw` 59,892,757 rows; no indexes (every per-tag/receiver query is a full scan).
+- Rows stored in contiguous per-receiver-file blocks; bounded slices can use `rowid` ranges.
+- 37 tags: 20 local beacons, unassigned `1xxx`/`2xxx` beacons, `7F32`, study tags `FFD3`, `FC36`, `0B0A`, `0AC6`, `493F`. `C0FE`, `7F0D`, `0FC7` are NOT present.
+- All `tblTag.TagType='raw'`; legacy branches on `'study'`. `FC36`, `0B0A`, `0AC6`, `493F` have NULL `pulseRate`.
+- `tblInterpolatedTemp` is `BB_TPU_Surface_t` (single surface sensor), not the approved DD_N string.
+- `tblReceiver.Z` = -(config hydrophone depth ft x 0.3048), depth below surface, labeled `Ref_Elev='BM'` while `BM_Elev` is NULL.
+- `BitPeriod` (e.g. `240 03/31`), `Threshold`, `SigStr`, `Event` populated. `Pressure`/`Tilt` NULL. `RawTemperature=99.99` sentinel.
+- Array-wide beacon candidates `1F14`, `1F38`, `1F5A`, `1F71`, `1F94`, `1FCD` absent: `load_beacon_registry()` drops config rows without a receiver name.
+- ZOI03 and ZOI06 have no raw files ~2025-06-17 to 06-27; CFD05 has data only Aug-Sep.
+
 ### `2_AT_detection_datasets`
 - Schema: `dateTime`, `tagCode`, `amp`, `receiverName`, `event`
 - Raw signal metrics (`SNR`, `NBW`, `FreqOff`, `Pascals`, `Celsius`) absent in 2025 deliverables.
@@ -93,8 +106,11 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Maintain a known legacy dataset for regression and parity checks.
 - Apply pulse-rate blanking before DBSCAN when pulse rate is known.
 - Use 3D point clouds, voxel density, plan-view heat maps, depth histograms, and kernel density utilization distributions for fish-space visualization.
+- Open the final DB with `file:...?mode=ro` URI; bound queries by `rowid` range and time; never add indexes to the final DB (use a working copy).
+- `conda run` drops piped stdin; run scripts from files, not here-strings.
 
 ## Project Conventions
+- Time basis (verified 2026-09-24): ATS detection timestamps are local PDT (raw header `-07z`); `tblDetectionRaw.seconds` is local wall time encoded as if UTC. ATS GPS Fix rows are UTC. `Temperature/2025_Temp_String_Data_5min_interpolated.csv`, HOBO exports (GMT-07:00), and PI WSE exports (US/Pacific) are local. Proposed `UTC_Conv=-7` pending owner confirmation.
 - Coordinates: UTM Zone 10N NAD83 (EPSG:26910), meters.
 - Elevations: meters relative to Benchmark (BM) or Water Surface Elevation (WSEL).
 - Timestamps: UTC/Local datetime strings converted to float seconds since Unix epoch.
@@ -105,7 +121,11 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Legacy paper/2019/DBSCAN results remain reference outputs until replacement parity is demonstrated.
 
 ## Known Limitations
-- Missing `SNR` and `NBW` prevents legacy ML/DBSCAN multipath filtering from operating unchanged.
+- Missing `SNR`/`NBW`/`FreqOff` blocks only the legacy `multipath_classifier()` (it filters `SNR > 0`). It does NOT block the legacy (time, DDoA) DBSCAN in `clock_fix()` / `notebooks/dbscan_multipath.ipynb`, which needs timestamps, geometry, and sound speed only.
+- Beacon multipath verified (48 h slice 06-20/21): 26% of bursts multi-detection; later-arrival lag median 16 ms, p99 126 ms; first arrival strongest SigStr in 87.5% of multi-detection bursts; BitPeriod differs little between direct and reflected copies.
+- Local-beacon inter-burst interval median 61.5 s (IQR 59.1-62.8 s); nominal 60 s is not exact.
+- Legacy study-tag epoch rule `round((t - first)/pulseRate)` requires an exact PRI; measured study PRIs vary (~3.02-3.35 s by tag), so a cross-receiver epoch method is required.
+- Receiver GPS fixes spread 10-81 m in 48 h; not usable as hydrophone geometry.
 - `FFD3` pulse rate is approximately 3 seconds; exact interval remains pending measurement from static holds.
 - CHN receivers lack GPS / static coordinates in config.
 - Synchronization parameters remain provisional pending PM guidance on the new synchronization approach.
@@ -113,7 +133,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Beacon PRI is irregular: jitter and slight drift are present, with a catch-up ping approximately every 15.5-16.5 minutes.
 - Receiver firmware can create time jumps. Raw files identify synchronization events and flagged one-second jumps, but do not report every jump magnitude.
 - Multipath in beacon detections complicates TDOA-based jump and drift estimation.
-- The authoritative DD_N temperature file contains four complete depth columns but still spans 2025-06-17 through 2025-09-17; it does not cover the 2025-06-10 test day.
+- The 4-depth DD_N file spans 2025-06-17 to 09-17. Tag-drag temperature gap resolved 2026-09-24 by `Tag Drag Period` HOBO files (06-02 to 07-10). Tag-drag WSE only as collector-entrance level (~0.9 ft offset from forebay CZD); forebay WSE for 06-05 to 06-16 still missing.
 - The supplied Internal-column guide applies to File Format 2.0; File Format 3.0 and later require a separate schema.
 - Legacy `construct_ATS_dfs` keeps `temp` and `sigStr` but drops `diagCode`/Internal from detection output, so it cannot be reused unchanged for clock-event parsing.
 - Experimental `pipeline_mode`, `multipath_interface`, and `sync_readiness` modules were removed; they are not part of the legacy-core approach.
@@ -121,6 +141,12 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - June 10 raw folder contains 18 of 20 target serials; CFD05/serial 19033 and ZOI04/serial 20027 are absent from that folder.
 - Raw parser supports only verified File Format 2.0 and fails on unsupported formats.
 - No approved permanent regression dataset selected yet.
+
+## Owner Escalations (open)
+- 2026-09-24: ZOI02 as central clock reference is contradicted by 48 h evidence. 149/151 >300 ms TDoA steps are common-mode across receivers (originate in ZOI02 timestamps); ZOI02 logged 2,449 one-second-adjustment rows in 48 h; 164 jumps vs 21 (CFD04), 28 (ZOI08), 29 (CFD09). Unexplained common ~-400 ms offset mode on ZOI02. Pairwise differencing between non-reference receivers leaves 84-94% of epochs within 0.5 ms. Decision stays in place until owner review.
+- 2026-09-24 follow-up: hybrid option (ZOI02 beacon as metronome source, ToT taken from a cleaner clock such as ZOI09/CFD04/ZOI08 minus d/c) cut median jumps 164 -> 20-24 while keeping ZOI02 beacon coverage. ZOI09 alone as metronome: 13 jumps but only 13-14 receivers hear it and 0.5 ms share drops to 0.68. Only 65% of ZOI02 jumps carry a one-second flag. PM leaning ZOI02 (central) or ZOI09 (for floats); unresolved.
+- ZOI05 as detecting receiver of 7D2D is chaotic (77% >5 ms outliers); needs field review.
+- 2026-09-24 pairwise DBSCAN (`scripts/beacon_pairwise_dbscan.py`, 06-17 to 07-01): ZOI05 clock free-runs ~+/-30 s (clock fault). CFD units show ~126 us residual RMS and ms-scale sawtooth vs ~7 us for ZOI units. CFD01 has a persistent second mode ~21.5 ms late (steady reflection). Fixed DBSCAN parameters (0.5 ms budget, 2.5-period window, min_samples 3) await owner review.
 
 ## Completed Milestones
 - Formatted 2025 datasets into legacy SQLite schema (`jsats3d_2025_FFD3_manager_demo.db`).

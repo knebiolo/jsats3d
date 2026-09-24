@@ -16,9 +16,8 @@ from scripts.parse_ats_raw_to_legacy import (
     parse_gps_coordinates,
     parse_internal,
 )
-from scripts.dbscan_diagnostic import make_diagnostics
-from scripts.dbscan_diagnostic import sweep_diagnostics
 from scripts.extract_dbscan_features import extract_features
+from scripts.beacon_pairwise_dbscan import cluster
 
 
 class Test2025Adapter(unittest.TestCase):
@@ -135,34 +134,16 @@ class Test2025Adapter(unittest.TestCase):
             import os
             os.remove(path)
 
-    def test_dbscan_diagnostic_does_not_filter_rows(self):
-        with tempfile.TemporaryDirectory() as directory:
-            features_path = Path(directory) / "features.csv"
-            data = pd.DataFrame({
-                "source_rowid": [1, 2, 3], "Tag_ID": ["FFD3"] * 3,
-                "Rec_ID": ["R01"] * 3, "epoch_number": [1, 1, 2],
-                "lag_seconds": [0.0, 0.2, 0.0],
-                "relative_sigstr": [-20.0, 0.0, 0.0],
-            })
-            data.to_csv(features_path, index=False)
-            summary, distances, metadata = make_diagnostics(str(features_path), 3)
-            self.assertEqual(metadata["rows"], 3)
-            self.assertEqual(len(distances), 3)
-            self.assertEqual(len(summary), 1)
-
-    def test_dbscan_sweep_reports_without_filtering_source(self):
-        with tempfile.TemporaryDirectory() as directory:
-            features_path = Path(directory) / "features.csv"
-            data = pd.DataFrame({
-                "source_rowid": range(6), "Tag_ID": ["FFD3"] * 6,
-                "Rec_ID": ["R01"] * 6, "epoch_number": [1] * 6,
-                "lag_seconds": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
-                "relative_sigstr": [0, -1, -2, -3, -4, -5],
-            })
-            data.to_csv(features_path, index=False)
-            sweep = sweep_diagnostics(str(features_path), [0.5], [2, 3, 4])
-            self.assertEqual(len(sweep), 3)
-            self.assertTrue((sweep.input_rows == 6).all())
+    def test_pairwise_dbscan_flags_late_outliers_and_splits_on_jump(self):
+        t = 1.75e9 + 62.7 * pd.Series(range(40), dtype=float)
+        delta = pd.Series([0.001 + 1e-6 * i for i in range(40)])
+        delta.iloc[20:] += 1.0
+        delta.iloc[[5, 30]] += 0.003
+        series = pd.DataFrame({"Rec_ID": "R1", "t_anchor": t, "delta_s": delta, "burst_n": 1})
+        result = cluster(series, 60.0)
+        self.assertEqual(sorted(result.index[result.label < 0]), [5, 30])
+        self.assertEqual(result.loc[result.label >= 0, "label"].nunique(), 2)
+        self.assertEqual(len(result), 40)
 
 
 if __name__ == "__main__":
