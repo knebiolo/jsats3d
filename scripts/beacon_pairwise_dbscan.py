@@ -158,13 +158,15 @@ def _fit_residuals(g, clean):
 def steady_reflection_labels(g):
     """Clusters overlapping in time with an earlier-delta cluster by (budget, MAX_REFLECTION_DELAY_S]."""
     spans = g[g.label >= 0].groupby("label").agg(t0=("t_anchor", "min"), t1=("t_anchor", "max"), d=("delta_s", "median"))
-    late = set()
-    for i, a in spans.iterrows():
-        for j, b in spans.iterrows():
-            gap = b.d - a.d
-            if i != j and a.t0 <= b.t1 and b.t0 <= a.t1 and TIMING_BUDGET_S < gap <= MAX_REFLECTION_DELAY_S:
-                late.add(j)
-    return late
+    if len(spans) < 2:
+        return set()
+    t0, t1, d = spans.t0.values, spans.t1.values, spans.d.values
+    # Row i = earlier (direct) cluster, column j = candidate later (reflected) cluster.
+    overlap = (t0[:, None] <= t1[None, :]) & (t0[None, :] <= t1[:, None])
+    gap = d[None, :] - d[:, None]
+    late = overlap & (gap > TIMING_BUDGET_S) & (gap <= MAX_REFLECTION_DELAY_S)
+    np.fill_diagonal(late, False)
+    return set(spans.index.values[late.any(axis=0)])
 
 
 def cluster(series, period):

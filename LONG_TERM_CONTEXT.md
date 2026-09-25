@@ -44,16 +44,16 @@ Production client acoustic telemetry data processing, clock synchronization, and
 | `raw_data/` | ATS raw receiver CSVs | Raw File Format 2.0 detections, GPS rows, Internal clock evidence, SigStr, sensor fields | Available; target parser smoke-tested |
 
 ## Durable Structural Facts
-### `output/jsats3d_2025_final.db` (verified 2026-09-24, read-only)
-- 22.4 GB; `tblDetectionRaw` 59,892,757 rows; no indexes (every per-tag/receiver query is a full scan).
-- Rows stored in contiguous per-receiver-file blocks; bounded slices can use `rowid` ranges.
-- 37 tags: 20 local beacons, unassigned `1xxx`/`2xxx` beacons, `7F32`, study tags `FFD3`, `FC36`, `0B0A`, `0AC6`, `493F`. `C0FE`, `7F0D`, `0FC7` are NOT present.
-- All `tblTag.TagType='raw'`; legacy branches on `'study'`. `FC36`, `0B0A`, `0AC6`, `493F` have NULL `pulseRate`.
-- `tblInterpolatedTemp` is `BB_TPU_Surface_t` (single surface sensor), not the approved DD_N string.
-- `tblReceiver.Z` = -(config hydrophone depth ft x 0.3048), depth below surface, labeled `Ref_Elev='BM'` while `BM_Elev` is NULL.
-- `BitPeriod` (e.g. `240 03/31`), `Threshold`, `SigStr`, `Event` populated. `Pressure`/`Tilt` NULL. `RawTemperature=99.99` sentinel.
-- Array-wide beacon candidates `1F14`, `1F38`, `1F5A`, `1F71`, `1F94`, `1FCD` absent: `load_beacon_registry()` drops config rows without a receiver name.
-- ZOI03 and ZOI06 have no raw files ~2025-06-17 to 06-27; CFD05 has data only Aug-Sep.
+### `output/jsats3d_2025_v2.db` (rebuilt 2026-09-25; supersedes deleted `jsats3d_2025_final.db`)
+- ~22 GB; `tblDetectionRaw` 59,935,751 rows from 285 raw files, 20/20 target serials; no indexes (full scans).
+- Detection times on study basis PDT (UTC-7) via per-file GPS-derived offset. ZOI05 (all season) and one ZOI04 file (`SR20027_250710_140506_recovery_cleaned.csv`, 126,426 rows, 07-10 to 07-16) logged UTC and were shifted -7 h. Original wall time in `RawDateTime`; `ReceiverUTCOffsetHours`, `TimeShiftHours`, `TimeZoneSource` columns. `GPSFixTimeStamp` labeled `+00:00`.
+- 44 tags: 39 `beacon` (incl. array-wide 1F14/1F38/1F5A/1F71/1F94/1FCD, no pulseRate; 2010 now 1,428 rows) and 5 `study`: FFD3 3.33, FC36 3.038, 0B0A 3.024, 0AC6 3.204, 493F 3.155 s (provisional). Per-tag counts for all previously present tags identical to old DB.
+- `tblInterpolatedTemp`: DD_N mean; `DD_N_HOBO` 10-depth 06-02 13:45 to 07-10 13:00 (10,936 rows), `DD_N_string` 4-depth to 09-17 (19,881 rows).
+- `tblWSEL` starts 06-17 00:05 (forebay CZD); earlier detections lack WSE.
+- `tblReceiver` adds ZReference, UTCOffset, HydrophoneDepth_ft, HydrophoneOffset_ft, TotalDepth_ft, MountDescription, DeploymentDate. Z = -depth; BM_Elev, UTC_Conv NULL.
+- `BitPeriod`, `Threshold`, `SigStr`, `Event` populated. `Pressure`/`Tilt` NULL. `RawTemperature=99.99` sentinel.
+- ZOI03 and ZOI06 have no raw files ~06-17 to 06-27; CFD05 has data only Aug-Sep.
+- Parser worker-process WARNING prints are not captured in the log (ZOI04 override was silent); fix pending.
 
 ### `2_AT_detection_datasets`
 - Schema: `dateTime`, `tagCode`, `amp`, `receiverName`, `event`
@@ -126,6 +126,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Local-beacon inter-burst interval median 61.5 s (IQR 59.1-62.8 s); nominal 60 s is not exact.
 - Legacy study-tag epoch rule `round((t - first)/pulseRate)` requires an exact PRI; measured study PRIs vary (~3.02-3.35 s by tag), so a cross-receiver epoch method is required.
 - Receiver deployment (config workbook): ZOI01-ZOI03 "On bottom" (hydrophone depth 33.8-40.7 ft, total depth given; analogous to 2019 R01-R03). ZOI04-ZOI11 on structures (CFNSC entrance, PDS, debris barrier), depth 7.4-10.7 ft, hydrophone offset 3.1-4.0 ft. CFD01-CFD09 forebay, depth 10 ft, offset 0 (CFD02-09 have dynamic GPS; likely the PM's "floats").
+- PM 2026-09-25: hydrophone depth = depth at deployment. ZOI04, ZOI05, ZOI06, ZOI10 static (fixed elevation = WSE at deployment - depth). Others "adjust" (interpreted: Z(t) = WSE(t) - depth; ZOI01-03 on bottom assumed static — confirm). ZOI11 and CFD01 excluded ("won't help"). Deployment dates 06-04/06-05/06-10 precede forebay tblWSEL (starts 06-17): static-receiver elevations need deployment-day WSE.
 - Receiver GPS fixes spread 10-81 m in 48 h; not usable as hydrophone geometry.
 - `FFD3` pulse rate is approximately 3 seconds; exact interval remains pending measurement from static holds.
 - CHN receivers lack GPS / static coordinates in config.
@@ -148,6 +149,8 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - 2026-09-24 follow-up: hybrid option (ZOI02 beacon as metronome source, ToT taken from a cleaner clock such as ZOI09/CFD04/ZOI08 minus d/c) cut median jumps 164 -> 20-24 while keeping ZOI02 beacon coverage. ZOI09 alone as metronome: 13 jumps but only 13-14 receivers hear it and 0.5 ms share drops to 0.68. Only 65% of ZOI02 jumps carry a one-second flag. PM leaning ZOI02 (central) or ZOI09 (for floats); unresolved.
 - ZOI05 as detecting receiver of 7D2D appeared chaotic; explained by UTC logging (see correction below).
 - 2026-09-24 pairwise DBSCAN (`scripts/beacon_pairwise_dbscan.py`, 06-17 to 07-01): CFD units show ~126 us residual RMS and ms-scale sawtooth vs ~7 us for ZOI units. CFD01 has a persistent second mode ~21.5 ms late (steady reflection). Fixed DBSCAN parameters (0.5 ms budget, 2.5-period window, min_samples 3) await owner review.
+- 2026-09-25 v2 DBSCAN (same window, all 17 receivers, anchor-side + steady-reflection rules): 1,355 anchor-side epochs set aside. ZOI noise 1.0-9.4% (ZOI03/06 ~19-20%, partial coverage), clean RMS 13-51 us. CFD noise 9.9-38.3%, clean RMS 186-229 us (CFD01 41 us), 126-622 clean epochs >0.5 ms per CFD receiver. ZOI05 6.0% / 25 us after time-zone fix.
+- 2026-09-25 feasibility (leave-one-out clock interpolation, 14 d): ZOI error median 4.5-8.3 us, p95 15-20 us (ZOI03 74), 0-0.13% over 0.5 ms. ZOI jumps are 0.3-1.1 s steps; 78-91% contain an Internal flag vs 3-24% chance (jump timing recoverable). CFD per-ping jitter ~0.2 ms white (not wander), LOO median 84-158 us, p95 407-550 us, 2.4-8.2% over budget; cause unresolved (float/hydrophone motion vs receiver). Timing-only precision in hull with all receivers: ZOI-only 2/2/11 cm, ZOI+CFD 2.5/2.3/14 cm (paper 6/6/12); 6 random receivers 12/15/190 cm; 8 random 8/7/30 cm. Z is the weak axis (array vertical span ~10 m).
 - CORRECTION 2026-09-25: ZOI05 is NOT a clock fault. Config `Receiver Time Zone Offset` = `-00z` and raw headers `File Start ... 00z`: ZOI05 logs UTC while all other 19 receivers log `-07z`. Parser/final DB do not apply per-receiver offsets, so every ZOI05 row in `tblDetectionRaw` is +7 h vs other receivers. With -7 h shift (48 h slice): noise 100% -> 7.6%, residual RMS 10 us. Fix requires parser change + DB rebuild (owner approval).
 
 ## Completed Milestones
