@@ -8,16 +8,22 @@ import pandas as pd
 from scripts.adapt_2025_to_legacy import (
     apply_tag_pulse_rates,
     drop_incomplete_receivers,
+    load_temperature_string,
     normalize_detection,
     parse_beacon_window,
+    tag_types,
 )
 from scripts.parse_ats_raw_to_legacy import (
+    DETECTION_DB_COLUMNS,
     discover_target_files,
+    parse_detections,
     parse_gps_coordinates,
     parse_internal,
+    parse_utc_offset,
+    resolve_time_shift,
 )
 from scripts.extract_dbscan_features import extract_features
-from scripts.beacon_pairwise_dbscan import cluster
+from scripts.beacon_pairwise_dbscan import classify, cluster
 
 
 class Test2025Adapter(unittest.TestCase):
@@ -144,6 +150,104 @@ class Test2025Adapter(unittest.TestCase):
         self.assertEqual(sorted(result.index[result.label < 0]), [5, 30])
         self.assertEqual(result.loc[result.label >= 0, "label"].nunique(), 2)
         self.assertEqual(len(result), 40)
+
+    def test_pairwise_dbscan_labels_steady_late_reflection(self):
+        t = 1.75e9 + 62.7 * pd.Series(range(60), dtype=float)
+        delta = pd.Series([0.001 + 0.0215 * (i % 2) for i in range(60)])
+        series = pd.DataFrame({"Rec_ID": "R1", "t_anchor": t, "delta_s": delta, "burst_n": 1})
+        result = cluster(series, 60.0)
+        late = result[result.delta_s > 0.01]
+        self.assertTrue((late.dbscan_class == "steady_reflection").all())
+        self.assertTrue((result[result.delta_s < 0.01].dbscan_class == "clean").all())
+
+    def test_pairwise_dbscan_sets_aside_anchor_side_epochs(self):
+        t = 1.75e9 + 62.7 * pd.Series(range(30), dtype=float)
+        frames = []
+        for k in range(5):
+            delta = pd.Series([0.001 * k] * 30)
+            delta.iloc[12] -= 0.004
+            frames.append(pd.DataFrame({"Rec_ID": "R%d" % k, "t_anchor": t, "delta_s": delta, "burst_n": 1}))
+        result, suspects = classify(pd.concat(frames, ignore_index=True), 60.0)
+        self.assertEqual(suspects, {t.iloc[12]})
+        self.assertTrue((result[result.t_anchor == t.iloc[12]].dbscan_class == "anchor_suspect").all())
+        self.assertEqual(int((result.dbscan_class == "noise").sum()), 0)
+
+    def test_raw_parser_time_zone_offsets(self):
+        self.assertEqual(parse_utc_offset("-07z"), -7.0)
+        self.assertEqual(parse_utc_offset("-00z"), 0.0)
+        self.assertEqual(parse_utc_offset("00z"), 0.0)
+        self.assertEqual(resolve_time_shift(0.0, 0.0, "f"), (0.0, -7.0, "header"))
+        self.assertEqual(resolve_time_shift(None, -7.0, "f"), (-7.0, 0.0, "config"))
+        self.assertEqual(resolve_time_shift(0.0, -7.0, "f", gps_offset=-7.0), (-7.0, 0.0, "gps"))
+        with self.assertRaises(ValueError):
+            resolve_time_shift(0.0, -7.0, "f")
+        with self.assertRaises(ValueError):
+            resolve_time_shift(None, None, "f")
+
+    def test_raw_parser_shifts_utc_receiver_to_study_basis(self):
+        lines = [
+            "Site Name: ZOI,05,05", "Serial Number: 18081", "ATS Sonic Receiver SR3017 Firmware v10.62F",
+            "File Format Version: 2.0  ", "File Start: 06/18/2025 22:49:50 00z  *22EC+0647224930 5OFF", "",
+            "4628.0190 N 12206.4862 W ,ZOI,05,05, 06/18/2025 22:50:10       , GPS Fix  ,  N/A, 13.16,  99.99,  N/A  , -99, 000 00/31, 000, ",
+            "224930 04B5 49 09CF 3B4 B,ZOI,05,05, 06/18/2025 22:49:57.054972, G727F91E4,  N/A, 13.16,  99.99,  N/A  , 212, 240 13/31, 160, ",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SR18081_test.csv"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            rows, gps, _ = parse_detections(path, "ZOI05", "SR3017", config_offset=0.0)
+        row = dict(zip(DETECTION_DB_COLUMNS, rows[0]))
+        self.assertEqual(row["timeStamp"], "2025-06-18 15:49:57.054972")
+        self.assertEqual(row["RawDateTime"], "2025-06-18 22:49:57.054972")
+        self.assertEqual(row["TimeShiftHours"], -7.0)
+        self.assertEqual(row["GPSFixTimeStamp"], "2025-06-18 22:50:10+00:00")
+        self.assertEqual(row["TimeZoneSource"], "header")
+        self.assertEqual(gps, 1)
+
+    def test_raw_parser_gps_offset_overrides_wrong_header(self):
+        lines = [
+            "Serial Number: 18078", "ATS Sonic Receiver SR3017 Firmware v10.62F", "File Format Version: 2.0  ",
+            "File Start:  07/24/2025 13:02:20 00z  *FFFF+0747201029 5OFF", "",
+            "4628.0219 N 12206.4979 W ,ZOI,2,2, 07/24/2025 8:03:00       , GPS Fix  ,  N/A,13.12,99.99,  N/A  ,-99,0      ,0, ",
+        ]
+        for second in range(10, 14):
+            lines += [
+                "130259 05D3 02 00EE C34 F,ZOI,2,2, 07/24/2025 13:03:%02d.913697, G725A8583,  N/A,13.12,99.99,  N/A  ,203,240  4/31,147, " % second,
+                "4628.0219 N 12206.4979 W ,ZOI,2,2, 07/24/2025 20:03:%02d       , GPS Fix  ,  N/A,13.12,99.99,  N/A  ,-99,0      ,0, " % (second + 1),
+            ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SR18078_test.csv"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            rows, _, _ = parse_detections(path, "ZOI02", "SR3017", config_offset=-7.0)
+        row = dict(zip(DETECTION_DB_COLUMNS, rows[0]))
+        self.assertEqual(row["timeStamp"], "2025-07-24 13:03:10.913697")
+        self.assertEqual(row["TimeZoneSource"], "gps")
+
+    def test_adapter_tag_types_and_provisional_study_rates(self):
+        registry = pd.DataFrame({"Rec_ID": ["ZOI02", None], "Tag_ID": ["7D2D", "1F14"], "pulseRate": [60.0, None]})
+        tags = pd.DataFrame({"Tag_ID": ["7D2D", "1F14", "FC36", "FFD3"]})
+        tags["TagType"] = tag_types(tags.Tag_ID, registry)
+        self.assertEqual(tags.TagType.tolist(), ["beacon", "beacon", "study", "study"])
+        rates = apply_tag_pulse_rates(tags, registry).set_index("Tag_ID").pulseRate
+        self.assertEqual(rates["FC36"], 3.038)
+        self.assertTrue(pd.isna(rates["1F14"]))
+
+    def test_temperature_string_prefers_complete_hobo_then_string_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hobo = root / "DD_N"
+            hobo.mkdir()
+            for depth, value in (("0.5", 12.0), ("18", 10.0)):
+                body = ["Plot Title: x", '#,"Date Time, GMT-07:00","Temp, C"',
+                        "1,6/2/2025 13:45,%s" % value, "2,6/2/2025 13:50,%s" % value]
+                if depth == "18":
+                    body[3] = "2,6/2/2025 13:50,"
+                (hobo / ("x_DD_N_%s.csv" % depth)).write_text("\n".join(body), encoding="latin-1")
+            string = root / "string.csv"
+            string.write_text("DateTime,DD_N_0p5,DD_N_1p5,DD_N_9,DD_N_18\n"
+                              "2025-06-02 13:45:00,1,1,1,1\n2025-06-02 13:55:00,4,4,4,4\n", encoding="utf-8")
+            result = load_temperature_string(str(string), str(hobo))
+        self.assertEqual(result.C.tolist(), [11.0, 4.0])
+        self.assertEqual(result.TempSource.tolist(), ["DD_N_HOBO", "DD_N_string"])
 
 
 if __name__ == "__main__":

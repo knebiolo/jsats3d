@@ -1,7 +1,9 @@
 """Parse ATS File Format 2.0 raw files into legacy-compatible SQLite tables.
 
-Raw inputs are read only. Original timestamps and Internal values are preserved;
-this parser identifies clock-event evidence but does not correct timestamps.
+Raw inputs are read only. Internal values are preserved; this parser identifies
+clock-event evidence but does not correct clock drift or jumps. Detection times are
+shifted from each receiver's logging time zone to the study basis (PDT, UTC-7);
+the original wall time is kept in ``RawDateTime``.
 All detection additions are written into ``tblDetectionRaw``.
 """
 import argparse
@@ -9,7 +11,7 @@ import csv
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
@@ -22,6 +24,8 @@ try:
         load_beacon_registry,
         load_environment,
         load_receiver_table,
+        load_temperature_string,
+        tag_types,
     )
 except ModuleNotFoundError:
     from scripts.adapt_2025_to_legacy import (
@@ -29,7 +33,14 @@ except ModuleNotFoundError:
         load_beacon_registry,
         load_environment,
         load_receiver_table,
+        load_temperature_string,
+        tag_types,
     )
+
+# Study time basis: 19 of 20 receivers, temperature strings, and PI WSE exports are PDT (verified 2026-09-24).
+STUDY_UTC_OFFSET_HOURS = -7.0
+UTC_OFFSET_PATTERN = re.compile(r"^([+-]?)(\d{2})z$")
+FILE_START_PATTERN = re.compile(r"File Start:\s+\S+\s+\S+\s+([+-]?\d{2}z)")
 
 
 RAW_COLUMNS = [
@@ -63,6 +74,7 @@ DETECTION_DB_COLUMNS = [
     "Event", "SigStr", "RawTemperature", "Pressure", "Tilt", "BatteryVoltage",
     "BitPeriod", "Threshold", "OffsetChanged", "CounterRestart",
     "ClockEventReasons", "GPSFixTimeStamp", "GPSFixLatitude", "GPSFixLongitude",
+    "RawDateTime", "ReceiverUTCOffsetHours", "TimeShiftHours", "TimeZoneSource",
 ]
 
 
@@ -91,9 +103,19 @@ def parse_args():
     parser.add_argument(
         "--include-config-beacons",
         action="store_true",
-        help="Add configured local receiver-beacon tag IDs to the tag filter",
+        help="Add all configured beacon tag IDs (local and array-wide) to the tag filter",
     )
+    parser.add_argument("--temperature-csv", help="Delivered DD_N temperature string CSV (default under 2025_Data)")
+    parser.add_argument("--hobo-dir", help="Folder of DD_N HOBO exports (default: Tag Drag Period/DD_N)")
     return parser.parse_args()
+
+
+def parse_utc_offset(value):
+    match = UTC_OFFSET_PATTERN.match(str(value).strip())
+    if not match:
+        raise ValueError("Unrecognized ATS time zone offset: %r" % value)
+    sign, hours = match.groups()
+    return -float(hours) if sign == "-" else float(hours)
 
 
 def load_target_receivers(config_path):
@@ -142,7 +164,7 @@ def discover_target_files(raw_root, target_serials):
 
 
 def read_file_metadata(path):
-    metadata = {"SerialNumber": None, "FirmwareVersion": None, "FileFormatVersion": None}
+    metadata = {"SerialNumber": None, "FirmwareVersion": None, "FileFormatVersion": None, "UTCOffset": None}
     with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
         for _ in range(12):
             line = stream.readline()
@@ -155,7 +177,61 @@ def read_file_metadata(path):
                 metadata["FirmwareVersion"] = stripped.rsplit("Firmware", 1)[1].split(",", 1)[0].strip().lstrip("v")
             elif stripped.startswith("File Format Version:"):
                 metadata["FileFormatVersion"] = stripped.split(":", 1)[1].split(",", 1)[0].strip()
+            elif stripped.startswith("File Start:"):
+                match = FILE_START_PATTERN.search(stripped)
+                if match:
+                    metadata["UTCOffset"] = parse_utc_offset(match.group(1))
     return metadata
+
+
+def resolve_time_shift(header_offset, config_offset, path, gps_offset=None):
+    """Return (receiver offset h, hours to add to reach study basis, evidence source).
+
+    GPS rows are UTC, so detection-minus-GPS time is the file's true offset; this
+    outranks header and config (a recovery file was found with a wrong 00z header).
+    """
+    if gps_offset is not None:
+        for label, value in (("header", header_offset), ("config", config_offset)):
+            if value is not None and value != gps_offset:
+                print("WARNING %s: GPS-derived offset %+g h overrides %s offset %+g h" % (path, gps_offset, label, value))
+        return gps_offset, STUDY_UTC_OFFSET_HOURS - gps_offset, "gps"
+    if header_offset is not None and config_offset is not None and header_offset != config_offset:
+        raise ValueError("%s: header offset %+g h disagrees with config offset %+g h and no GPS rows" % (path, header_offset, config_offset))
+    offset = header_offset if header_offset is not None else config_offset
+    if offset is None:
+        raise ValueError("%s: no time zone offset in GPS rows, header, or config" % path)
+    return offset, STUDY_UTC_OFFSET_HOURS - offset, "header" if header_offset is not None else "config"
+
+
+def infer_offset_from_gps(path, max_rows=200_000, pairs_needed=25):
+    """Median whole-hour offset of detection time minus the following GPS (UTC) time; None if too few pairs.
+
+    Median over many pairs because startup GPS rows can be corrupt (e.g. "8:11:00" for 18:11:00).
+    """
+    last_detection = None
+    offsets = []
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
+        for index, values in enumerate(csv.reader(stream)):
+            if index > max_rows or len(offsets) >= pairs_needed:
+                break
+            if len(values) < 13:
+                continue
+            tag = values[TAG_IDX].strip()
+            stamp = _fast_timestamp(values[DT_IDX])
+            if stamp is None:
+                continue
+            if tag in ("GPS Fix", "GPS Clock"):
+                if last_detection is not None:
+                    offsets.append((last_detection - stamp).total_seconds() / 3600.0)
+                    last_detection = None
+            elif tag[:3] == "G72":
+                last_detection = stamp
+    if len(offsets) < 3:
+        return None
+    median = float(pd.Series(offsets).median())
+    if abs(median - round(median)) > 0.25:
+        raise ValueError("%s: median detection-GPS difference %.3f h is not a whole-hour offset" % (path, median))
+    return float(round(median))
 
 
 def parse_number(value):
@@ -237,11 +313,14 @@ def _fast_timestamp(value):
             return None
 
 
-def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, end=None):
+def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, end=None, config_offset=None):
     """Return legacy detection rows as tuples in DETECTION_DB_COLUMNS order."""
     metadata = read_file_metadata(path)
     if metadata["FileFormatVersion"] != "2.0":
         raise ValueError("Unsupported File Format Version in %s: %s" % (path, metadata["FileFormatVersion"]))
+    receiver_offset, shift_hours, offset_source = resolve_time_shift(
+        metadata["UTCOffset"], config_offset, path, infer_offset_from_gps(path))
+    shift = timedelta(hours=shift_hours)
     firmware = metadata["FirmwareVersion"]
     file_format = metadata["FileFormatVersion"]
     serial = metadata["SerialNumber"]
@@ -274,9 +353,10 @@ def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, 
             timestamp = _fast_timestamp(values[DT_IDX])
             if timestamp is None:
                 continue
-            if start is not None and timestamp < start:
+            study_time = timestamp + shift
+            if start is not None and study_time < start:
                 continue
-            if end is not None and timestamp > end:
+            if end is not None and study_time > end:
                 continue
             internal = parse_internal(values[INTERNAL_IDX], timestamp)
             if internal is None:
@@ -298,8 +378,8 @@ def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, 
             clock_count += event
             signal = _fast_number(values[SIGSTR_IDX])
             rows.append((
-                timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                (timestamp - EPOCH).total_seconds(),
+                study_time.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                (study_time - EPOCH).total_seconds(),
                 receiver_name, receiver_type, firmware, file_format, serial,
                 path_str, source_row, values[INTERNAL_IDX].strip(),
                 internal["InternalGroup1"], internal["InternalGroup2"],
@@ -317,17 +397,19 @@ def parse_detections(path, receiver_name, receiver_type, tags=None, start=None, 
                 _fast_number(values[THRESHOLD_IDX]),
                 1 if offset_changed else 0, 1 if counter_restart else 0,
                 ";".join(reasons),
-                gps_ts.strftime("%Y-%m-%d %H:%M:%S.%f") if gps_ts else None,
+                # ATS GPS rows are UTC regardless of the receiver's detection time zone.
+                gps_ts.strftime("%Y-%m-%d %H:%M:%S+00:00") if gps_ts else None,
                 gps_lat, gps_lon,
+                timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"), receiver_offset, shift_hours, offset_source,
             ))
     return rows, gps_count, clock_count
 
 
 def _parse_worker(task, tags=None, start=None, end=None):
-    path_str, receiver_name, receiver_type = task
+    path_str, receiver_name, receiver_type, config_offset = task
     try:
         rows, gps_count, clock_count = parse_detections(
-            Path(path_str), receiver_name, receiver_type, tags, start, end
+            Path(path_str), receiver_name, receiver_type, tags, start, end, config_offset
         )
         return Path(path_str).name, rows, gps_count, clock_count, None
     except Exception as error:  # loud-but-continue: report and skip the file
@@ -335,23 +417,34 @@ def _parse_worker(task, tags=None, start=None, end=None):
 
 
 
-def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers):
+def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers, temperature_csv, hobo_dir):
     receiver_table = load_receiver_table(gps_path, config_path)
     receiver_table = receiver_table[receiver_table["Rec_ID"].isin(receivers)]
     receiver_table.to_sql("tblReceiver", connection, if_exists="replace", index=False)
     print("Created tblReceiver: %s rows" % len(receiver_table))
 
-    raw_tags = pd.read_sql("select distinct Tag_ID, TagTypeSource from tblDetectionRaw", connection)
-    raw_tags = raw_tags.rename(columns={"TagTypeSource": "TagType"})
     beacon_registry = load_beacon_registry(config_path)
+    raw_tags = pd.read_sql("select distinct Tag_ID from tblDetectionRaw", connection)
+    raw_tags["TagType"] = tag_types(raw_tags["Tag_ID"], beacon_registry)
     raw_tags = apply_tag_pulse_rates(raw_tags, beacon_registry)
     raw_tags.to_sql("tblTag", connection, if_exists="replace", index=False)
     print("Created tblTag: %s rows" % len(raw_tags))
+    missing_rate = raw_tags[raw_tags.pulseRate.isna()].Tag_ID.tolist()
+    if missing_rate:
+        print("WARNING: tags with no pulseRate (legacy epoch code will fail for them): %s" % missing_rate)
 
-    temperature, wsel = load_environment(covariate_path)
+    temperature = load_temperature_string(temperature_csv, hobo_dir)
+    _, wsel = load_environment(covariate_path)
     temperature.to_sql("tblInterpolatedTemp", connection, if_exists="replace", index=False)
     wsel.to_sql("tblWSEL", connection, if_exists="replace", index=False)
     print("Created tblInterpolatedTemp/tblWSEL: %s/%s rows" % (len(temperature), len(wsel)))
+    print("Temperature sources: %s" % temperature.groupby("TempSource").timeStamp.agg(["min", "max", "size"]).to_dict("index"))
+    first_detection = pd.read_sql("select min(timeStamp) as t from tblDetectionRaw", connection).t.iloc[0]
+    for name, table in (("tblInterpolatedTemp", temperature), ("tblWSEL", wsel)):
+        if first_detection is not None and str(table.timeStamp.min()) > str(first_detection):
+            print("WARNING: %s starts %s, after first detection %s" % (name, table.timeStamp.min(), first_detection))
+    print("WARNING: BM_Elev unresolved (NULL); receiver Z is depth below surface at deployment")
+    print("WARNING: UTC_Conv left NULL pending owner confirmation; detections are on study basis UTC%+g h" % STUDY_UTC_OFFSET_HOURS)
     pd.DataFrame([{
         "UTC_Conv": None,
         "BM_Elev": None,
@@ -391,7 +484,8 @@ def main():
     for path in files:
         serial = SERIAL_PATTERN.match(path.name).group(1)
         receiver = targets.loc[serial]
-        tasks.append((str(path), receiver["Receiver Name"], receiver["Receiver Model"]))
+        config_offset = parse_utc_offset(receiver["Receiver Time Zone Offset"])
+        tasks.append((str(path), receiver["Receiver Name"], receiver["Receiver Model"], config_offset))
 
     output = Path(args.output_db)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -428,12 +522,15 @@ def main():
                 Path(args.config_xlsx).parents[2], "Master Covariate Table",
                 "2025 Master Covariate Table_20251212.csv",
             )
+            data_root = Path(args.config_xlsx).parents[2]
             write_legacy_metadata(
                 connection,
                 args.config_xlsx,
                 os.path.abspath(gps_path),
                 covariate_path,
                 set(targets["Receiver Name"]),
+                args.temperature_csv or str(data_root / "Temperature" / "2025_Temp_String_Data_5min_interpolated.csv"),
+                args.hobo_dir or str(data_root / "Tag Drag Period" / "DD_N"),
             )
         connection.commit()
     finally:

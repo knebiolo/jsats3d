@@ -110,7 +110,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - `conda run` drops piped stdin; run scripts from files, not here-strings.
 
 ## Project Conventions
-- Time basis (verified 2026-09-24): ATS detection timestamps are local PDT (raw header `-07z`); `tblDetectionRaw.seconds` is local wall time encoded as if UTC. ATS GPS Fix rows are UTC. `Temperature/2025_Temp_String_Data_5min_interpolated.csv`, HOBO exports (GMT-07:00), and PI WSE exports (US/Pacific) are local. Proposed `UTC_Conv=-7` pending owner confirmation.
+- Time basis (verified 2026-09-24): ATS detection timestamps are local PDT (raw header `-07z`) for 19 of 20 receivers; ZOI05 logs UTC (`00z`). `tblDetectionRaw.seconds` is receiver wall time encoded as if UTC. ATS GPS Fix rows are UTC. `Temperature/2025_Temp_String_Data_5min_interpolated.csv`, HOBO exports (GMT-07:00), and PI WSE exports (US/Pacific) are local. Proposed `UTC_Conv=-7` pending owner confirmation.
 - Coordinates: UTM Zone 10N NAD83 (EPSG:26910), meters.
 - Elevations: meters relative to Benchmark (BM) or Water Surface Elevation (WSEL).
 - Timestamps: UTC/Local datetime strings converted to float seconds since Unix epoch.
@@ -125,6 +125,7 @@ Production client acoustic telemetry data processing, clock synchronization, and
 - Beacon multipath verified (48 h slice 06-20/21): 26% of bursts multi-detection; later-arrival lag median 16 ms, p99 126 ms; first arrival strongest SigStr in 87.5% of multi-detection bursts; BitPeriod differs little between direct and reflected copies.
 - Local-beacon inter-burst interval median 61.5 s (IQR 59.1-62.8 s); nominal 60 s is not exact.
 - Legacy study-tag epoch rule `round((t - first)/pulseRate)` requires an exact PRI; measured study PRIs vary (~3.02-3.35 s by tag), so a cross-receiver epoch method is required.
+- Receiver deployment (config workbook): ZOI01-ZOI03 "On bottom" (hydrophone depth 33.8-40.7 ft, total depth given; analogous to 2019 R01-R03). ZOI04-ZOI11 on structures (CFNSC entrance, PDS, debris barrier), depth 7.4-10.7 ft, hydrophone offset 3.1-4.0 ft. CFD01-CFD09 forebay, depth 10 ft, offset 0 (CFD02-09 have dynamic GPS; likely the PM's "floats").
 - Receiver GPS fixes spread 10-81 m in 48 h; not usable as hydrophone geometry.
 - `FFD3` pulse rate is approximately 3 seconds; exact interval remains pending measurement from static holds.
 - CHN receivers lack GPS / static coordinates in config.
@@ -145,8 +146,9 @@ Production client acoustic telemetry data processing, clock synchronization, and
 ## Owner Escalations (open)
 - 2026-09-24: ZOI02 as central clock reference is contradicted by 48 h evidence. 149/151 >300 ms TDoA steps are common-mode across receivers (originate in ZOI02 timestamps); ZOI02 logged 2,449 one-second-adjustment rows in 48 h; 164 jumps vs 21 (CFD04), 28 (ZOI08), 29 (CFD09). Unexplained common ~-400 ms offset mode on ZOI02. Pairwise differencing between non-reference receivers leaves 84-94% of epochs within 0.5 ms. Decision stays in place until owner review.
 - 2026-09-24 follow-up: hybrid option (ZOI02 beacon as metronome source, ToT taken from a cleaner clock such as ZOI09/CFD04/ZOI08 minus d/c) cut median jumps 164 -> 20-24 while keeping ZOI02 beacon coverage. ZOI09 alone as metronome: 13 jumps but only 13-14 receivers hear it and 0.5 ms share drops to 0.68. Only 65% of ZOI02 jumps carry a one-second flag. PM leaning ZOI02 (central) or ZOI09 (for floats); unresolved.
-- ZOI05 as detecting receiver of 7D2D is chaotic (77% >5 ms outliers); needs field review.
-- 2026-09-24 pairwise DBSCAN (`scripts/beacon_pairwise_dbscan.py`, 06-17 to 07-01): ZOI05 clock free-runs ~+/-30 s (clock fault). CFD units show ~126 us residual RMS and ms-scale sawtooth vs ~7 us for ZOI units. CFD01 has a persistent second mode ~21.5 ms late (steady reflection). Fixed DBSCAN parameters (0.5 ms budget, 2.5-period window, min_samples 3) await owner review.
+- ZOI05 as detecting receiver of 7D2D appeared chaotic; explained by UTC logging (see correction below).
+- 2026-09-24 pairwise DBSCAN (`scripts/beacon_pairwise_dbscan.py`, 06-17 to 07-01): CFD units show ~126 us residual RMS and ms-scale sawtooth vs ~7 us for ZOI units. CFD01 has a persistent second mode ~21.5 ms late (steady reflection). Fixed DBSCAN parameters (0.5 ms budget, 2.5-period window, min_samples 3) await owner review.
+- CORRECTION 2026-09-25: ZOI05 is NOT a clock fault. Config `Receiver Time Zone Offset` = `-00z` and raw headers `File Start ... 00z`: ZOI05 logs UTC while all other 19 receivers log `-07z`. Parser/final DB do not apply per-receiver offsets, so every ZOI05 row in `tblDetectionRaw` is +7 h vs other receivers. With -7 h shift (48 h slice): noise 100% -> 7.6%, residual RMS 10 us. Fix requires parser change + DB rebuild (owner approval).
 
 ## Completed Milestones
 - Formatted 2025 datasets into legacy SQLite schema (`jsats3d_2025_FFD3_manager_demo.db`).

@@ -213,3 +213,84 @@ Not blocked by missing signal fields. Blocked by: (1) reference-clock whole-seco
 ### Answer for Kevin/PM (request full high-res temperature?)
 - Not needed for the baseline mean sound speed (<=19 us p95 effect). Useful for the permitted System Prompt Section 10 depth-resolved experiment and for DD_S/DD_N spatial comparison. Low cost to request; not blocking.
 - Blocking instead: forebay WSE (`NSC.CZD_WTR_EL.F_CV`) for June 5-16, or confirmation that collector-entrance level with ~0.9 ft offset is acceptable.
+
+---
+
+## 2026-09-25 — ZOI05 Correction + Paper Workflow Gap Map
+
+### ZOI05 correction (supersedes "clock fault" finding)
+- Config `Receiver Time Zone Offset`: ZOI05 `-00z`, all other target receivers `-07z`. Raw headers SR18081: `File Start ... 00z`.
+- 48 h slice (06-20/21, 7D2D, anchor ZOI09): unshifted noise 100%, 0 segments; shifted -7 h noise 7.6%, 115 segments, residual RMS 10.2 us.
+- All ZOI05 rows in final DB (study tags included) are 7 h offset. Parser does not apply per-receiver time-zone offsets. Fix = parser change + rebuild; owner approval needed. Earlier PM messaging calling ZOI05 a clock fault must be corrected.
+
+### Nebiolo & Meyer (2021) Fig. 3 workflow vs 2025 status
+1. Import receivers/HOBO/SCADA -> DB: DONE (final DB). Gaps: `tblInterpolatedTemp` is BB_TPU surface sensor not DD_N mean; tag-drag HOBO not loaded; WSE 06-05..06-16 only collector level (~0.9 ft offset); UTC_Conv NULL; ZOI05 +7 h; BM_Elev NULL.
+2. Speed of sound (mean of all depths; paper cites Seafloor Systems table, legacy `sos()` comment cites Wikipedia): script uses DD_N 4-depth mean + legacy `sos()`. Gap: confirm table source with Kevin.
+3. Metronome epochs: DONE in pairwise script (not written to legacy `tblMetronomeUnfiltered`). True 7D2D spacing 62.7 s.
+4. Metronome multipath: phase 1 first arrival DONE; phase 2 = DBSCAN (t, delta) replacing KNN, DIAGNOSTIC 2 weeks. Gaps: anchor-side epoch removal, CFD01 steady-reflection rule, full season, second beacon.
+5. Clock sync of known-position receivers (eq. 7, piecewise-linear eq. 10 -> seconds_fix): NOT STARTED. Needs reference decision, jump handling from DBSCAN segments, surveyed positions.
+6. Beacon multipath for receivers at depth (ZOI01-03): NOT STARTED.
+7. Position receivers at depth with Deng from own beacons: NOT STARTED. Config coords available as check.
+8. Clock sync receivers at depth: NOT STARTED.
+9. Fish tag multipath: NOT STARTED. Needs cross-receiver epoch grouping (study PRIs inexact).
+10. Position fish (Deng/NLLS), convex hull, retain impossible positions: NOT STARTED.
+11. Accuracy (metronome RMSE vs survey), tag drag overlay, precision sigma in/out hull: NOT STARTED. Drag GPS + temperature now available; WSE partial.
+
+### Method implication found during mapping
+- Paper master R05 was surface-mounted and surveyed. ZOI02 is on bottom and unsurveyed. Using ZOI02 as beacon source puts its position error into d_Bi - d_Ba, which becomes a constant per-receiver offset indistinguishable from clock bias. Either solve ZOI02 position first (paper step 7 logic) or use a surveyed surface receiver's beacon as metronome.
+
+### Legacy code issues noticed (flag to Kevin, not fixed)
+- `position.Deng()`: in-hull test for solution B uses `S1a.item(1)`, `S1a.item(2)` (solution A y/z).
+- `position.__init__`: WSEL divided by 3.28084 unconditionally (units check commented out).
+- `multipath_classifier()`: `dat[dat.SNR > 0]` drops all ATS rows.
+
+### Parameter changes
+- None.
+
+---
+
+## 2026-09-25 — Parser/Adapter/DBSCAN Fixes (bounded validation; full rebuild pending)
+
+### Files touched
+- `scripts/parse_ats_raw_to_legacy.py`, `scripts/adapt_2025_to_legacy.py`, `scripts/beacon_pairwise_dbscan.py`, `tests/test_2025_contracts.py`.
+
+### Parser (`parse_ats_raw_to_legacy.py`)
+- Per-file time-zone shift to study basis PDT (UTC-7). Evidence order: GPS-derived (median whole-hour detection-minus-GPS over >=3 pairs) > header `File Start ... NNz` > config `Receiver Time Zone Offset`. Header/config disagreement without GPS raises. A recovery file with a wrong `00z` header was found; GPS evidence overrides it with a printed warning.
+- New columns: `RawDateTime` (original wall time), `ReceiverUTCOffsetHours`, `TimeShiftHours`, `TimeZoneSource`.
+- `GPSFixTimeStamp` written with explicit `+00:00` (ATS GPS rows are UTC).
+- `TagType` = `beacon` for any config beacon code, else `study` (legacy expects these).
+- `--include-config-beacons` now includes array-wide beacons without a host receiver.
+- `tblInterpolatedTemp` from DD_N (see adapter). `UTC_Conv` left NULL with warning (owner confirmation pending).
+
+### Adapter (`adapt_2025_to_legacy.py`)
+- `load_beacon_registry()` keeps beacons without a receiver name; prefers rows naming a receiver.
+- `load_temperature_string()`: mean of all DD_N depths per step (paper method). 10-depth HOBO (GMT-07:00, verified) where complete; 4-depth string file after HOBO end. Incomplete steps dropped, not filled. `TempSource`, `DepthCount` columns added. 10- vs 4-depth mean differ median -0.03 C (~6 us / 100 m), recorded 2026-09-24.
+- `tblReceiver` adds `ZReference='depth_below_surface_at_deployment'`, `UTCOffset`, `HydrophoneDepth_ft`, `HydrophoneOffset_ft`, `TotalDepth_ft`, `MountDescription`, `DeploymentDate`. Z unchanged (still -depth); mount class and BM_Elev unresolved.
+- WSE unchanged: forebay CZD only; June 5-16 collector level not spliced (owner decision on ~0.9 ft offset or CZD signal).
+
+### Parameter changes with rationale
+- Provisional study pulse rates: FC36 3.038 s, 0B0A 3.024 s, 0AC6 3.204 s, 493F 3.155 s. Source: median single-receiver burst spacing, 2026-09-24 audit (first 30M rowids). Only fills NULLs. PENDING PM APPROVAL.
+- DBSCAN additions (fixed, not tuned):
+  - `ANCHOR_MAJORITY = 0.5`, `ANCHOR_MIN_RECEIVERS = 4`: an epoch is anchor-side when >= half of >= 4 receivers are noise together (4 = 3-D solution minimum). Two passes: detect, exclude, re-cluster.
+  - `MAX_REFLECTION_DELAY_S = 0.25`: steady-reflection cluster = overlaps in time an earlier cluster by 0.5 ms < gap <= 250 ms. Bound from observed later-arrival p99 126 ms (23 of ~285k > 200 ms) and clock steps >= ~390 ms.
+
+### DBSCAN (`beacon_pairwise_dbscan.py`)
+- Classes: `clean`, `noise`, `steady_reflection`, `anchor_suspect`. Residuals fit on clean only.
+- `--output-db` writes legacy-style `tblMetronomeFiltered` (all rows, `multipath` = rank>1) and `tblMetronomeSecondFiltered` (first arrivals, `multipath_prediction` = not clean/anchor). `transNo` = anchor epoch number; seconds uncorrected.
+- Temperature default reads rebuilt `tblInterpolatedTemp` (requires `TempSource`); `--temperature-csv` still supported.
+- ZOI02 host position: warning only. Solving it first or switching beacon remains Kevin's decision.
+
+### Validation
+- 19 tests pass; `py_compile` and `git diff --check` pass.
+- Scratch build `output/scratch_tzfix.db` (06-20/21 study basis; CFD09, ZOI02, ZOI05, ZOI08, ZOI09; beacons only): ZOI05 window aligned with others; array-wide 1F14/1F38/1F71/1F94/1FCD present (1F5A absent in window, unverified why); TagType=beacon.
+- DBSCAN on scratch (ZOI02/7D2D, anchor ZOI09): ZOI05 noise 7.58%, RMS 0.0102 ms, 0 over budget; ZOI08 3.48%, 0.0553 ms; CFD09 9.22%, 0.2232 ms, 109 steady-reflection epochs, 88 clean >0.5 ms (WARNING). Anchor-side epochs 0 (only 3 detecting receivers < 4 minimum; untested on real data). Legacy tables written to `output/scratch_metronome.db`: 13,659 / 10,363 rows.
+- Study-tag TagType and provisional pulse rates not yet exercised on real data (scratch had no study tags).
+
+### Open / next
+1. Full rebuild to a NEW file (do not overwrite `jsats3d_2025_final.db`); user runs in terminal for visible progress. 73.6 GB free on C:.
+2. Study-tag list for rebuild: final DB has FFD3, FC36, 0B0A, 0AC6, 493F; 09-22 journal listed C0FE, 7F0D, 0FC7. Confirm.
+3. After rebuild: re-run 2-week DBSCAN with all receivers to exercise anchor-side rule; then Step 7 clock correction.
+
+### Cleanup — 2026-09-25
+- Deleted generated products only: `output/dbscan_pairwise/` (2-week run on pre-fix DB; ZOI05 misaligned; numbers kept in table above), `output/dbscan_pairwise_scratch/`, `output/dbscan_scratch/`, `output/scratch_tzfix.db`, `output/scratch_metronome.db`, `scripts/__pycache__`, `tests/__pycache__`.
+- Kept: `output/jsats3d_2025_final.db` (until v2 rebuild verified), `output/current_*.csv` (cited by 09-23 journal; ZOI05 times in them are pre-fix), `output/positioning/` (pre-project), tracked `jsats3d/__pycache__`, all legacy code, all K: data.

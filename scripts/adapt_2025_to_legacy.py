@@ -43,6 +43,18 @@ ATS_EXTENSION_COLUMNS = [
     "FirmwareVersion", "FileFormatVersion", "SourceFile", "SourceRow",
 ]
 
+# Median single-receiver burst spacing from the 2026-09-24 audit; provisional pending PM approval.
+PROVISIONAL_STUDY_PULSE_RATES = {"FC36": 3.038, "0B0A": 3.024, "0AC6": 3.204, "493F": 3.155}
+DD_N_STRING_COLUMNS = ["DD_N_0p5", "DD_N_1p5", "DD_N_9", "DD_N_18"]
+RECEIVER_METADATA_COLUMNS = {
+    "Receiver Time Zone Offset": "UTCOffset",
+    "Hydrophone Depth (feet)": "HydrophoneDepth_ft",
+    "Hydrophone Offset (feet)": "HydrophoneOffset_ft",
+    "Total Depth (feet)": "TotalDepth_ft",
+    "Deployment Location Description": "MountDescription",
+    "Deployment Date": "DeploymentDate",
+}
+
 
 def parse_args():
     root = r"K:\Jobs\5662\001\Data\DataTrans\2025_Data"
@@ -69,6 +81,8 @@ def parse_args():
     )
     parser.add_argument("--config-xlsx", default=os.path.join(root, "CowlitzAT2025_Data_Deliverables", "1_array_metadata", "cowlitz_2025_AT_config.xlsx"))
     parser.add_argument("--covariate-csv", default=os.path.join(root, "Master Covariate Table", "2025 Master Covariate Table_20251212.csv"))
+    parser.add_argument("--temperature-csv", default=os.path.join(root, "Temperature", "2025_Temp_String_Data_5min_interpolated.csv"))
+    parser.add_argument("--hobo-dir", default=os.path.join(root, "Tag Drag Period", "DD_N"))
     parser.add_argument(
         "--files",
         nargs="+",
@@ -108,13 +122,20 @@ def load_receiver_table(gps_path, config_path):
     receivers["Ref_Elev"] = "BM"
     receivers["Z"] = -pd.to_numeric(receivers["Depth_ft"], errors="coerce") * 0.3048
     receivers["Z_t"] = receivers["Z"]
+    # Z is depth below the surface at deployment, not a benchmark elevation; BM_Elev and mount class are unresolved.
+    receivers["ZReference"] = "depth_below_surface_at_deployment"
     origin_x = receivers["easting"].min()
     origin_y = receivers["northing"].min()
     receivers["X"] = receivers["easting"] - origin_x
     receivers["Y"] = receivers["northing"] - origin_y
     receivers["X_t"] = receivers["X"]
     receivers["Y_t"] = receivers["Y"]
-    receivers = receivers[["Rec_ID", "Tag_ID", "Ref_Elev", "X", "Y", "Z", "X_t", "Y_t", "Z_t"]]
+    receivers["HydrophoneDepth_ft"] = receivers["Depth_ft"]
+    for source, target in RECEIVER_METADATA_COLUMNS.items():
+        if target not in receivers:
+            receivers[target] = receivers[source] if source in receivers else pd.NA
+    receivers = receivers[["Rec_ID", "Tag_ID", "Ref_Elev", "X", "Y", "Z", "X_t", "Y_t", "Z_t", "ZReference",
+                           *RECEIVER_METADATA_COLUMNS.values()]]
     return receivers
 
 
@@ -130,8 +151,57 @@ def load_beacon_registry(config_path):
     registry["Rec_ID"] = registry["Rec_ID"].astype("string").str.strip()
     registry["Tag_ID"] = registry["Tag_ID"].astype("string").str.strip()
     registry["pulseRate"] = pd.to_numeric(registry["pulseRate"], errors="coerce")
-    registry = registry.dropna(subset=["Rec_ID", "Tag_ID"])
-    return registry.drop_duplicates("Tag_ID")
+    # Keep beacons without a host receiver (array-wide candidates); prefer rows that name a receiver.
+    registry = registry.dropna(subset=["Tag_ID"])
+    registry = registry.sort_values("Rec_ID", na_position="last", kind="stable")
+    return registry.drop_duplicates("Tag_ID").reset_index(drop=True)
+
+
+def tag_types(tag_ids, beacon_registry):
+    beacons = set(beacon_registry["Tag_ID"].dropna().astype(str))
+    return pd.Series(np.where(pd.Series(tag_ids).astype(str).isin(beacons), "beacon", "study"),
+                     index=pd.Series(tag_ids).index)
+
+
+def _read_hobo(path):
+    raw = pd.read_csv(path, skiprows=1, encoding="latin-1")
+    time_column, temp_column = raw.columns[1], raw.columns[2]
+    if "GMT-07:00" not in time_column:
+        raise ValueError("%s: expected GMT-07:00 timestamps, found %r" % (path, time_column))
+    series = pd.Series(pd.to_numeric(raw[temp_column], errors="coerce").values,
+                       index=pd.to_datetime(raw[time_column], format="%m/%d/%Y %H:%M"))
+    return series.dropna().groupby(level=0).first()
+
+
+def load_temperature_string(temperature_csv, hobo_dir=None):
+    """Mean of all DD_N depths per time step (Nebiolo & Meyer 2021), local PDT.
+
+    HOBO exports (10 depths) are used where complete; the delivered 4-depth string
+    file covers the remaining period. Incomplete time steps are dropped, not filled.
+    """
+    string = pd.read_csv(temperature_csv, usecols=["DateTime"] + DD_N_STRING_COLUMNS)
+    string.index = pd.to_datetime(string.DateTime, format="mixed")
+    string = string[DD_N_STRING_COLUMNS].dropna()
+    parts = []
+    hobo_end = None
+    if hobo_dir and os.path.isdir(hobo_dir):
+        files = sorted(f for f in os.listdir(hobo_dir) if f.lower().endswith(".csv") and "_DD_N_" in f)
+        if files:
+            hobo = pd.concat({f: _read_hobo(os.path.join(hobo_dir, f)) for f in files}, axis=1, sort=True)
+            complete = hobo.dropna()
+            print("HOBO DD_N: %s depths, %s complete steps, %s incomplete steps dropped"
+                  % (hobo.shape[1], len(complete), len(hobo) - len(complete)))
+            parts.append(pd.DataFrame({"C": complete.mean(axis=1), "TempSource": "DD_N_HOBO",
+                                       "DepthCount": hobo.shape[1]}))
+            hobo_end = complete.index.max()
+    else:
+        print("WARNING: no HOBO DD_N folder; using 4-depth string file only")
+    tail = string if hobo_end is None else string[string.index > hobo_end]
+    parts.append(pd.DataFrame({"C": tail.mean(axis=1), "TempSource": "DD_N_string",
+                               "DepthCount": len(DD_N_STRING_COLUMNS)}))
+    temperature = pd.concat(parts).sort_index()
+    temperature.index.name = "timeStamp"
+    return temperature.reset_index()
 
 
 def parse_beacon_window(beacon_window):
@@ -158,6 +228,8 @@ def apply_tag_pulse_rates(tags, beacon_registry, ffd3_rate=3.33):
     result = tags.merge(beacon_registry[["Tag_ID", "pulseRate"]], on="Tag_ID", how="left")
     result["pulseRate"] = pd.to_numeric(result["pulseRate"], errors="coerce")
     result.loc[result["Tag_ID"] == "FFD3", "pulseRate"] = ffd3_rate
+    for tag, rate in PROVISIONAL_STUDY_PULSE_RATES.items():
+        result.loc[(result["Tag_ID"] == tag) & result["pulseRate"].isna(), "pulseRate"] = rate
     return result
 
 
@@ -306,11 +378,12 @@ def main():
         tags = apply_tag_pulse_rates(tags, beacon_registry)
         tags.to_sql("tblTag", connection, if_exists="replace", index=False)
 
-        temperature, wsel = load_environment(args.covariate_csv)
+        temperature = load_temperature_string(args.temperature_csv, args.hobo_dir)
+        _, wsel = load_environment(args.covariate_csv)
         temperature.to_sql("tblInterpolatedTemp", connection, if_exists="replace", index=False)
         wsel.to_sql("tblWSEL", connection, if_exists="replace", index=False)
         study_parameters = pd.DataFrame([{
-            "UTC_Conv": np.nan,
+            "UTC_Conv": None,
             "BM_Elev": np.nan,
             "BM_Elev_Units": "feet",
             "Output_Units": "meters",
