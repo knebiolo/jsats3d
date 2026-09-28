@@ -182,6 +182,15 @@
 - Checks: py_compile OK for all 3 scripts, 19 tests pass, `git diff --check` clean, GPS script re-run OK (K: read only).
 - User will commit and push manually. Do not commit `Nebiolo_Meyer_2021 (003).pdf`.
 
+## Species / Acoustic Tag Link (LLM_Prompts info request)
+- Answered Q1-Q5 in `LLM_Prompts.txt`; questions removed per user. All reads were read only; scratch in %TEMP%\jsats_info deleted.
+- Link: PTAGIS `released_v0.csv` has `Acoustic Tag Value` + `Species Name` + `Tag Code` (PIT). It is the only such file found.
+- All 538 acoustic-tagged rows are Chinook (COWLR2, released 06-17..08-12). 232 codes are lower case, so upper-case before matching.
+- 28 rows (26 values) look Excel-corrupted (scientific notation, e.g. 4.10E+01; dropped leading zeros, e.g. 74). Three rows are `0.00E+00` and ambiguous. Ask the PM for a text re-export.
+- `master_df_study.csv`: 592 codes, 77.4M rows; 510 match PTAGIS exactly. FFD3 and FC36 are not in PTAGIS (test tags).
+- QC tracker mentions a "P4 file" / holding-tank data: NOT FOUND in 2025_Data.
+- Env: python 3.11.15 (tomllib available), pandas 3.0.5.
+
 ## PM Items (separate from Kevin)
 - Surveyed surface-receiver positions; confirm ZOI01-03 static; deployment-day WSE; forebay WSE 06-05 to 06-16; array-wide beacon identities/periods; Spheros upstream filtering docs; approve `UTC_Conv = -7` and provisional study pulse rates.
 
