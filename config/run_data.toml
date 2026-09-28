@@ -1,0 +1,44 @@
+# Run file for scripts/run_data.py
+# Fill this in, then run from the repo folder:
+#     conda run -n jsat_3d python scripts/run_data.py
+# Add --dry-run to check everything without parsing.
+#
+# Paths: paste Windows paths between single quotes, backslashes are fine.
+# A blank value ('' or []) means "not used" / "no filter".
+
+# Set true only if you really want to replace an existing output_db.
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+# New database to create. Relative paths are inside the repo. Use a new name per run.
+output_db       = 'output\jsats3d_2025_run.db'
+
+[selection]
+# Species from PTAGIS released_v0 "Species Name" (case does not matter).
+# 2025: only Chinook carry acoustic tags. [] = no species filter.
+species   = ['Chinook']
+# Extra tags by acoustic code, added to the species tags. FFD3 and FC36 are test tags.
+tags      = ['FFD3', 'FC36']
+# Time frame in study time (PDT). Date alone = midnight. '' = no limit.
+start     = '2025-06-17'
+end       = '2025-07-01'
+# Receivers by name (e.g. 'ZOI02', 'CFD04'). [] = all 20 target receivers.
+receivers = []
+# Species and tags both empty = ALL tags (large). Beacons are always added when filtering.
+
+[dbscan]
+# Optional: run the beacon pairwise DBSCAN on the new database afterwards.
+run             = false
+beacon_receiver = 'ZOI02'
+anchor          = 'ZOI09'
+# Blank = use the [selection] start/end.
+start           = ''
+end             = ''
+output_dir      = ''

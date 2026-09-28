@@ -107,6 +107,8 @@ def parse_args():
     )
     parser.add_argument("--temperature-csv", help="Delivered DD_N temperature string CSV (default under 2025_Data)")
     parser.add_argument("--hobo-dir", help="Folder of DD_N HOBO exports (default: Tag Drag Period/DD_N)")
+    parser.add_argument("--gps-csv", help="Float GPS master_df_gps.csv (default: 4_gps_datasets next to the config folder)")
+    parser.add_argument("--covariate-csv", help="Master Covariate Table CSV (default under 2025_Data)")
     return parser.parse_args()
 
 
@@ -515,10 +517,10 @@ def main():
                 totals["clock_events"] += clock_count
                 print("Parsed %s: %s detections" % (name, len(rows)))
         if args.legacy_db:
-            gps_path = os.path.join(
+            gps_path = args.gps_csv or os.path.join(
                 os.path.dirname(args.config_xlsx), "..", "4_gps_datasets", "master_df_gps.csv"
             )
-            covariate_path = os.path.join(
+            covariate_path = args.covariate_csv or os.path.join(
                 Path(args.config_xlsx).parents[2], "Master Covariate Table",
                 "2025 Master Covariate Table_20251212.csv",
             )

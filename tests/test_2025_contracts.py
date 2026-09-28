@@ -24,6 +24,13 @@ from scripts.parse_ats_raw_to_legacy import (
 )
 from scripts.extract_dbscan_features import extract_features
 from scripts.beacon_pairwise_dbscan import classify, cluster
+from scripts.run_data import (
+    check_output,
+    load_species_tags,
+    normalize_acoustic_code,
+    normalize_tags,
+    parser_command,
+)
 
 
 class Test2025Adapter(unittest.TestCase):
@@ -248,6 +255,71 @@ class Test2025Adapter(unittest.TestCase):
             result = load_temperature_string(str(string), str(hobo))
         self.assertEqual(result.C.tolist(), [11.0, 4.0])
         self.assertEqual(result.TempSource.tolist(), ["DD_N_HOBO", "DD_N_string"])
+
+
+class TestRunData(unittest.TestCase):
+    def test_acoustic_codes_are_upper_cased_and_excel_damage_reversed_only_when_unique(self):
+        self.assertEqual(normalize_acoustic_code("27a0"), ("27A0", None))
+        self.assertEqual(normalize_acoustic_code("74")[0], "0074")
+        self.assertEqual(normalize_acoustic_code("4.10E+01")[0], "41E0")
+        self.assertEqual(normalize_acoustic_code("1.80E+05")[0], "18E4")
+        self.assertEqual(normalize_acoustic_code("2.00E+39")[0], "2E39")
+        self.assertEqual(normalize_acoustic_code("7.20E+07")[0], "72E6")
+        self.assertIsNone(normalize_acoustic_code("0.00E+00")[0])
+        self.assertIsNone(normalize_acoustic_code("1.00E+05")[0])  # 1E05, 01E5 and 10E4 all equal 1e5
+        self.assertIsNone(normalize_acoustic_code("")[0])
+
+    def test_species_lookup_uses_acoustic_column_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            released = Path(directory) / "released_v0.csv"
+            released.write_text(
+                "Tag Code,Acoustic Tag Value,Species Name\n"
+                "3DD.1,27a0,Chinook\n3DD.2,,Coho\n3DD.3,4.10E+01,Chinook\n"
+                "3DD.4,0.00E+00,Chinook\n3DD.5,B175,Coho\n", encoding="utf-8")
+            codes, repaired, unresolved = load_species_tags(released, ["chinook"])
+            self.assertEqual(codes, {"27A0", "41E0"})
+            self.assertEqual(repaired, [("4.10E+01", "41E0")])
+            self.assertEqual(len(unresolved), 1)
+            with self.assertRaises(ValueError):
+                load_species_tags(released, ["Steelhead"])
+
+    def test_tags_must_be_four_hex(self):
+        self.assertEqual(normalize_tags(["ffd3", " FC36 "]), {"FFD3", "FC36"})
+        with self.assertRaises(ValueError):
+            normalize_tags(["G72FFD3"])
+
+    def test_output_refused_inside_raw_data_or_over_existing_db(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "2025_Data"
+            paths = {}
+            for name in ("raw_root", "hobo_dir"):
+                paths[name] = data / name
+                paths[name].mkdir(parents=True)
+            for name in ("config_xlsx", "gps_csv", "covariate_csv", "temperature_csv", "released_file"):
+                paths[name] = data / name / "file.csv"
+                paths[name].parent.mkdir(parents=True)
+                paths[name].write_text("x")
+            with self.assertRaises(ValueError):
+                check_output(data / "out.db", paths, overwrite=False)
+            existing = Path(directory) / "repo" / "old.db"
+            existing.parent.mkdir()
+            existing.write_text("x")
+            with self.assertRaises(ValueError):
+                check_output(existing, paths, overwrite=False)
+            check_output(existing, paths, overwrite=True)
+            check_output(Path(directory) / "repo" / "new.db", paths, overwrite=False)
+
+    def test_parser_command_adds_beacons_only_when_filtering_tags(self):
+        paths = {name: Path(name) for name in (
+            "raw_root", "config_xlsx", "output_db", "temperature_csv", "hobo_dir", "gps_csv", "covariate_csv")}
+        filtered = parser_command(paths, "2025-06-17", "2025-07-01", ["18084"], {"FFD3", "27A0"})
+        self.assertIn("--include-config-beacons", filtered)
+        self.assertEqual([filtered[i + 1] for i, v in enumerate(filtered) if v == "--tag"], ["27A0", "FFD3"])
+        self.assertEqual(filtered[filtered.index("--serial") + 1], "18084")
+        everything = parser_command(paths, None, None, [], set())
+        self.assertNotIn("--include-config-beacons", everything)
+        self.assertNotIn("--tag", everything)
+        self.assertNotIn("--start", everything)
 
 
 if __name__ == "__main__":
