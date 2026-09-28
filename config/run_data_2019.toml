@@ -1,0 +1,50 @@
+# Run file for scripts/run_data.py  (2019 Teknologic data, Nebiolo & Meyer 2021)
+#     conda run -n jsat_3d python scripts/run_data.py config/run_data_2019.toml
+# The import itself uses Kevin's functions (create_project_db, set_study_parameters,
+# study_data_import, acoustic_data_import) and his temperature_assessment.py averaging,
+# so it runs in the legacy env. Values below are from Kevin's projectSetup.py.
+# FILL IN the paths: the 2019 files are not on the K: 2025 share.
+
+data_format = 'teknologic'
+overwrite = false
+
+[paths]
+# One subfolder per receiver named by Rec_ID (R01, R02, ...), holding the Teknologic CSV files.
+raw_root      = 'C:\path\to\2019\Aggregated'
+tag_csv       = 'C:\path\to\2019\tblTag.csv'                  # Tag_ID, TagType, pulseRate
+receiver_csv  = 'C:\path\to\2019\tblReceiver_initial_B.csv'   # Rec_ID, Type, Tag_ID, Ref_Elev, X, Y, Z, X_t, Y_t, Z_t
+wsel_csv      = 'C:\path\to\2019\tblWSEL.csv'                 # timeStamp, WSEL
+temp_csv      = 'C:\path\to\2019\tblTemp.csv'                 # meas_dt, location, depth_ft, temp_f
+output_db     = 'output\cowlitz_2019_legacy.db'
+
+[selection]
+# Not used for Teknologic: the legacy import keeps every tag inside the sync window.
+species   = []
+tags      = []
+start     = ''
+end       = ''
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 262.585     # 861.5 ft / 3.28084
+bm_elev_units    = 'meters'
+output_units     = 'meters'
+master_receiver  = 'R05'
+synch_time_start = '2018-06-07 13:17:08'   # projectSetup.py "synch_time"
+synch_time_end   = ''                      # FILL IN (end of study)
+
+[legacy]
+run               = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+# FILL IN from the paper / tblReceiver: surface receivers with surveyed positions, master included.
+surface_receivers = ['R04', 'R05', 'R06', 'R07', 'R08', 'R09']
+deep_receivers    = ['R01', 'R02', 'R03']
+deep_solution     = 'B'
+study_tags        = []
+signal_proxies    = false   # 2019 Teknologic data has real SNR/NBW
+work_dir          = ''
+
+[dbscan]
+run = false

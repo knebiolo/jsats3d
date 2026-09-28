@@ -1,11 +1,13 @@
-# Run file for scripts/run_data.py
+# Run file for scripts/run_data.py  (2025 ATS data)
 # Fill this in, then run from the repo folder:
 #     conda run -n jsat_3d python scripts/run_data.py
-# Add --dry-run to check everything without parsing.
+# Add --dry-run to check everything without running. Add --skip-build to reuse output_db.
+# For the 2019 paper data use config/run_data_2019.toml.
 #
 # Paths: paste Windows paths between single quotes, backslashes are fine.
 # A blank value ('' or []) means "not used" / "no filter".
 
+data_format = 'ats'
 # Set true only if you really want to replace an existing output_db.
 overwrite = false
 
@@ -23,18 +25,53 @@ output_db       = 'output\jsats3d_2025_run.db'
 [selection]
 # Species from PTAGIS released_v0 "Species Name" (case does not matter).
 # 2025: only Chinook carry acoustic tags. [] = no species filter.
-species   = ['Chinook']
-# Extra tags by acoustic code, added to the species tags. FFD3 and FC36 are test tags.
-tags      = ['FFD3', 'FC36']
+species   = []
+# Tags by acoustic code, added to the species tags. The 5 test tags:
+tags      = ['FFD3', 'FC36', '0B0A', '0AC6', '493F']
 # Time frame in study time (PDT). Date alone = midnight. '' = no limit.
-start     = '2025-06-17'
-end       = '2025-07-01'
+start     = '2025-06-20'
+end       = '2025-06-22'
 # Receivers by name (e.g. 'ZOI02', 'CFD04'). [] = all 20 target receivers.
 receivers = []
 # Species and tags both empty = ALL tags (large). Beacons are always added when filtering.
 
+[study]
+# Written to tblStudyParameters (legacy set_study_parameters fields).
+utc_conv         = -7          # proposed, pending owner confirmation
+bm_elev          = ''          # REQUIRED for [legacy] run (legacy clock_fix reads it). Unknown for 2025: PM question
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+# Legacy clock reference: must host its own beacon and be a surface receiver (position known).
+# ZOI08 (beacon 7DB7) is heard by all receivers and has few clock jumps. ZOI02 is on the bottom,
+# so under the legacy workflow it is a deep receiver, not a master. Pending Kevin.
+master_receiver  = 'ZOI08'
+synch_time_start = ''          # blank = [selection] start
+synch_time_end   = ''          # blank = [selection] end
+# Pulse rates (s) to set in tblTag, e.g. { '27A0' = 3.2 }. Legacy skips study tags without one.
+# The 5 test tags already get provisional rates from the parser.
+pulse_rates      = {}
+
+[legacy]
+# Run Kevin's unchanged jsats3d.py workflow after the build (legacy env, environment_legacy.yml).
+run               = false
+env               = 'jsat_legacy'   # conda env name, or a full env folder path
+method            = 'KNN'           # multipath_classifier: KNN (paper choice), SVM, NB, CART
+# Receivers with known positions (phase 1). Must include master_receiver.
+# PM 2026-09-28: ZOI11 and CFD01 excluded. CFD05 hears very little (hydrophone issue).
+surface_receivers = ['ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+# Receivers on the bottom: positioned from their own beacons with Deng (paper step 7).
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+deep_solution     = 'B'             # Deng root used for the deep receiver median (kernels uses B)
+# Study tags to position. [] = every study tag in tblTag that has a pulseRate.
+study_tags        = []
+# PROVISIONAL, needs Kevin: ATS has no SNR/NBW. true fills SNR = SigStr - Threshold and
+# NBW = BitPeriod so the legacy classifier can run. false leaves them NULL (classifier drops all rows).
+signal_proxies    = true
+work_dir          = ''              # blank = output/<db name>_legacy
+
 [dbscan]
-# Optional: run the beacon pairwise DBSCAN on the new database afterwards.
+# Optional: run the 2025 beacon pairwise DBSCAN diagnostic on the new database afterwards.
 run             = false
 beacon_receiver = 'ZOI02'
 anchor          = 'ZOI09'

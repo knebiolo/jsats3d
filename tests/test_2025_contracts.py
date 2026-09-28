@@ -1,6 +1,7 @@
 """Tests for formatting 2025 inputs into legacy-compatible tables."""
-import unittest
+import sqlite3
 import tempfile
+import unittest
 from pathlib import Path
 
 import pandas as pd
@@ -24,8 +25,12 @@ from scripts.parse_ats_raw_to_legacy import (
 )
 from scripts.extract_dbscan_features import extract_features
 from scripts.beacon_pairwise_dbscan import classify, cluster
+from scripts.legacy_pipeline import widen_table
 from scripts.run_data import (
+    check_inputs,
     check_output,
+    finish_database,
+    legacy_command,
     load_species_tags,
     normalize_acoustic_code,
     normalize_tags,
@@ -320,6 +325,57 @@ class TestRunData(unittest.TestCase):
         self.assertNotIn("--include-config-beacons", everything)
         self.assertNotIn("--tag", everything)
         self.assertNotIn("--start", everything)
+
+    def test_teknologic_format_needs_its_own_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Aggregated").mkdir()
+            paths = {"raw_root": root / "Aggregated", "output_db": root / "out.db"}
+            for name in ("tag_csv", "receiver_csv", "wsel_csv", "temp_csv"):
+                paths[name] = root / (name + ".csv")
+                paths[name].write_text("x")
+            check_inputs(paths, "teknologic")
+            with self.assertRaises(ValueError):
+                check_inputs(paths, "ats")
+
+    def test_legacy_command_uses_env_name_or_folder(self):
+        by_name = legacy_command({"env": "jsat_legacy"}, "process", "run.toml")
+        self.assertEqual(by_name[by_name.index("run") + 1:by_name.index("run") + 3], ["-n", "jsat_legacy"])
+        by_path = legacy_command({"env": "C:\\envs\\jsat_legacy"}, "process", "run.toml")
+        self.assertIn("-p", by_path)
+        self.assertEqual(by_path[-2:], ["process", "run.toml"])
+
+    def test_finish_database_sets_study_rates_and_provisional_signal_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "t.db"
+            con = sqlite3.connect(db)
+            con.execute("create table tblDetectionRaw (Tag_ID, Rec_ID, SigStr, Threshold, BitPeriod, SNR, NBW)")
+            con.execute("insert into tblDetectionRaw values ('A1B2','ZOI01',212,160,'240 13/31',NULL,NULL)")
+            con.execute("create table tblTag (Tag_ID, TagType, pulseRate)")
+            con.execute("insert into tblTag values ('A1B2','study',NULL)")
+            con.commit()
+            con.close()
+            study = {"utc_conv": -7, "bm_elev": "", "master_receiver": "ZOI08"}
+            finish_database(db, study, "2025-06-20", "2025-06-21", True, {"a1b2": 3.0})
+            con = sqlite3.connect(db)
+            self.assertEqual(con.execute("select SNR, NBW from tblDetectionRaw").fetchone(), (52, 240.0))
+            self.assertEqual(con.execute("select pulseRate from tblTag").fetchone(), (3.0,))
+            row = con.execute("select * from tblStudyParameters").fetchone()
+            con.close()
+        self.assertEqual(row, (-7, None, "feet", "meters", "ZOI08", "2025-06-20", "2025-06-21"))
+
+    def test_widen_table_takes_every_csv_column_before_legacy_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "csv"
+            folder.mkdir()
+            (folder / "a.csv").write_text("Rec_ID,multipath_prediction\n")
+            (folder / "b.csv").write_text("Rec_ID,amp_s,multipath_prediction\nR1,0.5,0\n")
+            db = str(Path(directory) / "t.db")
+            widen_table(db, "tblMetronomeSecondFiltered", folder)
+            con = sqlite3.connect(db)
+            columns = [row[1] for row in con.execute("PRAGMA table_info(tblMetronomeSecondFiltered)")]
+            con.close()
+        self.assertEqual(columns, ["Rec_ID", "multipath_prediction", "amp_s"])
 
 
 if __name__ == "__main__":
