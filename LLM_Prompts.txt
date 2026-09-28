@@ -1,154 +1,406 @@
 LLM_Prompts.txt
 ================
-Round-trip file between Ethan's local LLM (Copilot) and Claude Code.
-Workflow: Claude writes a prompt below. Ethan runs it locally. The local LLM
-writes its findings in the RESPONSE block for that prompt. Ethan commits and
-pushes to ENM_jsat3d_edits. Claude reads the response and writes the next prompt.
+Project handoff file for the 2025 Cowlitz Falls ATS 3D positioning work (jsats3d).
+Replaces the old Prompt 001 round-trip log (2026-09-15). Last updated 2026-09-28.
+Branch: ENM_jsat3d_edits. Env: conda jsat_3d. Detailed history: .ai_journal/session/.
 
-Rules for the local LLM:
+Rules for any LLM working here:
 - Work only on branch ENM_jsat3d_edits. Never modify main.
-- Raw data under K:\Jobs\5662\001\Data\DataTrans\2025_Data is read only.
-- Read LONG_TERM_CONTEXT.md and the newest .ai_journal/session file first.
+- Raw data under K:\Jobs\5662\001\Data\DataTrans\2025_Data is READ ONLY. Never write, move or delete there.
+- Read System_Prompt.txt, LONG_TERM_CONTEXT.md and the newest .ai_journal/session file first.
 - Do not invent physical values. Mark them BLOCKED with the exact owner question.
-- Fill the RESPONSE block in place. Do not delete the prompt.
+- Parameters are fixed study-wide. Any change needs a journal entry with before/after evidence.
+- Ask before committing. Journal every meaningful run.
 
 
 ########################################################################
-PROMPT 001  (2026-09-15)  Legacy readiness audit and adapter fixes
+1. WHERE THE PROJECT STANDS
 ########################################################################
 
-STATUS: [ ] not started   [ ] in progress   [ ] done
+Done
+- Raw ATS receiver files parsed into one legacy-format SQLite DB:
+  output/jsats3d_2025_v2.db (~22 GB, 59,935,751 detections, 285 files, 20 receivers, 44 tags).
+- Time zones fixed: all detections on study basis PDT (UTC-7). ZOI05 (all season) and one
+  ZOI04 file logged UTC and were shifted -7 h.
+- Temperature (DD_N string + HOBO) and water level (forebay CZD) loaded.
+- Beacon multipath + clock-bias DBSCAN built (scripts/beacon_pairwise_dbscan.py).
+- DBSCAN parameter sweep done; current fixed settings confirmed (no change).
+- Beacon coverage audit done; ZOI02 beacon 7D2D is the best "heard by all" metronome beacon.
+- CFD float GPS diagnostics done (15-min binning).
 
---- TASK ---
+Not started
+- Clock-jump correction (next step), clock drift fix to seconds_fix, Gate 2 report.
+- Positioning of receivers at depth and fish (Deng solver), accuracy/precision vs paper.
+- Fish-tag multipath DBSCAN (lag, relative SigStr, rank, interval).
 
-Audit jsats3d_2025_FFD3_manager_demo.db against legacy jsats3d/jsats3d.py
-runtime requirements. Write results to output/legacy_readiness_audit.md.
-Then make the fixes listed under APPLY and rerun the audit.
+Milestone / gate position
+- M1 ingestion: done, with 2 known defects (Section 6).
+- M3 clock sync / Gate 2: diagnostics done, correction not started.
+- M4 multipath / Gate 3: beacon filter built and swept; fish-tag filter not built.
 
---- AUDIT ---
-For each item report PASS, FAIL, or BLOCKED (needs owner input).
-Cite the legacy line number that reads the value.
 
- 1. tblTag.pulseRate non-null for every row
-    (read at jsats3d.py lines 209, 295, 750, 1128).
- 2. tblReceiver.Tag_ID non-null for every receiver
-    (line 213 does .values[0]; empty result raises IndexError).
- 3. tblReceiver X, Y, Z, X_t, Y_t, Z_t non-null for every receiver
-    (line 1107 ConvexHull fails on NaN).
- 4. tblStudyParameters.masterReceiver non-null and matches a Rec_ID
-    in tblReceiver (line 762).
- 5. tblStudyParameters.BM_Elev non-null (lines 779, 1116).
- 6. tblStudyParameters.UTC_Conv non-null.
- 7. tblStudyParameters.BM_Elev_Units equals "feet" or "meters", not
-    "unknown" (line 783 checks == 'feet' to convert WSEL).
- 8. tblInterpolatedTemp min timeStamp <= min tblDetectionRaw.timeStamp
-    and max >= max (line 120 uses bounds_error=True; out of range raises).
- 9. tblWSEL covers the same detection span
-    (interp1d at lines 786 and 1119, no fill_value).
-10. tblDetectionRaw contains beacon tag rows, not only FFD3
-    (beacon_epoch and clock_fix need beacon detections at host and
-    adjacent receivers).
-11. Every tblReceiver.Tag_ID appears in tblTag with TagType = "beacon".
-12. tblDetectionRaw.SNR is entirely NULL. Report it. Confirm
-    multipath_classifier (line 466) is not on the 2025 path and
-    multipath_2 or DBSCAN is.
+########################################################################
+2. SOURCE DATA AND THEIR HEADERS  (all read only)
+########################################################################
 
---- APPLY (in order, then rerun audit) ---
+Root: K:\Jobs\5662\001\Data\DataTrans\2025_Data\
+Provider: Four Peaks (Penny Rowe, Mark Weiland). Data catalog:
+CowlitzAT2025_Data_Deliverables\data_catalog_cowlitz_falls_AT_2025.xlsx
 
- A. In scripts/adapt_2025_to_legacy.py set BM_Elev_Units to "feet"
-    because NSC.CZD_WTR_EL.F_CV is in feet. Leave WSEL values
-    unconverted; legacy converts at runtime.
- B. Populate tblTag.pulseRate from config workbook beacon periods for
-    beacon tags. Set FFD3 to 3.33 and record in the journal that this
-    is the measured static-hold median, provisional until PM confirms.
- C. Add a --beacon-window START END option to the adapter that stages
-    master_df_beacon.csv rows for the configured local beacon IDs only,
-    restricted to the given datetime window. Stage 2025-06-05 to
-    2025-06-16 alongside FFD3. Keep chunked reading. Do not scan all
-    46M rows into the DB.
- D. Add a --drop-incomplete-receivers flag that excludes receivers with
-    NULL Tag_ID or NULL X/Y/Z from tblReceiver and reports which were
-    dropped and why.
+2a. Raw ATS receiver files  (raw_data\<download folder>\SR<serial>[_...].csv)
+    AUTHORITATIVE detection source for the DB.
+    Model SR3017, firmware 10.62F (some 10.49/10.52/10.56), File Format 2.0 only.
+    Preferred file per stem: *_cleaned > *_recovered/_recovery > original
+    ("cleaned" = corrupt lines removed by provider; no multipath removal).
 
---- DO NOT APPLY ---
- - Do not invent masterReceiver, BM_Elev, UTC_Conv, or synch window.
-   Mark BLOCKED with the exact owner question.
- - Do not extrapolate temperature or WSEL outside their data range.
-   Mark BLOCKED and state the missing date range.
- - Do not fill SNR, NBW, FreqOff with fabricated values.
+    Header block (lines 0-7), example:
+      Site Name: ZOI,06,06
+      File Name: SR18084_20250618.csv
+      Serial Number: 18084              -> tblDetectionRaw.SerialNumber
+      ATS Sonic Receiver SR3017 Firmware v10.62F -> ReceiverType, FirmwareVersion
+      DSP v07.90
+      File Format Version: 2.0          -> FileFormatVersion (other versions fail loudly)
+      File Start: ... -07z  (some files) -> receiver UTC offset evidence
 
---- FINISH ---
- - python -m unittest discover -s tests
- - Add tests for B, C, D.
- - Write the session journal entry.
- - Update LONG_TERM_CONTEXT.md standing decisions.
- - Fill the RESPONSE block below.
- - Commit to ENM_jsat3d_edits: "Legacy readiness audit and adapter fixes"
- - Push.
+    Column row, then one row per detection:
+      Internal, SiteName, (2 unnamed), DateTime, TagCode, Tilt, VBatt, Temp,
+      Pressure, SigStr, Bit Period, Threshold
+    Example:
+      121844 0052 18 y468 AE0 A,ZOI,06,06,06/10/2025 12:18:00.821889,G72FFF897,,12.79,99.99,N/A,213,239 19/31,157
 
---- RESPONSE 001 ---
-(local LLM writes here)
+    Special rows: TagCode = "GPS Fix" or "GPS Clock". Their Internal column holds
+    coordinates "DDMM.mmmm N DDDMM.mmmm W"; their DateTime is UTC.
 
-Audit table:
-| # | Item | Result | Line | Note |
-|---|------|--------|------|------|
-| 1 | pulseRate | PASS | 209, 295, 750, 1128 | 32/32 rows populated; FFD3 set to provisional 3.33 seconds from static-hold median. |
-| 2 | receiver Tag_ID | PASS | 213 | 0 NULL after `--drop-incomplete-receivers`; 9 receivers dropped with reasons. |
-| 3 | receiver XYZ | PASS | 1107 | 24 staged receivers have complete X/Y/Z/X_t/Y_t/Z_t. |
-| 4 | masterReceiver | BLOCKED | 762 | NULL. Owner must identify synchronization reference under new approach. |
-| 5 | BM_Elev | BLOCKED | 779, 1116 | NULL. Owner must provide benchmark elevation and vertical datum. |
-| 6 | UTC_Conv | BLOCKED | study parameter reads | NULL. Owner must confirm time convention. |
-| 7 | BM_Elev_Units | PASS | 783 | `feet`; WSEL values remain in feet for legacy runtime conversion. |
-| 8 | temp coverage | FAIL | 120 | Detection span begins 2025-06-05; temperature begins 2025-06-17. Missing 2025-06-05 through 2025-06-16 coverage. |
-| 9 | WSEL coverage | FAIL | 786, 1119 | Detection span begins 2025-06-05; WSEL begins 2025-06-17. Missing 2025-06-05 through 2025-06-16 coverage. |
-| 10 | beacon rows staged | PASS | beacon_epoch / clock_fix | 2,991,006 local-beacon rows staged inside 2025-06-05 through 2025-06-16 window. |
-| 11 | receiver beacons in tblTag | PASS | 763 | All 24 staged receiver beacon IDs appear in `tblTag` with `TagType=beacon`. |
-| 12 | SNR null / 2025 path | PASS | 466 | 2,998,556/2,998,556 SNR values NULL; legacy classifier is excluded and ATS-2025 path is required. |
+2b. Config workbook  1_array_metadata\cowlitz_2025_AT_config.xlsx
+    Sheet Configuration_Cowlitz_AT_2025, one row per receiver (57 rows, 37 names).
+    Receiver Name, Study Zone, Receiver Manufacturer, Receiver Model,
+    Receiver Serial Number, Firmware Version, DSP Version, Receiver Time Zone Offset,
+    Beacon Tag Code, Beacon Tag Period (sec), Hydrophone Depth (feet),
+    Hydrophone Offset (feet), Total Depth (feet), Latitude (degrees), Longitude (degrees)
+    [hydrophone position, WGS84], Longitudinal Offset (feet), Deployment Location
+    Description, Deployment Date, Deployment Notes, Demobilization Date/Notes.
+    No elevation, survey method or accuracy column.
 
-Applied:
- A. Set `BM_Elev_Units` to `feet`; WSEL remains unconverted.
- B. Populated configured beacon pulse rates and set FFD3 to provisional 3.33 seconds.
- C. Added `--beacon-window START END`; staged local beacon IDs in the June 5–16 window with chunked reads.
- D. Added `--drop-incomplete-receivers`; dropped 9 receivers and reported reasons.
+2c. Float GPS  4_gps_datasets\master_df_gps.csv   (CFD02-CFD09 only)
+    dateTime (PDT), receiverName, lat, lon (WGS84), easting, northing (EPSG:26910 m).
+    One fix per 60 s, 1,114,887 rows, 06-03 to 09-17 (CFD09 from 06-11).
+    Logged by the SR3017 receivers on floats. Antenna-to-hydrophone offset undocumented.
 
-Blocked (owner questions, verbatim):
- - What receiver/tag should populate `masterReceiver` for the new synchronization approach?
- - What benchmark elevation and vertical datum should populate `BM_Elev`?
- - What UTC conversion and synchronization window should be used?
- - What authoritative temperature/WSEL data covers 2025-06-05 through 2025-06-16?
+2d. Temperature
+    Temperature\2025_Temp_String_Data_5min_interpolated.csv
+      DateTime (local PDT, no label), DD_N_0p5, DD_N_1p5, DD_N_9, DD_N_18 (deg C), 06-17 to 09-17.
+    Tag Drag Period\ HOBO CSVs: DD_N 10 depths, DD_S 11 depths, "Date Time, GMT-07:00",
+      06-02 13:45 to 07-10 13:00. Covers the tag drag.
+    On-receiver Temp column = 99.99 sentinel (no sensor). Never used for sound speed.
 
-Tests: 19 passed / 0 failed (full suite).
+2e. Water level
+    Master Covariate Table\2025 Master Covariate Table_20251212.csv
+      DateTime (local), NSC.CZD_WTR_EL.F_CV = forebay WSE (feet), 06-17 to 09-17.
+    Tag Drag Period\TagDrag_WSE.xlsx: collector entrance levels (ft), 06-05 to 06-17,
+      about 0.9 ft below forebay CZD. Not loaded (needs owner-approved offset).
 
-Files touched:
- - `scripts/adapt_2025_to_legacy.py`
- - `scripts/legacy_readiness_audit.py`
- - `tests/test_2025_contracts.py`
- - `output/legacy_readiness_audit.md`
- - `docs/2025_processing_contract.md`
- - `LONG_TERM_CONTEXT.md`
- - `.ai_journal/session/2026-09-15_next_execution_steps.md`
- - `LLM_Prompts.txt`
+2f. Concatenated deliverables  2_AT_detection_datasets\master_df_{beacon,study,test,unknown}.csv
+    dateTime (PDT), tagCode, amp (raw counts, labelled dB, not comparable across receivers),
+    receiverName, event (True = 3+ detections within 180 s).
+    NOT used for v2 DB (they lack Internal/clock evidence). Kept for cross-checks only.
 
-Commit hash: `9bfc43e` (pushed implementation commit)
+2g. QC  6_quality_control\data_processing_tracker_cowlitz_2025.xlsx (per-download notes),
+    receiver_data_gaps.xlsx. 5_array_testing\ holds drag GPS and testing sheets.
 
-Ethan's notes:
- - Rebuilt `jsats3d_2025_FFD3_manager_demo.db` with 7,550 FFD3 rows plus 2,991,006 local-beacon rows. No raw files were modified. Downstream synchronization and positioning remain blocked by missing June 5–16 environmental coverage and owner-supplied synchronization parameters.
 
-Additional consolidated findings:
- - Gate 0 schema audit: all four detection deliverables use `dateTime`, `tagCode`, `amp`, `receiverName`, and `event`. Sampled timestamps contain six fractional digits. No `SNR`, `NBW`, `FreqOff`, `Pascals`, or `Celsius` fields were delivered.
- - Raw detection files available: `master_df_test.csv`, `master_df_study.csv`, `master_df_beacon.csv`, and `master_df_unknown.csv`. The files contain no source-row, receiver-type, upstream-filter, or other complete provenance fields.
- - FFD3 timing: overall observed interval approximately 3.34 seconds; DB-1 through DB-5 static-hold median approximately 3.326 seconds. The 3.33-second staging value is provisional and requires PM confirmation.
- - Controlled validation: DB-1 through DB-5 contain 245-335 FFD3 detections across 17-21 receivers. These are the strongest available static-hold candidates. Several drag windows have zero or one detecting receiver and cannot be treated as usable truth without further review.
- - Beacon coverage: 39 configured beacon IDs; 37 detected; configured IDs `2008` and `2010` had zero detections. Six broadly detected IDs (`1F14`, `1F38`, `1F5A`, `1F71`, `1F94`, `1FCD`) lack local receiver assignments and may be array-wide candidates, but identity and periods are unconfirmed.
- - Receiver inventory: 37 unique configured receiver names, 8 dynamic-GPS receivers, and 34 receivers in the FFD3 test file. Current filtered staging contains 24 complete receivers. Geometry has rank 3. ZOI01-ZOI04 are valid 3D receivers but are not the only geometry-complete candidates.
- - Coordinate provenance: configured versus deployment-wide dynamic-GPS medians differ by approximately 7.1 m median and 13.1 m maximum. During DB-1 through DB-5, differences range approximately 1.4-11.9 m with a 3.0 m median. Coordinate authority and time matching remain unresolved.
- - Environmental coverage: FFD3 detections span June 5-16, while temperature and WSEL begin June 17. The separate temperature-string file has the same start date. No extrapolation was performed.
- - Event field: FFD3 has 7,373 `True` and 177 `False` values. `event=False` correlates with low/zero amplitude, but event rates vary from 0% to 100% by receiver. Meaning remains undocumented and it is not used as a universal quality label.
- - Legacy compatibility: output table names and detection columns are preserved. The experimental ATS-2025 mode, pluggable-filter, and synchronization-readiness architecture modules were removed on 2026-09-16. Current new code is limited to parsers, adapters, diagnostics, and tests that write legacy-compatible tables. Legacy KNN still cannot run faithfully when SNR is unavailable.
- - Prior DBSCAN review: legacy experiment used interpolated DDoA, unscaled time/DDoA Euclidean distance, `eps` near 37, and `min_samples=3`. These are exploratory legacy values and were not copied into 2025 processing.
- - Current hard blockers: owner-approved master receiver or new synchronization reference, beacon identity and periods, benchmark elevation, vertical datum, UTC conversion, synchronization window, authoritative June 5-16 temperature/WSEL, coordinate authority, raw-versus-cleaned provenance, receiver gain/threshold metadata, and interpretation of `event`.
- - Review artifacts: `docs/2025_owner_input_checklist.md`, `docs/2025_processing_contract.md`, `output/legacy_readiness_audit.md`, `output/beacon_coverage_audit.csv`, `output/arraywide_beacon_intervals.csv`, `output/beacon_amplitude_audit.csv`, `output/ffd3_validation_windows.csv`, `output/ffd3_static_hold_intervals.csv`, `output/receiver_3d_readiness.csv`, `output/receiver_coordinate_audit.csv`, and `output/2025_preflight_audit.txt`.
- - Validation status after Prompt 001: 19 tests passed, modified scripts compiled, and `git diff --check` passed. Raw data remained read-only.
- - 2026-09-16 direction update: preserve legacy core unchanged. Raw ATS parser output may add `Internal`, `SigStr`, raw sensor fields, receiver/firmware metadata, and source provenance columns to `tblDetectionRaw` while retaining every required legacy column.
+########################################################################
+3. HOW SOURCE HEADERS MAP TO DB TABLES
+########################################################################
 
---- END RESPONSE 001 ---
+Keys that tie everything together
+- Rec_ID     = config "Receiver Name" (e.g. ZOI02). Present in every table.
+- Serial     = config "Receiver Serial Number" = raw filename SR<serial> = header
+               "Serial Number". The parser maps serial -> Rec_ID from the config.
+- Tag_ID     = 4 hex chars. Raw TagCode "G72" + 4 hex + checksum -> chars 4-7
+               (G72FFF897 -> FFF8). Config "Beacon Tag Code" -> tblReceiver.Tag_ID
+               -> tblTag.Tag_ID (TagType beacon).
+- Time       = timeStamp (text) and seconds (float). Both are PDT wall time; seconds
+               is that wall time encoded as if UTC epoch. Temperature and WSEL use the
+               same local basis, so joins need no conversion.
+- Provenance = SourceFile + SourceRow point back to the exact raw line.
+
+tblDetectionRaw  (from raw ATS rows; legacy columns kept, ATS columns added)
+  Raw column      -> DB column(s)
+  DateTime        -> RawDateTime (receiver wall time as logged)
+                     timeStamp, seconds = RawDateTime + TimeShiftHours (study PDT)
+                     ReceiverUTCOffsetHours, TimeZoneSource (gps > header > config)
+  TagCode         -> Tag_ID
+  SigStr          -> SigStr and Amplitude (copied unchanged, not normalised)
+  Internal        -> Internal (raw) + InternalGroup1/2/3, InternalFlag, InternalCounter,
+                     InternalOffset, InternalStatus, *Value, InternalPositionDifferenceSeconds,
+                     OneSecondAdjustmentEvidence, ClockStatusMarker
+                     derived: OffsetChanged, CounterRestart, ClockEventReasons
+  Temp            -> RawTemperature (99.99 = no sensor)
+  Pressure/Tilt   -> Pressure, Tilt (N/A -> NULL)
+  VBatt           -> BatteryVoltage
+  Bit Period      -> BitPeriod (text, e.g. "240 03/31")
+  Threshold       -> Threshold
+  GPS Fix row     -> GPSFixTimeStamp (UTC, "+00:00"), GPSFixLatitude, GPSFixLongitude
+                     carried onto following detections
+  header          -> ReceiverType, FirmwareVersion, FileFormatVersion, SerialNumber
+  config          -> Rec_ID
+  (none)          -> FreqOff, NBW, SNR, Pascals, Celsius = NULL; Valid = 1; TagTypeSource = raw
+  WARNING: DB column Event = 1 when the row carries any clock-event reason.
+           It is NOT the deliverable "event" (3 detections in 180 s).
+
+tblReceiver  (config workbook + float GPS)
+  Receiver Name -> Rec_ID;  Beacon Tag Code -> Tag_ID
+  Lat/Lon (WGS84) -> EPSG:26910 -> minus local origin (E 567994.003, N 5146184.401) -> X, Y
+    CFD02-09: X, Y = season median of master_df_gps.csv easting/northing instead.
+  Hydrophone Depth (feet) -> Z = -depth x 0.3048 (depth below surface at deployment);
+    also HydrophoneDepth_ft. ZReference = depth_below_surface_at_deployment.
+  Hydrophone Offset, Total Depth -> HydrophoneOffset_ft, TotalDepth_ft
+  Receiver Time Zone Offset -> UTCOffset; Location Description -> MountDescription;
+  Deployment Date -> DeploymentDate. X_t/Y_t/Z_t = X/Y/Z (static). Ref_Elev = BM.
+
+tblTag
+  Beacon Tag Code + Beacon Tag Period -> Tag_ID, TagType = beacon, pulseRate.
+  Study tags (TagType study), provisional pulse rates from measured median spacing:
+    FFD3 3.33, FC36 3.038, 0B0A 3.024, 0AC6 3.204, 493F 3.155 s (PENDING PM).
+  "Array-wide" 1F14/1F38/1F5A/1F71/1F94/1FCD: no pulseRate in config.
+
+tblInterpolatedTemp  timeStamp, C = mean of all DD_N depths per 5-min step,
+  TempSource (DD_N_HOBO to 07-10, DD_N_string after), DepthCount.
+tblWSEL              timeStamp, WSEL = NSC.CZD_WTR_EL.F_CV in feet (starts 06-17).
+tblStudyParameters   BM_Elev_Units feet, Output_Units meters.
+                     UTC_Conv, BM_Elev, masterReceiver, synch_time_* = NULL (BLOCKED).
+
+DBSCAN outputs (output/, gitignored)
+  <beacon>_<tag>_anchor_<anchor>_epochs.csv: t, burst, burst_n, t_anchor, anchor_burst_n,
+    transNo, Rec_ID, sound_speed, delta_s, label, dbscan_class, resid_s
+  Optional --output-db: tblMetronomeFiltered, tblMetronomeSecondFiltered (legacy style).
+
+
+########################################################################
+3A. HOW EACH DATASET IS USED  (headers -> consumer -> purpose)
+########################################################################
+
+Format: HEADERS READ | READ BY | USED FOR | LIMITS
+
+Raw ATS receiver files (raw_data\...\SR<serial>*.csv)
+  HEADERS  header lines: Serial Number, firmware line, File Format Version, File Start tz.
+           columns: Internal, DateTime, TagCode, SigStr, Temp, Pressure, Tilt, VBatt,
+           Bit Period, Threshold. GPS Fix/Clock rows: DateTime (UTC) + coords in Internal.
+  READ BY  parse_ats_raw_to_legacy.py: discover_target_files(), read_file_metadata(),
+           infer_offset_from_gps(), parse_detections().
+  USED FOR Every detection in tblDetectionRaw. DateTime = arrival time (the core
+           measurement for TDoA). TagCode = which tag. Internal = clock-event evidence
+           (jump locations). SigStr = amplitude (candidate multipath feature). GPS Fix
+           rows = per-file UTC offset (detection minus GPS time), then carried to rows.
+  LIMITS   Only File Format 2.0. D-named daily files skipped (defect). No SNR/NBW/FreqOff.
+
+Config workbook (cowlitz_2025_AT_config.xlsx)
+  HEADERS  Receiver Name, Receiver Serial Number, Receiver Time Zone Offset, Beacon Tag
+           Code, Beacon Tag Period (sec), Hydrophone Depth (feet), Hydrophone Offset
+           (feet), Total Depth (feet), Latitude/Longitude (degrees), Deployment Location
+           Description, Deployment Date.
+  READ BY  parser (serial -> Rec_ID, config tz offset fallback, beacon list);
+           adapt_2025_to_legacy.py load_receiver_table(), load_beacon_registry().
+  USED FOR Which files belong to which receiver (serial). Receiver geometry X/Y/Z
+           (distance d = |beacon - receiver| drives expected travel time d/c).
+           Beacon identity + nominal period (tblTag.pulseRate -> burst split at 0.5 x period).
+  LIMITS   Positions: no survey method/accuracy. Periods are nominal (true 7D2D 62.7 s).
+           Serial map is static; CFD05/CFD09 swap during tag drag not represented.
+
+Float GPS (master_df_gps.csv)
+  HEADERS  dateTime, receiverName, easting, northing (lat, lon unused).
+  READ BY  load_receiver_table() (season median -> CFD02-09 X/Y);
+           cfd_gps_diagnostics.py (15-min bins, scatter, wander, spikes).
+  USED FOR Float receiver positions. Next: time-varying X_t/Y_t from 15-min median and
+           test whether float motion explains CFD timing noise.
+  LIMITS   Antenna-to-hydrophone offset unknown. Pre-deployment and service-day positions
+           must be excluded.
+
+Temperature string + HOBO (Temperature\..., Tag Drag Period\...)
+  HEADERS  DateTime, DD_N_0p5, DD_N_1p5, DD_N_9, DD_N_18; HOBO "Date Time, GMT-07:00" + temp.
+  READ BY  adapt_2025_to_legacy.py load_temperature_string() -> tblInterpolatedTemp;
+           beacon_pairwise_dbscan.py load_temperature() (DB table or --temperature-csv).
+  USED FOR Sound speed c = jsats3d.sos(mean DD_N temp) at each ping. c converts distance
+           to time: expected TDoA = (d_Bi - d_Ba)/c, and DDoA = c x TDoA.
+  LIMITS   1 C error ~ 3 m/s ~ 0.2% range error. Depth-resolved profile = allowed experiment only.
+
+Water level (Master Covariate Table ... NSC.CZD_WTR_EL.F_CV)
+  HEADERS  DateTime, NSC.CZD_WTR_EL.F_CV (ft).
+  READ BY  adapt_2025_to_legacy.py load_environment() -> tblWSEL;
+           legacy clock_fix_object / position (WSELfun interpolator).
+  USED FOR Vertical position of receivers that ride the surface: Z(t) = WSE(t) - depth.
+           Legacy converts ft -> m at runtime.
+  LIMITS   Starts 06-17. No forebay WSE for tag drag (06-05..06-16) or deployment day.
+
+Concatenated deliverables (master_df_*.csv)
+  HEADERS  dateTime, tagCode, amp, receiverName, event.
+  READ BY  adapt_2025_to_legacy.py normalize_detection() (older demo DBs only).
+  USED FOR Gate 0 schema audit and cross-checks of tag counts. Not in v2 DB.
+  LIMITS   No Internal/clock evidence, no provenance; amp uncalibrated.
+
+Array testing (5_array_testing\)
+  HEADERS  array_testing_drag_GPS.csv: line_name, lat, long, timestamp.
+           cowlitz_AT_2025_testing_sheets.xlsx sheets: Upstream StaticHolds,
+           Forebay_StaticHolds (Test ID, Date, Start/End Time, Zone, Lat, Long, Comments),
+           CFNSC_StaticHolds, Forebay_Approach_Drags, CFNSC_Approach_Drags,
+           Forebay_Random_Drags, CFNSC_Drags (Test ID, Date, Start/End Time, Tag Codes, Comments).
+  READ BY  Not yet (planned M2/Gate 4).
+  USED FOR Ground truth: static-hold RMSE (accuracy) and drag-track overlays.
+  LIMITS   Tag drag 06-05..06-10: no forebay WSE, CFD05/CFD09 swap, floats settling.
+
+QC files (6_quality_control\)
+  USED FOR Explaining gaps and odd receivers (CFD05 repair, ZOI05 tz, swap note).
+  Read manually; not in the pipeline.
+
+PTAGIS (3_PTAGIS_datasets\released_v0.csv, collected_v0.csv)
+  USED FOR Fish release/recapture metadata (later). collected Obs Time is PST, not PDT.
+
+
+########################################################################
+3B. HOW THE DB TABLES ARE USED DOWNSTREAM
+########################################################################
+
+Table                    Written by                 Read by (columns)
+tblDetectionRaw          parser                     beacon_pairwise_dbscan.load() (Tag_ID, Rec_ID,
+                                                    seconds); legacy beacon_epoch (all, by Tag_ID/
+                                                    Rec_ID); legacy clock_fix (by Rec_ID)
+tblReceiver              parser/adapter             pairwise DBSCAN (Rec_ID, Tag_ID, X, Y, Z);
+                                                    legacy beacon_epoch (Rec_ID by Tag_ID),
+                                                    clock_fix_object, position (X_t,Y_t,Z_t ->
+                                                    ConvexHull), kernels
+tblTag                   parser/adapter             pairwise DBSCAN (pulseRate of beacon);
+                                                    legacy beacon_epoch, multipath_data_object,
+                                                    clock_fix_object, position (pulseRate, TagType)
+tblInterpolatedTemp      adapter                    pairwise DBSCAN (timeStamp, C, TempSource);
+                                                    legacy temp_interpolator (timeStamp, C;
+                                                    bounds_error=True, so coverage must span data)
+tblWSEL                  adapter                    legacy clock_fix_object, position (timeStamp, WSEL)
+tblStudyParameters       adapter                    legacy (UTC_Conv, BM_Elev, BM_Elev_Units,
+                                                    Output_Units, masterReceiver, synch_time_*)
+tblMetronomeFiltered /   pairwise DBSCAN            legacy clock_fix_object (transNo, seconds,
+tblMetronomeSecondFiltered (--output-db)            multipath == 0 / multipath_prediction == 0)
+tblDetectionClockFixed   legacy epoch_fix_data_management  (not produced yet) -> multipath, position
+tblPositions_Deng        legacy positions_data_management  (not produced yet) -> kernels
+
+Legacy chain (Nebiolo & Meyer 2021 order):
+  tblDetectionRaw -> beacon_epoch -> tblMetronomeUnfiltered -> multipath (first arrival +
+  2nd filter; 2025: pairwise DBSCAN) -> tblMetronome(Second)Filtered -> clock_fix
+  (needs masterReceiver, BM_Elev, WSEL, temp) -> tblDetectionClockFixed -> fish multipath
+  -> tblDetectionFilterSecondary -> position.Deng -> tblPositions_Deng -> kernels.
+  Blocked at clock_fix by NULL masterReceiver/BM_Elev/UTC_Conv and uncorrected jumps.
+
+
+########################################################################
+4. PROCESSING FLOW AND COMMANDS
+########################################################################
+
+conda = "%LOCALAPPDATA%\anaconda3\Scripts\conda.exe" (not on PATH). Prefix: conda run -n jsat_3d python
+
+1. Build DB (done; ~35 min):
+   scripts/parse_ats_raw_to_legacy.py <raw_root> --legacy-db --include-config-beacons ...
+2. Beacon DBSCAN (read-only on DB; full scan ~3 min without --rowid-range):
+   scripts/beacon_pairwise_dbscan.py output/jsats3d_2025_v2.db --beacon-receiver ZOI02
+     --anchor ZOI09 --start 2025-06-20 --end 2025-06-22 --output-dir output/dbscan_ddoa_0620
+   Writes epochs/segments/summary CSVs and one before/after DDoA plot per receiver
+   (DDoA m = c x (t_i - t_anchor) vs seconds, legacy-notebook style).
+3. Parameter sweep (no DB access):
+   scripts/dbscan_parameter_sweep.py <epochs.csv> --period 60 --output-dir output/dbscan_sweep_0620
+4. CFD GPS diagnostics:
+   scripts/cfd_gps_diagnostics.py <master_df_gps.csv> --output-dir output/cfd_gps
+5. Tests: python -m unittest discover -s tests   (19 pass; pytest not installed)
+
+DBSCAN physics (beacon B heard at receiver i and anchor a):
+  delta = (t_i - t_a) - (d_Bi - d_Ba)/c = clock difference + multipath
+  Beacon host clock cancels. Clean pings = smooth line; echoes = late isolated points;
+  clock jumps = level steps (1 s = ~1,465 m DDoA).
+Fixed parameters (scripts/beacon_pairwise_dbscan.py lines 26-36):
+  tolerance 0.5 ms (timing budget), window 2.5 pings, min_samples 3,
+  anchor-side rule >= 50% of >= 4 receivers, max reflection delay 0.25 s.
+Sound speed: legacy jsats3d.sos() (table cites Wikipedia) on DD_N mean temperature.
+Rule of thumb: 1 ms timing ~ 1.5 m range; 1 m position ~ 0.68 ms.
+
+
+########################################################################
+5. KEY RESULTS
+########################################################################
+
+Clock behaviour (06-17 to 07-01, anchor ZOI09)
+- ZOI: clean residual RMS 13-51 us; leave-one-out error median 4.5-8.3 us, p95 15-20 us.
+- CFD: RMS 186-229 us; LOO median 84-158 us, p95 407-550 us; 2.4-8.2% over 0.5 ms (WARNING).
+- ZOI jumps 0.3-1.1 s, 9-24/day; 78-91% coincide with an Internal flag (ZOI03 38%).
+- ZOI02 clock: 164 jumps in 48 h vs 21-30 for cleaner receivers.
+- Old "+/-30 s ZOI05 drift" was the UTC logging artifact, not drift.
+
+Beacon coverage (full season, output/beacon_coverage/)
+- 8 local beacons heard >= 90% of hours by all 18 working receivers.
+- 7D2D (ZOI02) most uniform: median 52 pings/h, minimum 43. Best metronome source.
+- "Array-wide" tags 1F14/1F38/1F5A/1F71/1F94/1FCD heard <= 2% of hours: NOT array-wide.
+- CFD05 effectively deaf (hydrophone issue per QC tracker).
+
+DBSCAN sweep (output/dbscan_sweep_0620/)
+- Current setting sits at the knee: ZOI 4.5% rejected, LOO p95 16 us;
+  CFD 13.3% rejected, LOO p95 444 us; 100% of planted echoes (1.5-126 ms) caught.
+- Window acts in steps (pings 62.7 s apart): 1.5 = 2.0, 2.5 = 3.0.
+- ZOI tolerance > 0.5 ms absorbs echoes/steps (LOO p95 jumps to ~457 us).
+- Legacy notebook rule (per-receiver eps = p99 spacing) catches 0-8.5% of echoes
+  on 2025 data because 1 s jumps set eps. Unusable until jumps are removed.
+
+CFD float GPS (output/cfd_gps/)
+- Within 15 min: ~1 m scatter; fixes > 50 m off <= 0.03%.
+- 15-min median wanders 1-10 m (floats move). CFD04 moves most.
+- 50-110 m excursions = pre-deployment (before ~06-04/05) and service/download days.
+- 15-min mean vs median differ up to 1.4 m (> 0.73 m budget): median recommended.
+- Float motion of metres = ms of TDoA; may be part of CFD "clock drift". Check next.
+
+
+########################################################################
+6. KNOWN DEFECTS (not fixed)
+########################################################################
+
+- Parser skips 18 ZOI03/ZOI06 daily files (SR20026D2506xx_*, SR18084D2506xx_*,
+  06-18..06-26): SERIAL_PATTERN ^SR(\d+)(?=_|\.) rejects the "D". Silent skip.
+  Fix = parser change + DB rebuild/append (approval needed).
+- CFD05/CFD09 serial swap: SR19026 sat at CFD05 during tag drag until ~06-11 12:40,
+  but DB labels all SR19026 rows CFD09 (~88 m off). Needs PM-confirmed swap time and
+  a time-dependent serial->receiver map.
+- Parser worker WARNING prints not captured in the log.
+- Legacy jsats3d.py (flag to Kevin, not fixed): Deng() solution-B in-hull test uses
+  solution-A y/z (line 1297); position class WSEL /3.28084 unconditional (no effect in 2025);
+  sos() ft/s conversion commented out by merged line (returns m/s).
+- Only legacy core change: temp_interpolator() 2-line datetime fix (commit 893faea).
+
+
+########################################################################
+7. OPEN QUESTIONS
+########################################################################
+
+Kevin (method)
+- Reference clock: keep ZOI02, or hybrid (7D2D beacon + cleaner clock ZOI09/CFD04/ZOI08).
+- Approve jump-fix method (steps in delta series, Internal flags confirm) and
+  Eq. 10 linear interpolation between clean pings.
+- Approve fixed DBSCAN parameters and steady-reflection rule.
+- CFD receivers: include with lower weight or exclude.
+- Sound-speed table source (Wikipedia vs Seafloor Systems).
+- Keep temp_interpolator change in core or move to adapter; fix Deng() bug.
+- Per-receiver eps in his notebook conflicts with System Prompt 7.4.
+
+PM (facts)
+- How receiver lat/longs were measured and their accuracy; any elevations.
+- Float GPS antenna-to-hydrophone offset; confirm large daily jumps are service moves.
+- Exact CFD05/CFD09 swap time.
+- Confirm ZOI01-03 static on bottom, others follow water level.
+- Deployment-day WSE and forebay WSE 06-05..06-16.
+- Pulse periods / identity of 1F14, 1F38, 1F5A, 1F71, 1F94, 1FCD.
+- Approve UTC_Conv = -7 and study-tag pulse rates. 15-min median for float GPS.
+
+
+########################################################################
+8. NEXT STEPS
+########################################################################
+
+1. Commit and push current work (manual, by Ethan).
+2. Check whether float GPS motion explains CFD timing noise (correlate delta with
+   15-min GPS position change).
+3. Clock-jump correction, then drift fix -> seconds_fix, Gate 2 residual report.
+4. Fix parser D-file skip and CFD05/CFD09 swap (after approval), rebuild.
+5. Receiver positioning at depth, then fish positioning and accuracy vs paper.

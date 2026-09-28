@@ -155,8 +155,8 @@ def _fit_residuals(g, clean):
     return g
 
 
-def steady_reflection_labels(g):
-    """Clusters overlapping in time with an earlier-delta cluster by (budget, MAX_REFLECTION_DELAY_S]."""
+def steady_reflection_labels(g, tolerance_s=TIMING_BUDGET_S):
+    """Clusters overlapping in time with an earlier-delta cluster by (tolerance, MAX_REFLECTION_DELAY_S]."""
     spans = g[g.label >= 0].groupby("label").agg(t0=("t_anchor", "min"), t1=("t_anchor", "max"), d=("delta_s", "median"))
     if len(spans) < 2:
         return set()
@@ -164,18 +164,18 @@ def steady_reflection_labels(g):
     # Row i = earlier (direct) cluster, column j = candidate later (reflected) cluster.
     overlap = (t0[:, None] <= t1[None, :]) & (t0[None, :] <= t1[:, None])
     gap = d[None, :] - d[:, None]
-    late = overlap & (gap > TIMING_BUDGET_S) & (gap <= MAX_REFLECTION_DELAY_S)
+    late = overlap & (gap > tolerance_s) & (gap <= MAX_REFLECTION_DELAY_S)
     np.fill_diagonal(late, False)
     return set(spans.index.values[late.any(axis=0)])
 
 
-def cluster(series, period):
+def cluster(series, period, tolerance_s=TIMING_BUDGET_S, window_periods=TIME_WINDOW_PERIODS, min_samples=MIN_SAMPLES):
     out = []
     for rid, g in series.groupby("Rec_ID"):
         g = g.sort_values("t_anchor").copy()
-        x = np.column_stack([g.t_anchor / (TIME_WINDOW_PERIODS * period), g.delta_s / TIMING_BUDGET_S])
-        g["label"] = DBSCAN(eps=1.0, min_samples=MIN_SAMPLES, metric="chebyshev").fit_predict(x)
-        late = steady_reflection_labels(g)
+        x = np.column_stack([g.t_anchor / (window_periods * period), g.delta_s / tolerance_s])
+        g["label"] = DBSCAN(eps=1.0, min_samples=min_samples, metric="chebyshev").fit_predict(x)
+        late = steady_reflection_labels(g, tolerance_s)
         g["dbscan_class"] = np.where(g.label < 0, "noise", np.where(g.label.isin(late), "steady_reflection", "clean"))
         out.append(_fit_residuals(g, (g.dbscan_class == "clean").values))
     return pd.concat(out, ignore_index=True)
@@ -186,10 +186,10 @@ def anchor_suspect_epochs(res):
     return set(by_epoch[(by_epoch.n >= ANCHOR_MIN_RECEIVERS) & (by_epoch.noise >= ANCHOR_MAJORITY)].index)
 
 
-def classify(series, period):
+def classify(series, period, **params):
     """Two passes: find anchor-side epochs, exclude them, then re-cluster every receiver."""
-    suspects = anchor_suspect_epochs(cluster(series, period))
-    kept = cluster(series[~series.t_anchor.isin(suspects)], period)
+    suspects = anchor_suspect_epochs(cluster(series, period, **params))
+    kept = cluster(series[~series.t_anchor.isin(suspects)], period, **params)
     dropped = series[series.t_anchor.isin(suspects)].copy()
     dropped["label"] = -1
     dropped["dbscan_class"] = "anchor_suspect"
@@ -251,25 +251,27 @@ def write_legacy_tables(path, det, res, anchor_epochs, tag, anchor):
     return len(primary), len(second)
 
 
-def plot(res, path, title):
+def plot_before_after(res, folder, title):
+    """Legacy-notebook style, one file per receiver: DDoA (m) vs time, before and after DBSCAN."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    recs = sorted(res.Rec_ID.unique())
-    fig, axes = plt.subplots(len(recs), 1, figsize=(10, 1.6 * len(recs)), sharex=True)
-    for ax, rid in zip(np.atleast_1d(axes), recs):
-        g = res[res.Rec_ID == rid]
-        t = pd.to_datetime(g.t_anchor, unit="s")
-        clean = g.dbscan_class == "clean"
-        ax.scatter(t[clean], g.delta_s[clean] * 1e3, s=1, c=g.label[clean] % 10, cmap="tab10")
-        for cls, colour in (("noise", "k"), ("steady_reflection", "r"), ("anchor_suspect", "0.7")):
-            sel = g.dbscan_class == cls
-            ax.scatter(t[sel], g.delta_s[sel] * 1e3, s=2, c=colour)
-        ax.set_ylabel(rid, rotation=0, labelpad=20)
-    np.atleast_1d(axes)[0].set_title(title + "  (colour=segment, black=noise, red=steady reflection, grey=anchor-side; y=delta ms)")
-    fig.tight_layout()
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
+    os.makedirs(folder, exist_ok=True)
+    for rid, g in res.groupby("Rec_ID"):
+        ddoa = g.sound_speed * (g.t - g.t_anchor)
+        clean = (g.dbscan_class == "clean").values
+        fig, (a0, a1) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+        a0.plot(g.t_anchor, ddoa, "ko", ms=1.5)
+        a0.set_title("Before: %d paired first arrivals" % len(g))
+        a1.scatter(g.t_anchor[clean], ddoa[clean], s=2)
+        a1.set_title("After DBSCAN: %d clean (%.1f%% removed)" % (clean.sum(), 100 * (1 - clean.mean())))
+        for ax in (a0, a1):
+            ax.set_xlabel("Seconds (study-basis PDT)")
+        a0.set_ylabel("DDoA (m) = c (t_%s - t_anchor)" % rid)
+        fig.suptitle("%s: %s. Whole-second clock jumps (~1,465 m steps) not yet corrected." % (rid, title))
+        fig.tight_layout()
+        fig.savefig(os.path.join(folder, "%s_before_after.png" % rid), dpi=100)
+        plt.close(fig)
 
 
 def main():
@@ -286,7 +288,7 @@ def main():
     res.to_csv(stem + "_epochs.csv", index=False, float_format="%.6f")
     segments.to_csv(stem + "_segments.csv", index=False)
     summary.to_csv(stem + "_summary.csv", index=False)
-    plot(res, stem + "_delta.png", "%s beacon %s vs anchor %s" % (args.beacon_receiver, tag, args.anchor))
+    plot_before_after(res, stem + "_before_after", "beacon %s (%s) vs anchor %s" % (tag, args.beacon_receiver, args.anchor))
     print("Beacon %s (%s), period %.1f s, anchor %s" % (tag, args.beacon_receiver, period, args.anchor))
     print("Fixed parameters: budget %.1f ms, window %.1f periods, min_samples %d, anchor majority %.2f of >=%d, "
           "max reflection delay %.0f ms" % (TIMING_BUDGET_S * 1e3, TIME_WINDOW_PERIODS, MIN_SAMPLES,
