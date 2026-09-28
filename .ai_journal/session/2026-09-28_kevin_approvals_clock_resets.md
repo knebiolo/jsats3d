@@ -194,20 +194,93 @@
 ## PM Items (separate from Kevin)
 - Surveyed surface-receiver positions; confirm ZOI01-03 static; deployment-day WSE; forebay WSE 06-05 to 06-16; array-wide beacon identities/periods; Spheros upstream filtering docs; approve `UTC_Conv = -7` and provisional study pulse rates.
 
+## Metronome vs Reference Clock (user question)
+- Clarified these are two separate roles, not the same thing.
+  - Metronome (shared beacon signal) = ZOI02's tag 7D2D. Confirmed by the coverage audit (item 1/9): most uniform pings/heard-hour across all 18 working receivers.
+  - Reference clock (whose time is treated as ground truth for pairwise differencing) is a separate, still-open question. ZOI02's own receiver clock is one of the noisiest (164 jumps/48 h vs 20-30 for cleaner receivers), so using ZOI02 as reference clock is not automatically correct just because its beacon is the metronome. This is the same hybrid-vs-ZOI02 question already on the Kevin approval list; no new decision made.
+
+## Steady-Reflection Visual Audit (user request: "show me")
+- Built a read-only check from the existing `output/dbscan_ddoa_0620/ZOI02_7D2D_anchor_ZOI09_epochs.csv` (no DB re-scan). Scratch script in `%TEMP%\jsats_check`, deleted after use.
+- Output: `output/dbscan_ddoa_0620/steady_reflection_check.png` (per-receiver delta_s scatter, steady_reflection points highlighted) plus a per-cluster offset table (median/std offset vs nearest clean cluster, span, point count).
+- Findings:
+  - CFD01 (6 clusters) and ZOI11 (4 clusters): offset tight and constant at ~21.4-21.5 ms and ~28.25 ms respectively (std 0.02-0.11 ms). Physically plausible fixed reflectors (~31 m and ~41 m extra path at 1,465 m/s). Confirmed genuine.
+  - CFD09 label 93: 62 points over 1.18 h, small but persistent offset. Consistent with the known CFD09 secondary mode noted 2026-09-25. Confirmed genuine (with the caveat that this check's "offset vs nearest clean cluster by time" is an approximation, not the production algorithm's exact pairing).
+  - CFD02, CFD03, CFD06, CFD07, CFD08: several clusters are only 3-4 points, span 3-7 minutes, offset 0.5-1.2 ms above tolerance. This is inside 2-3x the normal CFD jitter (186-229 us RMS, 2026-09-25 audit), so these are more likely the receiver's own noise splitting into two adjacent DBSCAN clusters than real physical echoes.
+- Conclusion: `steady_reflection_labels()` correctly finds genuine fixed reflectors (large, tight, long-lived offsets) but likely over-labels small near-threshold clusters on the noisier CFD receivers as reflections. New item for the Kevin approval list (Section below): require a minimum offset relative to each receiver's own noise floor, not just the fixed tolerance, before calling something `steady_reflection`. Not fixed; no parameter changed.
+
+## Parser D-File Skip — Root Cause (user question: "why is it skipping?")
+- `SERIAL_PATTERN = re.compile(r"^SR(\d+)(?=_|\.)", re.IGNORECASE)` in `scripts/parse_ats_raw_to_legacy.py` line 54.
+- Verified against real filenames: `SR20026_20250618.csv` matches; `SR20026D250619_000101_cleaned.csv` and `SR18084D250618_154801_cleaned.csv` do not, because the pattern requires the serial's digit run to be followed immediately by `_` or `.`, and these filenames insert a `D` before the underscore.
+- `discover_target_files()` silently drops any filename that fails this match (no warning), which is the mechanism behind the known ZOI03/ZOI06 06-18..06-26 gap recorded 2026-09-25/09-28.
+- Proposed fix (not applied, needs approval): loosen to `^SR(\d+)[A-Z]?(?=_|\.)`. Would need a DB append/rebuild after approval.
+
+## Files Regenerated for Kevin/Drew Handoff (user request)
+- User asked where the meeting-item files were to show Kevin and Drew. The 2026-09-28 cleanup had deleted all diagnostic output folders (correctly, they were gitignored scratch); regenerated all of them read-only, plus turned the beacon-coverage check into a committed script instead of a one-off.
+- New `scripts/beacon_coverage_report.py`: same read-only full-table scan as the earlier scratch version, now checked in. Ranks candidates by `listeners_ge90pct_hours` then **worst-case (minimum) pings/heard-hour**, not the median. First cut of the script sorted by median and wrongly surfaced B354 (CFD08) as "best"; corrected because a metronome must be reliably heard by *every* receiver, and B354's minimum (21.5 pings/h) is far behind 7D2D's (43.0). Re-verified 7D2D (ZOI02) is the metronome candidate, unchanged from the earlier finding.
+- Regenerated, all read-only, no K: writes:
+  - `output/beacon_coverage/` (matrix CSV, summary CSV, heatmap) — item 1/9.
+  - `output/dbscan_ddoa_0620/ZOI02_7D2D_anchor_ZOI09_before_after/` — 15 per-receiver before/after DDoA PNGs — item 6/7.
+  - `output/dbscan_sweep_0620/` (`sweep_results.csv`, `sweep_summary.csv`, `sweep_heatmaps.png`, `sweep_min_samples.png`, `how_dbscan_works.png`) — item 2/3.
+  - `output/cfd_gps/` (`cfd_gps_15min.csv`, `cfd_gps_summary.csv`, `cfd_gps_track.png`, `cfd_gps_quality.png`) — item 8.
+- All numbers matched the prior run exactly (37,319 paired epochs, 85 anchor-side; sweep group medians CFD 13.32% noise/444.46 us LOO p95, ZOI 4.52%/16.00 us).
+- `scripts/beacon_coverage_report.py` is new and uncommitted; needs a commit decision (change budget: 1 new file).
+
+## Before/After Plots Redone to Match Kevin's Notebook (user: items 6/7 "don't make sense")
+- Problems with the previous version:
+  - The y axis was raw DDoA c(t_i - t_anchor). That mixes clock drift with the fixed geometric offset, whereas the notebook plots clock drift in metres.
+  - The notebook's middle step ("Visualize Clusters") was missing.
+  - The titles were full sentences.
+- `plot_before_after()` in `scripts/beacon_pairwise_dbscan.py` now follows `notebooks/dbscan_multipath.ipynb` step for step, one PNG per receiver with three panels:
+  1. "Raw data": all paired first arrivals, black dots (notebook `plt.plot(dat.seconds, dat.DDoA,'ko')`).
+  2. "DBSCAN clusters": coloured by cluster label; label -1 (not in a cluster) drawn as black x (notebook `c=model.labels_`).
+  3. "Multipath removed (N% of points)": clean points only (notebook `filtered = results[results['class'] != -1]`).
+- y = "Clock drift (m)" = sound_speed x delta_s = c(t_i - t_a) - (d_Bi - d_Ba). x = time (PDT). Suptitle only "<Rec_ID> | beacon ZOI02 vs ZOI09".
+- Kept from our method, not the notebook: fixed eps (0.5 ms x 2.5 pings, Chebyshev, min_samples 3) and no linear imputation onto a regular grid. Reason: System Prompt 7.4, and the sweep showed the notebook's per-receiver p99 eps caught 0-8.5% of planted echoes on 2025 data.
+- Regenerated from the saved epochs CSV (no DB rescan). CFD04 now reads like the notebook's final plot: sawtooth drift of about -8 to +3 m, 6% removed. ZOI08 shows two flat levels about 1,465 m apart; these are whole-second clock jumps, fixed in the next step (item 5). 24 tests pass.
+- Parameter changes: NONE (plotting only).
+
+## GPS Plots Simplified (user: "way easier and simpler to understand")
+- `scripts/cfd_gps_diagnostics.py`: replaced `plot_track()` (raw + mean + median lines, 0-120 m) and `plot_quality()` (log-scale RMS and |mean - median|) with two plain plots:
+  - `cfd_gps_raw_vs_15min.png`: map view for one day (`--map-day`, default 2025-06-20). Grey = raw 1-min fixes, blue = 15-min averages, metres around each float's usual spot, +/-15 m. Title "Float GPS on <day>: raw vs 15-minute average".
+  - `cfd_gps_movement.png`: per float, distance of the 15-min average from the usual spot, capped at 20 m. Values over 20 m are drawn as red dots at the top. The series is reindexed to a 15-min grid so data gaps show as breaks (CFD05 06-26..08-14, CFD07 late July) instead of straight lines.
+- The quality numbers (within-bin scatter, mean vs median) are still in `cfd_gps_summary.csv` and `cfd_gps_15min.csv`; they are no longer plotted.
+- Observation from the map: on one day the 15-min averages spread almost as widely as the raw fixes (about +/-5-10 m; CFD04 more). The floats really move within a day. Averaging removes GPS jitter (about 1 m) but does not collapse a float to one fixed point. Implication: use a time-varying 15-min position per float, not one season position. Mean vs median still needs owner approval.
+- Old `cfd_gps_track.png` and `cfd_gps_quality.png` deleted (local, gitignored). 24 tests pass. No parameter changes.
+
+## Cleanup Review: Code Not Needed for Fish Positioning (user request)
+- Sorted repo code into three groups:
+  - Positioning path (always kept): `parse_ats_raw_to_legacy.py`, `adapt_2025_to_legacy.py`, `run_data.py`, `beacon_pairwise_dbscan.py`, `extract_dbscan_features.py`, `cfd_gps_diagnostics.py` (15-min float positions feed receiver geometry), the `jsats3d` core, Kevin's drivers (`metronome.py`, `mulitpath.py`, `clock_fix_serial.py`, `coordinate_with_Deng.py`, `tag_drag_RMSE.py`), tests, `output/jsats3d_2025_v2.db`.
+  - Not in the positioning path: meeting diagnostics (`dbscan_parameter_sweep.py`, `beacon_coverage_report.py` and their outputs, the before/after and GPS PNGs); Kevin legacy extras (`projectSetup.py`, `projectSetup_2018.py`, `mulitpath_experiment_with_kats.py`, `temperature_assessment.py`, `temp_and_uncertainty.py`); tracked junk (py37/38 `.pyc`, two checkpoint notebooks, `.spyproject/`, `notebooks.jupyterlab-workspace`).
+- User decision: keep everything until after the Kevin/Drew meeting; ask Kevin before removing his legacy extras; leave the tracked junk. Nothing deleted.
+
 ## Files Touched
-- This journal only.
+- This journal (multiple appends through the session).
+- `scripts/cfd_gps_diagnostics.py`: plots simplified (uncommitted).
+- `scripts/beacon_pairwise_dbscan.py`: before/after plot rewritten to the notebook's three-step layout (uncommitted).
+- `scripts/beacon_pairwise_dbscan.py`, `scripts/dbscan_parameter_sweep.py`, `scripts/cfd_gps_diagnostics.py`, `LLM_Prompts.txt` (all committed earlier this session, `bfc81cb`/`094285b`/`70a3c7d`).
+- `scripts/beacon_coverage_report.py`: new this session, NOT yet committed.
+- `scripts/run_data.py` and its tests: added and committed by Ethan directly (`a5aa8da`), outside this chat; noted here for continuity, not authored in this session.
+- Read-only outputs regenerated for the Kevin/Drew handoff (gitignored): `output/beacon_coverage/`, `output/dbscan_ddoa_0620/`, `output/dbscan_sweep_0620/`, `output/cfd_gps/`.
 
 ## Decisions & Assumptions
-- None new.
+- Metronome (beacon source) = ZOI02/7D2D, treated as settled by the coverage audit. Reference clock remains open (Kevin approval list item 1).
+- No parameters changed. Sweep confirmed current fixed settings; no new value adopted.
 
 ## Parameter Changes With Rationale
-- None.
+- None. (Sweep in `output/dbscan_sweep_0620/` evaluated alternatives and confirmed the existing fixed settings; nothing was changed.)
 
 ## Blockers & Known Limitations
-- Unchanged from 2026-09-25 journal.
+- Unchanged core blockers from 2026-09-25, plus, added this session:
+  - Parser silently skips `SR<serial>D<date>...` daily files (ZOI03/ZOI06, 18 files, 06-18..06-26). Root cause identified; fix not applied (needs approval + rebuild).
+  - CFD05/CFD09 serial swap during tag drag (SR19026 mislabeled CFD09 before ~06-11 12:40). Needs PM-confirmed swap time; fix not applied.
+  - `steady_reflection_labels()` likely over-labels small (0.5-1.2 ms) short-lived CFD clusters as reflections; needs a noise-floor-relative threshold. Not fixed.
+  - Kevin's 9-item approval list (this journal, earlier section) still outstanding; no responses received yet.
 
 ## Next Steps
-1. Send approval list to Kevin.
-2. Reply to PM correcting +/-30 s interpretation.
-3. Fix parser worker WARNING capture.
-4. Paper step 5 clock correction after approvals.
+1. Send the Kevin approval list (now 10 items with the steady-reflection over-labelling addition) with the regenerated files as supporting evidence.
+2. Commit `scripts/beacon_coverage_report.py` (pending user go-ahead).
+3. Reply to PM correcting the +/-30 s interpretation (drafted earlier this session).
+4. Fix parser worker WARNING capture.
+5. Fix the `SR<serial>D...` regex and rebuild/append once approved.
+6. Confirm CFD05/CFD09 swap timing with PM, then apply a time-dependent serial map.
+7. Paper step 5 clock-jump correction (Eqs. 7-10), after Kevin's reference-clock decision.

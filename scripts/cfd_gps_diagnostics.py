@@ -13,12 +13,15 @@ import pandas as pd
 
 BIN = "15min"
 SPIKE_THRESHOLDS_M = [10, 25, 50]
+MAP_HALF_WIDTH_M = 15
+TRACK_YMAX_M = 20
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("gps_csv", help="master_df_gps.csv (read-only)")
     p.add_argument("--output-dir", required=True)
+    p.add_argument("--map-day", default="2025-06-20", help="Day (PDT) drawn in the raw-vs-average map")
     return p.parse_args()
 
 
@@ -64,42 +67,55 @@ def summarize(g, b):
     return pd.DataFrame(rows)
 
 
-def plot_track(g, b, path):
+def plot_map(g, b, path, day):
+    """One day of raw 1-min fixes vs 15-min medians, in metres around each float's usual (season-median) spot."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     recs = sorted(g.Rec_ID.unique())
-    fig, axes = plt.subplots(len(recs), 1, figsize=(13, 2.1 * len(recs)), sharex=True, squeeze=False)
-    for ax, rid in zip(axes[:, 0], recs):
+    ref = g.groupby("Rec_ID")[["easting", "northing"]].median()
+    start, end = pd.Timestamp(day), pd.Timestamp(day) + pd.Timedelta(days=1)
+    g = g[(g.dateTime >= start) & (g.dateTime < end)]
+    b = b[(b.bin >= start) & (b.bin < end)]
+    fig, axes = plt.subplots(2, (len(recs) + 1) // 2, figsize=(16, 8), squeeze=False)
+    for ax, rid in zip(axes.flat, recs):
         d, bb = g[g.Rec_ID == rid], b[b.Rec_ID == rid]
-        ax.scatter(d.dateTime, d.dist_from_season_m, s=1, c="0.7", label="1-min fix", rasterized=True)
-        ax.plot(bb.bin, bb.dist_mean_from_season_m, lw=0.8, c="tab:blue", label="15-min mean")
-        ax.plot(bb.bin, bb.dist_median_from_season_m, lw=0.8, c="tab:orange", label="15-min median")
-        ax.set_ylim(0, 120)
-        ax.set_ylabel("%s\nm from season\nmedian" % rid, fontsize=8)
-    axes[0, 0].legend(fontsize=7, loc="upper right", markerscale=6, ncol=3)
-    axes[0, 0].set_title("CFD float GPS: distance from each receiver's season-median position (PDT). Y clipped at 120 m.", fontsize=10)
+        e0, n0 = ref.loc[rid, "easting"], ref.loc[rid, "northing"]
+        ax.scatter(d.easting - e0, d.northing - n0, s=3, c="0.7", label="Raw GPS (every minute)")
+        ax.plot(bb.E_median - e0, bb.N_median - n0, "o", ms=4, c="tab:blue", label="15-minute average")
+        ax.set_xlim(-MAP_HALF_WIDTH_M, MAP_HALF_WIDTH_M)
+        ax.set_ylim(-MAP_HALF_WIDTH_M, MAP_HALF_WIDTH_M)
+        ax.set_aspect("equal")
+        ax.set_title(rid if len(d) else "%s (no data)" % rid)
+        ax.set_xlabel("East (m)")
+        ax.set_ylabel("North (m)")
+    for ax in list(axes.flat)[len(recs):]:
+        ax.axis("off")
+    axes[0, 0].legend(loc="upper left", fontsize=8)
+    fig.suptitle("Float GPS on %s: raw vs 15-minute average" % day)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
-def plot_quality(b, path):
+def plot_track(b, path):
+    """Distance of each 15-min average from the float's usual spot; big moves pinned at the top in red."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     recs = sorted(b.Rec_ID.unique())
-    fig, axes = plt.subplots(len(recs), 1, figsize=(13, 2.1 * len(recs)), sharex=True, squeeze=False)
+    fig, axes = plt.subplots(len(recs), 1, figsize=(13, 1.6 * len(recs)), sharex=True, squeeze=False)
     for ax, rid in zip(axes[:, 0], recs):
-        bb = b[b.Rec_ID == rid]
-        ax.plot(bb.bin, bb.sd_m, lw=0.6, c="tab:purple", label="scatter within 15 min (RMS, m)")
-        ax.plot(bb.bin, bb.mean_minus_median_m, lw=0.6, c="tab:red", label="|mean - median| (m)")
-        ax.axhline(0.73, color="k", ls=":", lw=0.8, label="0.73 m = 0.5 ms budget")
-        ax.set_yscale("log")
-        ax.set_ylim(0.1, 200)
-        ax.set_ylabel(rid, fontsize=8)
-    axes[0, 0].legend(fontsize=7, loc="upper right", ncol=3)
-    axes[0, 0].set_title("CFD float GPS quality per 15-min bin. Red above the dotted line = mean pulled off the median by spikes.", fontsize=10)
+        # Reindex to a full 15-min grid so data gaps show as breaks, not straight lines.
+        bb = b[b.Rec_ID == rid].set_index("bin").dist_median_from_season_m
+        bb = bb.reindex(pd.date_range(bb.index.min(), bb.index.max(), freq=BIN))
+        big = bb > TRACK_YMAX_M
+        ax.plot(bb.index, bb.clip(upper=TRACK_YMAX_M), lw=0.7, c="tab:blue")
+        ax.scatter(bb.index[big], np.full(big.sum(), TRACK_YMAX_M), c="tab:red", s=8, zorder=3)
+        ax.set_ylim(0, TRACK_YMAX_M + 2)
+        ax.set_ylabel(rid, rotation=0, labelpad=20)
+    fig.suptitle("How far each float is from its usual spot (15-minute average, metres)\n"
+                 "Red = moved more than %d m" % TRACK_YMAX_M)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -114,8 +130,8 @@ def main():
     b.to_csv(os.path.join(args.output_dir, "cfd_gps_15min.csv"), index=False, float_format="%.3f")
     s = summarize(g, b)
     s.to_csv(os.path.join(args.output_dir, "cfd_gps_summary.csv"), index=False, float_format="%.3f")
-    plot_track(g, b, os.path.join(args.output_dir, "cfd_gps_track.png"))
-    plot_quality(b, os.path.join(args.output_dir, "cfd_gps_quality.png"))
+    plot_map(g, b, os.path.join(args.output_dir, "cfd_gps_raw_vs_15min.png"), args.map_day)
+    plot_track(b, os.path.join(args.output_dir, "cfd_gps_movement.png"))
     print(s.round({c: 2 for c in s.select_dtypes("number").columns}).to_string(index=False))
     print("Raw GPS not modified. Outputs in %s" % args.output_dir)
 

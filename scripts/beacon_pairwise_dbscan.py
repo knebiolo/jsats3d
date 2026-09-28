@@ -252,23 +252,31 @@ def write_legacy_tables(path, det, res, anchor_epochs, tag, anchor):
 
 
 def plot_before_after(res, folder, title):
-    """Legacy-notebook style, one file per receiver: DDoA (m) vs time, before and after DBSCAN."""
+    """One file per receiver, same three steps as notebooks/dbscan_multipath.ipynb:
+    raw data, DBSCAN clusters, cleaned data. y = clock drift in metres (c x delta)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     os.makedirs(folder, exist_ok=True)
     for rid, g in res.groupby("Rec_ID"):
-        ddoa = g.sound_speed * (g.t - g.t_anchor)
+        t = pd.to_datetime(g.t_anchor, unit="s")
+        drift_m = g.sound_speed * g.delta_s
         clean = (g.dbscan_class == "clean").values
-        fig, (a0, a1) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
-        a0.plot(g.t_anchor, ddoa, "ko", ms=1.5)
-        a0.set_title("Before: %d paired first arrivals" % len(g))
-        a1.scatter(g.t_anchor[clean], ddoa[clean], s=2)
-        a1.set_title("After DBSCAN: %d clean (%.1f%% removed)" % (clean.sum(), 100 * (1 - clean.mean())))
-        for ax in (a0, a1):
-            ax.set_xlabel("Seconds (study-basis PDT)")
-        a0.set_ylabel("DDoA (m) = c (t_%s - t_anchor)" % rid)
-        fig.suptitle("%s: %s. Whole-second clock jumps (~1,465 m steps) not yet corrected." % (rid, title))
+        noise = (g.label < 0).values
+        fig, (a0, a1, a2) = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+        a0.plot(t, drift_m, "ko", ms=1.5)
+        a0.set_title("1. Raw data")
+        a1.scatter(t[~noise], drift_m[~noise], c=g.label[~noise] % 20, cmap="tab20", s=3)
+        a1.scatter(t[noise], drift_m[noise], c="k", marker="x", s=12, label="multipath (not in a cluster)")
+        a1.set_title("2. DBSCAN clusters")
+        a1.legend(loc="best", fontsize=8)
+        a2.scatter(t[clean], drift_m[clean], s=3)
+        a2.set_title("3. Multipath removed (%.0f%% of points)" % (100 * (1 - clean.mean())))
+        a0.set_ylabel("Clock drift (m)")
+        for ax in (a0, a1, a2):
+            ax.set_xlabel("Time (PDT)")
+            ax.tick_params(axis="x", labelrotation=30, labelsize=8)
+        fig.suptitle("%s  |  %s" % (rid, title))
         fig.tight_layout()
         fig.savefig(os.path.join(folder, "%s_before_after.png" % rid), dpi=100)
         plt.close(fig)
@@ -288,7 +296,7 @@ def main():
     res.to_csv(stem + "_epochs.csv", index=False, float_format="%.6f")
     segments.to_csv(stem + "_segments.csv", index=False)
     summary.to_csv(stem + "_summary.csv", index=False)
-    plot_before_after(res, stem + "_before_after", "beacon %s (%s) vs anchor %s" % (tag, args.beacon_receiver, args.anchor))
+    plot_before_after(res, stem + "_before_after", "beacon %s vs %s" % (args.beacon_receiver, args.anchor))
     print("Beacon %s (%s), period %.1f s, anchor %s" % (tag, args.beacon_receiver, period, args.anchor))
     print("Fixed parameters: budget %.1f ms, window %.1f periods, min_samples %d, anchor majority %.2f of >=%d, "
           "max reflection delay %.0f ms" % (TIMING_BUDGET_S * 1e3, TIME_WINDOW_PERIODS, MIN_SAMPLES,
