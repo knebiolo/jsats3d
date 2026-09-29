@@ -20,7 +20,7 @@ temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Te
 hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
 released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
 # New database to create. Relative paths are inside the repo. Use a new name per run.
-output_db       = 'output\jsats3d_2025_run.db'
+output_db       = 'output\jsats3d_2025_v3.db'
 
 [selection]
 # Species from PTAGIS released_v0 "Species Name" (case does not matter).
@@ -29,8 +29,8 @@ species   = []
 # Tags by acoustic code, added to the species tags. The 5 test tags:
 tags      = ['FFD3', 'FC36', '0B0A', '0AC6', '493F']
 # Time frame in study time (PDT). Date alone = midnight. '' = no limit.
-start     = '2025-06-20'
-end       = '2025-06-22'
+start     = ''
+end       = ''
 # Receivers by name (e.g. 'ZOI02', 'CFD04'). [] = all 20 target receivers.
 receivers = []
 # Species and tags both empty = ALL tags (large). Beacons are always added when filtering.
@@ -67,15 +67,15 @@ deep_solution     = 'B'             # Deng root used for the deep receiver media
 study_tags        = []
 # PROVISIONAL, needs Kevin: ATS has no SNR/NBW. true fills SNR = SigStr - Threshold and
 # NBW = BitPeriod so the legacy classifier can run. false leaves them NULL (classifier drops all rows).
-signal_proxies    = true
+signal_proxies    = false
 work_dir          = ''              # blank = output/<db name>_legacy
 
 [dbscan]
 # Optional: run the 2025 beacon pairwise DBSCAN diagnostic on the new database afterwards.
-run             = false
+run             = true
 beacon_receiver = 'ZOI02'
 anchor          = 'ZOI09'
 # Blank = use the [selection] start/end.
-start           = ''
-end             = ''
+start           = '2025-06-20'
+end             = '2025-06-22'
 output_dir      = ''

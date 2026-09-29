@@ -253,6 +253,51 @@
   - Not in the positioning path: meeting diagnostics (`dbscan_parameter_sweep.py`, `beacon_coverage_report.py` and their outputs, the before/after and GPS PNGs); Kevin legacy extras (`projectSetup.py`, `projectSetup_2018.py`, `mulitpath_experiment_with_kats.py`, `temperature_assessment.py`, `temp_and_uncertainty.py`); tracked junk (py37/38 `.pyc`, two checkpoint notebooks, `.spyproject/`, `notebooks.jupyterlab-workspace`).
 - User decision: keep everything until after the Kevin/Drew meeting; ask Kevin before removing his legacy extras; leave the tracked junk. Nothing deleted.
 
+## Full Re-run on Pulled Code (user: "run new database and everything")
+- Pulled commits checked: `9a58314` (the coverage/plot/GPS changes from this session) and `cd7fa52`:
+  - `cd7fa52` extends `run_data.py` (data_format, [study]/[legacy]/[dbscan] sections, `signal_proxies`, indexes, `--skip-build`).
+  - It adds `scripts/legacy_pipeline.py` and `environment_legacy.yml` (pandas 1.5.3, sklearn 1.0.2).
+  - It restores `jsats3d/jsats3d.py` to Kevin's `7e3b90e`.
+  - 28 tests pass.
+- Flags on the pulled code:
+  - `[legacy] signal_proxies = true` writes SNR = SigStr - Threshold and NBW = BitPeriod into `tblDetectionRaw` whenever format is ATS, even with `[legacy] run = false`. This conflicts with System Prompt Section 2 ("NO FABRICATED SENSOR DATA"). User chose OFF for this run. Kevin must decide before any legacy KNN run.
+  - The run file sets `master_receiver = 'ZOI08'`, with the rationale that ZOI02 is on the bottom (deep receiver) so it cannot be the legacy master. This is consistent with the open reference-clock question; pending Kevin.
+  - Legacy run is not possible yet: conda env `jsat_legacy` is not installed, and `bm_elev` is blank (`run_data.py` refuses the legacy step without it).
+- User decisions for this run: full season, 5 study tags + all configured beacons, all 20 receivers; `signal_proxies = false`; fix the parser D-file skip first.
+- Parser fix (`scripts/parse_ats_raw_to_legacy.py`): `SERIAL_PATTERN` changed from `^SR(\d+)(?=_|\.)` to `^SR(\d+)(?=[_.]|D\d{6}_)`.
+  - The earlier proposal `^SR(\d+)[A-Z]?(?=_|\.)` was wrong, because the `D` is followed by the date digits, not `_`. The new test caught it.
+  - Verified on K: (read-only listing): 303 target files, previously 285. The 18 ZOI03/ZOI06 daily files for 06-18..06-26 are now included. The false-match case `SR18078250610_...` is still excluded. The test was extended with a daily file; 28 pass.
+- `config/run_data.toml` for this run:
+  - `output_db = output\jsats3d_2025_v3.db`; start/end blank (full season); `signal_proxies = false`.
+  - `[dbscan] run = true`, beacon ZOI02, anchor ZOI09, 2025-06-20..06-22.
+  - Dry run OK (steps: parse ATS raw files; study parameters and indexes; pairwise beacon DBSCAN).
+- CFD05/CFD09 serial swap is still NOT fixed (needs the PM's swap time). SR19026 rows before about 06-11 12:40 remain labelled CFD09 in v3.
+- v3 build attempt 1 FAILED (20:16-20:21 PDT). About 130 of 303 files were parsed when a pool worker raised `MemoryError` while pickling a large result. The next `executemany` then failed with `sqlite3.OperationalError: disk I/O error`, a knock-on of memory pressure (RAM 15.6 of 31.5 GB free afterwards; disk 56-65 GB free). Cause: 8 parallel workers hold whole parsed files in memory; the largest files are 500-690k detections. The v2 build had 18 fewer files.
+- Fix: parser gets `--workers` (default 4, was a hardcoded `min(8, cpu)`). Results are unchanged; only peak memory and speed change. 28 tests pass. Deleted the partial `output/jsats3d_2025_v3.db` (8.8 GB), its `-journal`, `.run.json` and build log (our output, not raw). Re-running.
+- v3 build attempt 2 SUCCEEDED (4 workers). `output/jsats3d_2025_v3.db`:
+  - 303 files, 20/20 serials, 60,410,185 detections. v2 had 59,935,751, so +474,434, all from the 18 recovered ZOI03/ZOI06 daily files.
+  - 2,796,514 GPS rows; 1,024,202 clock-event rows.
+  - tblReceiver 20; tblTag 44 (6 array-wide tags have no pulseRate); tblInterpolatedTemp 30,817 (HOBO 06-02..07-10, string 07-10..09-17); tblWSEL 26,602 (starts 06-17, WARNING before that).
+  - tblStudyParameters: UTC_Conv -7, masterReceiver ZOI08 (pending Kevin), BM_Elev NULL, sync window NULL. SNR/NBW left NULL (`signal_proxies = false`). Indexes idx_raw_tag_rec and idx_raw_rec created.
+  - Run record `output/jsats3d_2025_v3.run.json`; log `output/jsats3d_2025_v3_build.log`.
+- Beacon DBSCAN on v3 (ZOI02/7D2D, anchor ZOI09, 06-20..06-22), output `output/dbscan_jsats3d_2025_v3/`:
+  - 82,215 detections -> 48,742 first arrivals -> 42,276 paired epochs; 86 anchor-side.
+  - Now 17 receivers (was 15): ZOI03 and ZOI06 are included thanks to the parser fix.
+    - ZOI03: 15.9% noise, 16 steady_reflection epochs, clean RMS 31.7 us.
+    - ZOI06: 1.7% noise, RMS 12.6 us.
+  - All other receivers match the v2 run to within 1-2 epochs.
+  - WARNING (System Prompt 9.2): CFD02/03/04/06/07/08/09 have 35-99 clean epochs with residual > 0.5 ms; all ZOI receivers 0.
+- Parameter sweep on the v3 epochs (`output/dbscan_sweep_v3/`): 42,276 epochs, 17 receivers, 2,093 planted echoes. Current setting group medians:
+  - ZOI: 4.48% rejected, LOO p95 16.0 us.
+  - CFD: 13.30% rejected, LOO p95 444.5 us, 3.1% over budget.
+  - Recall 100% for both. Unchanged from v2; no parameter change.
+- Beacon coverage on v3 (`output/beacon_coverage_v3/`): 7D2D (ZOI02) is again #1 (18 listeners >=90% of hours, worst case 43.0 pings/h), then B36A (CFD03) 26.7 and FA1B (CFD04) 23.2.
+  - The run file's legacy `master_receiver = ZOI08` hosts 7DB7, which ranks 7th by worst case (18.0 pings/h). Flag for Kevin together with the deep-receiver rationale.
+  - The full-table scan took 2,758 s on v3 vs 159 s on v2. Likely the new indexes change SQLite's plan for the unfiltered GROUP BY; not investigated.
+- GPS step not re-run: `cfd_gps_diagnostics.py` reads `master_df_gps.csv` directly, not the DB, and `output/cfd_gps/` is already from current code.
+- Legacy positioning run not possible yet (no `jsat_legacy` env; `bm_elev` blank).
+- Uncommitted: `scripts/parse_ats_raw_to_legacy.py` (D-file regex, `--workers`), `tests/test_2025_contracts.py` (daily-file case), `config/run_data.toml` (v3 run settings), this journal. The v2-based output folders (`dbscan_ddoa_0620`, `dbscan_sweep_0620`, `beacon_coverage`) are superseded by the v3 folders.
+
 ## Files Touched
 - This journal (multiple appends through the session).
 - `scripts/cfd_gps_diagnostics.py`: plots simplified (uncommitted).
