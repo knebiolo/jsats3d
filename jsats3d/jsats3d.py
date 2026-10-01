@@ -801,6 +801,15 @@ class clock_fix_object():
             
   
 
+def _clock_fix_interpolation_knots(receiver_dat, value_column):
+    duplicate_rows = receiver_dat.loc[
+        receiver_dat.duplicated("seconds", keep=False), ["seconds", value_column]
+    ]
+    if not duplicate_rows.empty and duplicate_rows.groupby("seconds")[value_column].nunique(dropna=False).gt(1).any():
+        raise ValueError("duplicate clock-fix timestamps have conflicting %s values" % value_column)
+    return receiver_dat.drop_duplicates("seconds", keep="first").sort_values("seconds")
+
+
 def clock_fix(clock_fix_object):
     '''function to fix clocks on a receiver by receiver basis - we will use mutiprocessing
     to speed things up'''
@@ -930,8 +939,9 @@ def clock_fix(clock_fix_object):
                     ts = np.arange(t_min,t_max,clock_fix_object.master_pulse_rate)
                     #ts = np.arange(t_min,t_max,17.)
                     
-                    # create linear interpolator
-                    f = interp1d(receiver_dat.seconds,receiver_dat.DDoA,kind = 'linear',bounds_error = False, fill_value = 'extrapolate')
+                    # Keep duplicate detections, but use unique timestamps as interpolation knots.
+                    clock_curve = _clock_fix_interpolation_knots(receiver_dat, 'DDoA')
+                    f = interp1d(clock_curve.seconds,clock_curve.DDoA,kind = 'linear',bounds_error = False, fill_value = 'extrapolate')
                     
                     # interpolate DDoA
                     ddoa = f(ts)
@@ -993,7 +1003,8 @@ def clock_fix(clock_fix_object):
                 receiver_dat.sort_values(by = 'seconds',inplace = True)
                 
                 # Fit picewise linear to error line:
-                residual = interp1d(receiver_dat.seconds.values,receiver_dat.ToA_error.values,kind = 'linear',bounds_error = False, fill_value = 9999)  # create a function for the residual at time of arrival  
+                residual_curve = _clock_fix_interpolation_knots(receiver_dat, 'ToA_error')
+                residual = interp1d(residual_curve.seconds.values,residual_curve.ToA_error.values,kind = 'linear',bounds_error = False, fill_value = 9999)  # create a function for the residual at time of arrival
                 receiver_dat['seconds_residual_predicted'] = residual(receiver_dat.seconds)   # predict the residual and visually confirm with plot            
                 receiver_dat['prev_seconds'] = receiver_dat.seconds.shift()
                 receiver_dat['prev_error'] = receiver_dat.ToA_error.shift()

@@ -6,12 +6,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import interp1d
 
 from scripts.adapt_2025_to_legacy import (
     apply_tag_pulse_rates,
     drop_incomplete_receivers,
     load_temperature_string,
     load_receiver_gps,
+    load_receiver_table,
     normalize_detection,
     parse_beacon_window,
     tag_types,
@@ -40,6 +42,7 @@ from scripts.run_data import (
     normalize_tags,
     parser_command,
 )
+from jsats3d.jsats3d import _clock_fix_interpolation_knots
 
 
 class Test2025Adapter(unittest.TestCase):
@@ -268,6 +271,20 @@ class Test2025Adapter(unittest.TestCase):
 
 
 class TestRunData(unittest.TestCase):
+    def test_clock_fix_interpolation_knots_deduplicate_identical_values(self):
+        data = pd.DataFrame({"seconds": [1.0, 1.0, 2.0], "DDoA": [0.1, 0.1, 0.2]})
+        result = _clock_fix_interpolation_knots(data, "DDoA")
+        self.assertEqual(result.seconds.tolist(), [1.0, 2.0])
+        self.assertEqual(data.seconds.duplicated().sum(), 1)
+        interpolated = interp1d(result.seconds, result.DDoA, bounds_error=False,
+                                fill_value="extrapolate")([1.0, 1.5, 2.0])
+        self.assertTrue(pd.Series(interpolated).notna().all())
+
+    def test_clock_fix_interpolation_knots_reject_conflicting_values(self):
+        data = pd.DataFrame({"seconds": [1.0, 1.0], "DDoA": [0.1, 0.2]})
+        with self.assertRaisesRegex(ValueError, "conflicting DDoA"):
+            _clock_fix_interpolation_knots(data, "DDoA")
+
     def test_clock_fix_check_refuses_to_replace_existing_results(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "clock_fix.db"
@@ -326,6 +343,27 @@ class TestRunData(unittest.TestCase):
             result = load_receiver_gps(str(path), receivers)
         self.assertEqual(result.Rec_ID.tolist(), ["CFD04", "CFD04"])
         self.assertEqual(result.X.tolist(), [10.0, 20.0])
+
+    def test_load_receiver_table_output_feeds_load_receiver_gps_without_error(self):
+        # Regression: load_receiver_table() must keep easting/northing so load_receiver_gps()
+        # can read its origin from the SAME table it is given, not a hand-built frame.
+        with tempfile.TemporaryDirectory() as directory:
+            gps_path = Path(directory) / "gps.csv"
+            pd.DataFrame({"receiverName": ["CFD04", "CFD04"],
+                          "dateTime": ["2025-01-01 00:00", "2025-01-01 01:00"],
+                          "easting": [100.0, 110.0], "northing": [1000.0, 1010.0]}).to_csv(gps_path, index=False)
+            config_path = Path(directory) / "config.xlsx"
+            pd.DataFrame({"Receiver Name": ["CFD04"], "Beacon Tag Code": ["B1"],
+                          "Hydrophone Depth (feet)": [10.0], "Latitude (degrees)": [46.5],
+                          "Longitude (degrees)": [-122.1]}).to_excel(config_path, index=False)
+            receiver_table = load_receiver_table(str(gps_path), str(config_path))
+            self.assertIn("easting", receiver_table.columns)
+            self.assertIn("northing", receiver_table.columns)
+            gps = load_receiver_gps(str(gps_path), receiver_table)
+        self.assertEqual(gps.Rec_ID.tolist(), ["CFD04", "CFD04"])
+        # receiver_table.easting/northing hold the per-receiver median GPS fix (105, 1005 here),
+        # so raw fixes end up offset from that median, not from the raw minimum.
+        self.assertEqual(gps.X.tolist(), [-5.0, 5.0])
 
     def test_position_uses_dynamic_gps_and_static_fallback(self):
         solver = position.__new__(position)

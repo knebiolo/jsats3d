@@ -134,8 +134,9 @@ def load_receiver_table(gps_path, config_path):
     for source, target in RECEIVER_METADATA_COLUMNS.items():
         if target not in receivers:
             receivers[target] = receivers[source] if source in receivers else pd.NA
+    # easting/northing (the coordinate origin X/Y are offset from) are kept for load_receiver_gps.
     receivers = receivers[["Rec_ID", "Tag_ID", "Ref_Elev", "X", "Y", "Z", "X_t", "Y_t", "Z_t", "ZReference",
-                           *RECEIVER_METADATA_COLUMNS.values()]]
+                           "easting", "northing", *RECEIVER_METADATA_COLUMNS.values()]]
     return receivers
 
 

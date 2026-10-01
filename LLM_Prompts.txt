@@ -159,10 +159,12 @@ Useful, not blocking:
 ########################################################################
 
 Stops a run or gives empty output:
-1. 2019 run fails in step 5 (DBSCAN rejects NaN in clock_fix; some runs report missing
-   tblMetronomeFiltered / tblMetronomeSecondFiltered). Cause NOT established. Unverified leads:
-   (a) orphan worker from an earlier run dropping derived tables mid run (driver drops them at start);
-   (b) duplicate `seconds` in tblMetronomeSecondFiltered making clock_fix's interp1d return NaN.
+1. 2019 step 5 NaN cause CONFIRMED and locally fixed: duplicate `seconds` in the filtered
+  receiver detections made scipy interp1d produce a NaN at the first 37.5-second grid point;
+  DBSCAN rejected it. `clock_fix` now uses unique interpolation knots while retaining all
+  detections and fails clearly if duplicate-time values conflict. Focused and full tests pass.
+  Missing-table errors occurred in some runs but their cause is still unresolved. The 2019
+  end-to-end workflow and canonical parity have NOT been rerun/validated.
 2. 2025 full [legacy] run: process() still runs the legacy KNN metronome. SNR is NULL by decision,
    so multipath_classifier (dat[dat.SNR > 0]) drops every row and clock_fix gets nothing.
    process() must use the staged DBSCAN metronome tables for ATS data.
@@ -231,8 +233,9 @@ Output (local C: only):
 8. TASK B onward (after Task A, in this order unless the user says otherwise)
 ########################################################################
 
-B. Fix the 2019 step 5 failure. Check processes first; then check duplicate seconds and NaN
-   sources in tblMetronomeSecondFiltered for the failing receiver. Reuse the local 2019 DB.
+B. 2019 step-5 duplicate-time NaN fix is implemented and tested. Still required: rerun the
+  workflow only with user authorization, investigate any missing-table error separately, and
+  validate the full result against the canonical DB before calling Task B complete.
 C. Finish 2019 to tblPositions_Deng and compare with the canonical DB (read only): derived table
    counts, receiver medians (R01-R03 X_t/Y_t/Z_t), position statistics. Write the comparison.
 D. Decide with the user on Section 6 items 7 and 8 (GPS interpolation, core behaviour changes).

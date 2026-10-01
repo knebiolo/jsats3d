@@ -125,3 +125,227 @@ Neither data set has fish positions yet.
 4. Reconcile the 2025 metronome path in `process()`, then extend the clock fix to all surface
    receivers and request Gate 2.
 5. Build the 2025 study tag multipath step (cross receiver epochs, DBSCAN).
+
+## Follow-up — Task B: 2019 Clock-Fix Duplicate-Time NaN
+
+- Author: GitHub Copilot
+- Date: 2026-10-01.
+- Tags: #2019 #clock-fix #DBSCAN #duplicate-timestamps #root-cause
+- Scope: local DB read-only diagnosis; in-memory reproduction; core code/test edit.
+  No 2019/2025 workflow was run and no database or K: data was modified.
+
+### Process and run state
+- Process check found only the Task A inventory profiler (PID 63784); no Deng or
+  legacy workflow process was active.
+- `output/cowlitz_2019_synch_1_recreated.run.json` recorded the latest 2019
+  attempt starting 2026-10-01 11:40:58, with the legacy step returning code 2
+  after 0.8 minutes. This attempt did not reach Deng.
+
+### Root cause evidence
+- Both metronome tables existed in the local DB. The exact clock-fix filter
+  (`tblMetronomeSecondFiltered`, `Tag_ID=FF75`, `multipath_prediction=0`)
+  contained 104,200 R04 rows but only 52,174 distinct seconds. R06, R07, R08,
+  and R09 also had repeated seconds. Duplicate-time groups did not cross
+  `transNo` for these surface receivers.
+- After the R04 ToT join, 102,003 rows remained and 50,930 timestamps were
+  duplicated. Duplicate rows had identical DDoA and ToA correction values.
+- The master beacon pulse rate is 37.5 seconds. Reproducing the production
+  interpolation on R04's actual local data yielded one non-finite DDoA among
+  114,862 grid points; DBSCAN raised `Input X contains NaN`.
+- Collapsing only the interpolation knot set to one row per `seconds` yielded
+  114,862 finite grid points; DBSCAN completed with the production first-pass
+  quantile epsilon (37.5029) and 11,353 noise labels. All original detection
+  rows remain available for subsequent classification and correction.
+- `tblMetronomeFiltered` and `tblMetronomeSecondFiltered` were present during
+  this read-only diagnosis. Earlier missing-table errors remain unexplained and
+  may represent a separate failure mode.
+
+### Code change and validation
+- `jsats3d/jsats3d.py`: clock-fix DDoA and ToA-error interpolators now use
+  unique timestamp knots. Duplicate timestamps with conflicting values raise a
+  descriptive `ValueError`; no detections are removed by this change.
+- `tests/test_2025_contracts.py`: added tests for identical duplicate values,
+  finite interpolation at the duplicate minimum timestamp, and rejection of
+  conflicting duplicate values.
+- Focused contract suite: 35 passed. Full suite: 37 passed. `git diff --check`
+  clean.
+
+### Status and remaining work
+- The confirmed duplicate-time NaN failure is fixed and locally validated.
+- Task B is not complete until the 2019 workflow is rerun with authorization,
+  any missing-table failure is diagnosed separately, and canonical 2019 parity
+  is checked. No full workflow run was initiated for this fix.
+
+## Follow-up — Fresh 2019 + 2025 Rebuild, 2025 Receiver/GPS Bug Found and Fixed
+
+- Author: GitHub Copilot
+- Date: 2026-10-01, afternoon.
+- Tags: #2019 #2025 #clock-fix #adapt_2025_to_legacy #bug-fix #step-by-step
+- Scope: user requested clearing `output/` and rerunning both 2019 and 2025 from
+  scratch, step by step, to confirm the modernized code works for both data sets.
+  K: source data was not modified. All work is local to `output/`.
+
+### output/ cleanup
+- User asked to clear everything in `output/` not needed. Stopped the Task A
+  inventory profiler (PID 63784, already finished its file walk) and deleted
+  everything under `output/` (old 2019/2025 databases, DBSCAN/scratch folders,
+  run manifests). About 40 GB freed. K: untouched.
+
+### 2019: fresh rebuild exercises the Task B clock-fix fix
+- Started `scripts/run_data.py config/run_data_2019.toml` (no `--skip-build`,
+  full rebuild) in terminal `d92736d8`, logged to `output/run_2019_fresh.log`.
+- Import: clean, 28,582,645 detections across all 9 receivers, matches the
+  known baseline exactly.
+- Legacy workflow (`legacy_pipeline.py process`, PID 49552): surface clock fix
+  completed cleanly for R04/R06/R07/R08/R09 (`tblDetectionClockFixed`
+  11,235,456 rows; master R05 correctly absent, known legacy behavior) — this
+  is the exact stage that previously crashed with the duplicate-timestamp NaN.
+  **The Task B fix held under a real end-to-end run.**
+- Now in deep-receiver Deng (R01 first). As of 3:27 PM PID 49552 is at 6,470
+  CPU-seconds (~1.8 CPU-hours) and still running; R01/R02/R03 `Z_t` still NULL
+  (none resolved yet this run). The prior successful run took ~6.6 CPU-hours
+  for R01 alone (164,320 solution-B positions), so this is expected, not stuck.
+- Not yet reached: R02, R03, phase 2 (repeat metronome+clock fix all
+  receivers), study tags, `tblPositions_Deng`, or canonical-DB comparison.
+
+### 2025: step-by-step rebuild, one bug found and fixed
+User asked to go one step at a time rather than run the full chained pipeline.
+
+**Step 1 (collect raw data / ATS parser).** Invoked the exact `parser_command()`
+used by `run_data.py` against `config/run_data.toml` (full season, all 20
+receivers, 5 study tags + beacons). All 303 raw files parsed successfully
+(60,410,185 detections across 20/20 receivers, matching the known v3
+baseline) — then it crashed at the very end:
+```
+AttributeError: 'DataFrame' object has no attribute 'easting'
+  File adapt_2025_to_legacy.py, line 153, in load_receiver_gps
+    origin_x = receiver_table.easting.min()
+```
+- **Root cause:** `load_receiver_table()` (`scripts/adapt_2025_to_legacy.py`)
+  computes `easting`/`northing` internally to build origin-relative `X`/`Y`,
+  but its final column selection dropped both columns before returning.
+  `load_receiver_gps()` is then handed that same trimmed table and tries to
+  read `.easting`/`.northing` from it to compute its own GPS origin — but
+  those columns no longer exist. 100% reproducible; not a data issue, would
+  fail identically on every retry.
+- **Fix:** keep `easting`/`northing` in `load_receiver_table()`'s returned
+  columns. No other behavior changed; `X`/`Y`/`Z` and all other columns are
+  unchanged.
+- **Test:** added
+  `test_load_receiver_table_output_feeds_load_receiver_gps_without_error` in
+  `tests/test_2025_contracts.py`, which builds a real config workbook + GPS
+  CSV fixture and runs `load_receiver_table()` -> `load_receiver_gps()`
+  together (the real integration path, not a hand-built frame like the
+  pre-existing GPS-origin test). Full suite: 38 passed.
+- **Avoided a costly re-parse:** since all 303 files had already parsed
+  successfully and `write_legacy_metadata()` only reads `tblDetectionRaw`
+  (unaffected) to write separate metadata tables, the fixed metadata step was
+  run directly against the already-built database instead of restarting the
+  ~20+ minute multi-worker parse. Result: `tblReceiver` 20 rows,
+  `tblReceiverGPS` 1,114,887 rows, `tblTag` 44 rows (6 array-wide tags still
+  have no pulseRate: 1F5A/1F71/1F14/1F38/1F94/1FCD, known/expected),
+  `tblInterpolatedTemp` 30,817, `tblWSEL` 26,602. Only known/expected warnings
+  (WSEL starts after first detection; BM_Elev/UTC_Conv NULL at this point).
+
+**Step 2 (study parameters + indexes, `run_data.finish_database`).** Applied
+`[study]` from `config/run_data.toml` and built raw-table indexes. Result:
+`tblStudyParameters` = UTC_Conv -7, BM_Elev 861.5 ft, Output_Units meters,
+masterReceiver ZOI08, sync window 2025-06-04 to 2025-09-17 (full season, per
+the already-decided sync window). No errors. Note: `masterReceiver` is still
+ZOI08/7DB7 purely because that is what's in the config file — the open
+reference-clock-vs-beacon-coverage question (ZOI02/7D2D favored by the
+coverage audit) is **not** resolved by this step.
+
+**Step 3 (pairwise beacon DBSCAN, approved test window).** Ran
+`beacon_pairwise_dbscan.py` with the approved fixed parameters (0.5 ms
+budget, 2.5-period window, min_samples 3, anchor majority >=50% of >=4,
+250 ms steady-reflection cap) for beacon ZOI02/7D2D, anchor ZOI09, 2025-06-20
+to 06-22 (the configured short test window, not full season). Exit code 0.
+Results matched the known v3 numbers from the 2026-09-29 journal entry
+exactly: 82,215 detections, 48,742 first arrivals, 42,276 paired epochs, 86
+anchor-side — confirming the fresh rebuild reproduces prior results. Expected
+warnings only (several CFD receivers have clean-epoch residuals over the
+0.5 ms budget; ZOI02's own position is unsurveyed). No source detections
+modified; outputs in `output/dbscan_jsats3d_2025_v3/`.
+
+### Validation
+- Full test suite: 38 passed (up from 37, +1 for the receiver-table/GPS
+  integration regression test). `git diff --check` clean.
+- Both 2019 and 2025 processes ran concurrently on separate database files
+  with no conflicts (process table checked before each step).
+
+### Files touched
+- `jsats3d/jsats3d.py`: clock-fix duplicate-timestamp interpolation fix
+  (already covered in the Task B follow-up above).
+- `scripts/adapt_2025_to_legacy.py`: `load_receiver_table()` now retains
+  `easting`/`northing`.
+- `tests/test_2025_contracts.py`: new clock-fix-knot tests (Task B) and new
+  `load_receiver_table`/`load_receiver_gps` integration test (this entry).
+- This journal; `/memories/session/2026-10-01_2019_2025_run_tracking.md`
+  (live run tracker, updated each status check, not duplicated here).
+
+### Blockers / still open
+- 2019: end-to-end completion and canonical-DB comparison still pending
+  (Deng in progress).
+- 2025: metronome/clock fix only run on the short approved test window, not
+  full season/full array; reference-clock decision still unresolved; study-tag
+  multipath still not built; Gate 2 report not produced.
+- User is directing this step by step; do not auto-chain further 2025 steps
+  without being asked again.
+
+### Next Steps
+1. Continue monitoring 2019 Deng (R01 -> R02 -> R03 -> phase 2 -> study tags);
+   compare final results against the canonical 2019 database when complete.
+2. Await user direction for 2025 step 4 (likely: decide reference clock, or
+   extend clock fix beyond the 4-receiver/short-window scope).
+
+## Follow-up — Reference-Clock Candidate Comparison (ZOI08 vs ZOI09 as anchor)
+
+- Author: GitHub Copilot
+- Date: 2026-10-01, afternoon (step 4).
+- Tags: #2025 #reference-clock #dbscan #diagnostic #not-a-final-decision
+- Scope: read-only diagnostic. Reran the identical approved DBSCAN (beacon
+  7D2D/ZOI02, same fixed parameters, same 2025-06-20..06-22 window) with
+  `--anchor ZOI08` for direct comparison against the already-run `--anchor
+  ZOI09` result. No source detections modified. Outputs:
+  `output/dbscan_jsats3d_2025_v3_anchor_ZOI08/`.
+
+### Why this is the right comparison
+`--anchor` in `beacon_pairwise_dbscan.py` IS the reference-clock candidate
+(the receiver whose clock is treated as ground truth for pairwise TDoA
+differencing). This is a separate question from which receiver hosts the
+*beacon* signal (already settled: ZOI02/7D2D, by the 2026-09-28 coverage
+audit). Holding the beacon fixed and only changing `--anchor` isolates the
+reference-clock question cleanly.
+
+### Result
+| Metric | anchor=ZOI09 | anchor=ZOI08 |
+|---|---|---|
+| Paired epochs | 42,276 | 43,410 |
+| Anchor-side (suspect) epochs | 86 | 11 |
+| Per-receiver anchor-suspect count | 65-86 | 9-11 |
+| Noise fraction, most receivers | higher | equal or lower, consistently |
+
+Using ZOI08 as anchor produced about 8x fewer anchor-side (globally suspect)
+epochs than ZOI09, and equal-or-lower per-receiver noise fraction across
+nearly every receiver, on the identical window and beacon. This is a
+meaningful, reproducible difference, not noise.
+
+### Interpretation and limits
+- This evidence favors ZOI08 over ZOI09 as the reference-clock anchor, and is
+  consistent with (does not resolve for the first time) the current config's
+  `masterReceiver = ZOI08`.
+- Limits: only a 2-day window was tested (not the full season); only two
+  candidates were compared (ZOI08, ZOI09); ZOI02 itself cannot be its own
+  anchor (it hosts the beacon). A third candidate or full-season validation
+  could still change the picture.
+- Per project rules (System Prompt / LLM_Prompts.txt Section 0/5), the
+  reference-clock choice is Kevin's decision. This comparison is diagnostic
+  evidence to inform that decision, not a unilateral adoption. `masterReceiver`
+  in the run file was NOT changed as a result of this comparison.
+
+### Next Steps
+1. Present this comparison to Kevin as supporting evidence; still needs his
+   sign-off before being treated as accepted.
+2. If approved, consider a full-season version of this same comparison before
+   committing to a full-array clock fix.
