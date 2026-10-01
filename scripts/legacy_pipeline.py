@@ -1,14 +1,14 @@
-"""Run Kevin's legacy jsats3d workflow, unchanged, on a legacy-format project database.
+"""Run the preserved legacy jsats3d workflow on a legacy-format project database.
 
-Runs in the legacy environment (environment_legacy.yml: pandas 1.5, scikit-learn 1.0), because
-jsats3d.py uses DataFrame.append and positional to_sql arguments removed in pandas 2+, and passes
-a one-element array as DBSCAN eps, which scikit-learn 1.1+ rejects.
+The workflow and scientific method remain legacy-compatible, but execute in the
+active shared environment. Compatibility fixes live in jsats3d.py so 2019 and
+2025 use one runtime and one set of core functions.
 Called by scripts/run_data.py; can also be run directly:
 
     python scripts/legacy_pipeline.py import-2019 config/run_data_2019.toml
     python scripts/legacy_pipeline.py process     config/run_data.toml
 
-import-2019  Kevin's project setup (projectSetup.py + temperature_assessment.py) for Teknologic data.
+import-2019  The preserved Teknologic importer for 2019 data.
 process      Nebiolo & Meyer (2021) workflow, calling jsats3d functions in Kevin's order:
              1 metronome (beacon_epoch, multipath_2, multipath_classifier) on the master beacon
              2 clock fix of the surface receivers (clock_fix, epoch_fix_data_management)
@@ -26,6 +26,7 @@ import argparse
 import shutil
 import sqlite3
 import sys
+import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 legacy env
@@ -85,6 +86,21 @@ def execute(db, *statements):
         connection.close()
 
 
+def index_table(db, table, name, columns):
+    """Add a query index only when a derived table exists."""
+    connection = sqlite3.connect(db)
+    try:
+        exists = connection.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+        if exists:
+            connection.execute("create index if not exists %s on %s (%s)" %
+                               (name, table, ", ".join(columns)))
+            connection.commit()
+    finally:
+        connection.close()
+
+
 def query(db, sql, params=()):
     connection = sqlite3.connect(db)
     try:
@@ -124,22 +140,30 @@ def widen_table(db, table, folder, extra=()):
 # ---------------------------------------------------------------- 2019 Teknologic import
 
 def interpolated_temperature_2019(temp):
-    """temperature_assessment.py: linear interpolator per location-depth, mean across them on 10,000 steps."""
+    """Build the 2019 mean temperature series from each location-depth profile."""
     temp = temp.copy()
     temp["time_stamp"] = pd.to_datetime(temp.meas_dt)
     temp["loc_dep_id"] = temp.location + "-" + temp.depth_ft.astype(str)
-    temp["temp_celcius"] = (temp.temp_f - 32) * 5. / 9.
+    if "temp_celcius" in temp.columns:
+        temp["temperature_c"] = pd.to_numeric(temp.temp_celcius, errors="raise")
+    elif "temp_f" in temp.columns:
+        temp["temperature_c"] = (pd.to_numeric(temp.temp_f, errors="raise") - 32) * 5. / 9.
+    else:
+        raise ValueError("2019 temperature input needs temp_celcius or temp_f")
     interpolators, lows, highs = {}, [], []
     for loc in temp.loc_dep_id.unique():
         loc_dat = temp[temp.loc_dep_id == loc].sort_values("time_stamp")
-        loc_dat["seconds"] = loc_dat.time_stamp.astype(np.int64) / 1.0e9
+        loc_dat["seconds"] = pd.DatetimeIndex(loc_dat.time_stamp).as_unit('ns').astype(np.int64) / 1.0e9
         loc_dat = loc_dat.drop_duplicates("seconds", keep="first").set_index("seconds", drop=False).dropna()
-        interpolators[loc] = interp1d(loc_dat.seconds.values, loc_dat.temp_celcius.values, kind="linear",
+        interpolators[loc] = interp1d(loc_dat.seconds.values, loc_dat.temperature_c.values, kind="linear",
                                       bounds_error=False, fill_value=np.nan)
         lows.append(loc_dat.seconds.min())
         highs.append(loc_dat.seconds.max())
     epoch_range = np.linspace(min(lows) - 0.1, max(highs) + 0.1, 10000)
-    means = [np.nanmean([f(t) for f in interpolators.values()]) for t in epoch_range]
+    means = []
+    for timestamp in epoch_range:
+        values = np.asarray([f(timestamp) for f in interpolators.values()], dtype=float)
+        means.append(float(np.nanmean(values)) if np.isfinite(values).any() else np.nan)
     return pd.DataFrame({"timeStamp": pd.to_datetime(epoch_range, unit="s"), "C": means})
 
 
@@ -194,6 +218,9 @@ def metronome(db, tag, work, method):
     jsats3d.multipath_classifier(tag, str(db), classified, metronome=True, method=method)
     widen_table(db, "tblMetronomeSecondFiltered", classified)
     jsats3d.multipath_data_management(classified, str(db), metronome=True)
+    index_table(db, "tblMetronomeUnfiltered", "idx_metronome_rec_tag_seconds", ("Rec_ID", "Tag_ID", "seconds"))
+    index_table(db, "tblMetronomeFiltered", "idx_metronome_filtered_rec_tag_seconds", ("Rec_ID", "Tag_ID", "seconds"))
+    index_table(db, "tblMetronomeSecondFiltered", "idx_metronome_second_rec_tag_seconds", ("Rec_ID", "Tag_ID", "seconds"))
 
 
 def clock_fix(db, receivers, work):
@@ -206,6 +233,35 @@ def clock_fix(db, receivers, work):
         jsats3d.clock_fix(jsats3d.clock_fix_object(rec, receivers, str(db), scratch, str(figures)))
     widen_table(db, "tblDetectionClockFixed", scratch)
     jsats3d.epoch_fix_data_management(scratch, str(db))
+
+
+def clock_fix_check(db, receivers):
+    """Run clock fix only when it cannot append over existing clock-fixed results."""
+    tables = query(db, "select name from sqlite_master where type = 'table'").name.tolist()
+    if "tblDetectionClockFixed" in tables:
+        raise ValueError("tblDetectionClockFixed already exists; refusing to append duplicate clock-fix results")
+    master_rec, master_tag = master(db)
+    selected = list(dict.fromkeys([master_rec] + receivers))
+    print("Clock-fix check: master %s (beacon %s); receivers %s" % (master_rec, master_tag, selected))
+    with tempfile.TemporaryDirectory(prefix="jsats3d_clock_fix_") as temporary:
+        clock_fix(db, selected, Path(temporary))
+    if "tblDetectionClockFixed" not in query(db, "select name from sqlite_master where type = 'table'").name.tolist():
+        print("tblDetectionClockFixed was not created")
+        return
+    stats = query(db, "select Rec_ID, count(*) as rows_n, min(seconds_residual) as res_min, "
+                      "max(seconds_residual) as res_max, avg(abs(seconds_residual)) as res_abs_mean "
+                      "from tblDetectionClockFixed group by Rec_ID")
+    print("\ntblDetectionClockFixed (seconds_residual, seconds):")
+    print(stats.to_string(index=False))
+    for rec in selected:
+        values = query(db, "select seconds_residual from tblDetectionClockFixed where Rec_ID = ?", (rec,))
+        if values.empty:
+            print("WARNING: no clock-fixed rows for %s" % rec)
+            continue
+        residual_ms = values.seconds_residual.abs() * 1000.0
+        print("%-6s |residual| ms: median %.4f  p95 %.4f  over 0.5 ms: %s of %s"
+              % (rec, residual_ms.median(), residual_ms.quantile(0.95),
+                 int((residual_ms > 0.5).sum()), len(residual_ms)))
 
 
 def tag_multipath(db, tag, work, method):
@@ -321,12 +377,17 @@ def process(run, paths):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["import-2019", "process"])
+    parser.add_argument("command", choices=["import-2019", "process", "clock-fix-check"])
     parser.add_argument("run_file")
+    parser.add_argument("receivers", nargs="*", help="Receivers for clock-fix-check")
     args = parser.parse_args(argv)
     run, paths = read_run_file(args.run_file)
     if args.command == "import-2019":
         import_2019(run, paths)
+    elif args.command == "clock-fix-check":
+        if not args.receivers:
+            parser.error("clock-fix-check requires at least one receiver")
+        clock_fix_check(paths["output_db"], args.receivers)
     else:
         process(run, paths)
     return 0

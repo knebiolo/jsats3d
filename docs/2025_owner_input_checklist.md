@@ -21,6 +21,18 @@ Status reflects local data audits through 2026-09-15.
 - [ ] Confirm job number and deployed study scope.
 - [ ] Confirm raw-data root and authoritative deliverable version.
 - [ ] Confirm benchmark elevation and vertical datum.
+      2026-09-30 audit: no benchmark elevation exists anywhere in the 2025
+      deliverables (array config, data catalog, testing sheets, covariate table).
+      2019 used 262.585 m (861.5 ft) at the same site, and the 2025 covariate
+      water-surface gauge reads 861.5-862.5 ft — is the 2019 benchmark still valid?
+      Drew (2026-10-01) favors the 2019 datum for consistency, but defers to Kevin.
+      Project lead (2026-10-01) selects the 2019 datum for provisional 2025
+      diagnostics. This does not confirm that the 2025 benchmark elevation equals
+      262.585 m: verify the elevation, receiver Z references, and coordinate
+      consistency with Kevin before accepted clock correction or positioning.
+- [x] Confirm the legacy synchronization window (`synch_time_start` / `synch_time_end`)
+      for 2025. RESOLVED 2026-09-30 (project lead): sync window = deployment window,
+      2025-06-04 to 2025-09-17, from the array config sheet.
 - [ ] Confirm coordinate datum and projection for supplied receiver coordinates.
 - [ ] Confirm whether hydrophone depths are referenced to benchmark, water surface, or another datum.
 
@@ -40,6 +52,10 @@ Status reflects local data audits through 2026-09-15.
 - [ ] Explain absent detections for `2008` and `2010`.
 - [ ] Confirm whether local receiver beacons and array-wide beacons were active simultaneously.
 - [ ] Provide the intended synchronization architecture and parameters.
+- [ ] Investigate 7DB7/ZOI08's 659/2,437 (~27%) anchor-suspect epochs in the
+      June 20-22 diagnostic. Drew suspects CPDI; compare receiver-level timing,
+      host/anchor detections and other beacons before assigning cause or accepting
+      ZOI08 as the reference. Kevin review required.
 - [ ] Confirm GPS synchronization status for SR3017 units.
 - [ ] Confirm internal-clock behavior and deployment timing for autonomous units.
 
@@ -53,6 +69,14 @@ Status reflects local data audits through 2026-09-15.
 ### Detection Provenance
 
 - [ ] Supply raw, unfiltered detections in addition to cleaned deliverables.
+- [ ] Obtain Penny's cleaning script and the original downloaded receiver files;
+      document malformed-row removal and reconcile counts against the files used
+      for the 2025 v3 build. Drew reports duplicates in downloaded files too and
+      has contacted ATS; this does not yet establish their mechanism or scope.
+- [ ] Resolve repeated 8-row blocks seen in two `_cleaned.csv` source files
+      (7DB7 subset: 11 duplicate receiver/timestamp keys, 33 extra rows).
+      Do not deduplicate or sort away evidence until provenance is verified;
+      preserve source rows and record any approved rule and before/after counts.
 - [ ] Document any upstream multipath removal.
 - [ ] Confirm whether frequency and background-noise fields were dropped during concatenation.
 - [ ] Confirm whether amplitude units are dB and explain zero-amplitude records.

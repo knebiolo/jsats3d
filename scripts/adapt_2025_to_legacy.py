@@ -139,6 +139,24 @@ def load_receiver_table(gps_path, config_path):
     return receivers
 
 
+def load_receiver_gps(gps_path, receiver_table):
+    """Return raw GPS fixes in the local receiver coordinate system."""
+    columns = ["Rec_ID", "dateTime", "X", "Y"]
+    if not os.path.isfile(gps_path):
+        return pd.DataFrame(columns=columns)
+    gps = pd.read_csv(gps_path, usecols=["receiverName", "dateTime", "easting", "northing"],
+                      parse_dates=["dateTime"])
+    gps = gps.rename(columns={"receiverName": "Rec_ID"}).dropna()
+    gps = gps[gps.Rec_ID.isin(receiver_table.Rec_ID)]
+    if gps.empty:
+        return pd.DataFrame(columns=columns)
+    origin_x = receiver_table.easting.min()
+    origin_y = receiver_table.northing.min()
+    gps["X"] = gps.easting - origin_x
+    gps["Y"] = gps.northing - origin_y
+    return gps[columns].sort_values(["Rec_ID", "dateTime"])
+
+
 def load_beacon_registry(config_path):
     config = pd.read_excel(config_path)
     config.columns = config.columns.astype(str).str.strip()
@@ -369,10 +387,12 @@ def main():
         )
         receiver_table = load_receiver_table(gps_path, args.config_xlsx)
         receiver_table = receiver_table[receiver_table.Rec_ID.isin(detected_receivers)]
+        receiver_gps = load_receiver_gps(gps_path, receiver_table)
         dropped_receivers = pd.DataFrame(columns=["Rec_ID", "reason"])
         if args.drop_incomplete_receivers:
             receiver_table, dropped_receivers = drop_incomplete_receivers(receiver_table)
         receiver_table.to_sql("tblReceiver", connection, if_exists="replace", index=False)
+        receiver_gps.to_sql("tblReceiverGPS", connection, if_exists="replace", index=False)
 
         tags = tags.rename(columns={"TagTypeSource": "TagType"})
         tags = apply_tag_pulse_rates(tags, beacon_registry)

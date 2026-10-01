@@ -10,6 +10,7 @@ from scripts.adapt_2025_to_legacy import (
     apply_tag_pulse_rates,
     drop_incomplete_receivers,
     load_temperature_string,
+    load_receiver_gps,
     normalize_detection,
     parse_beacon_window,
     tag_types,
@@ -25,7 +26,9 @@ from scripts.parse_ats_raw_to_legacy import (
 )
 from scripts.extract_dbscan_features import extract_features
 from scripts.beacon_pairwise_dbscan import classify, cluster
-from scripts.legacy_pipeline import widen_table
+from scripts.legacy_pipeline import clock_fix_check, import_2019, widen_table
+from scripts.cfd_gps_diagnostics import interpolate_positions
+from jsats3d import position
 from scripts.run_data import (
     check_inputs,
     check_output,
@@ -109,10 +112,11 @@ class Test2025Adapter(unittest.TestCase):
             original = root / "SR18078_250606.csv"
             cleaned = root / "SR18078_250606_cleaned.csv"
             false_match = root / "SR18078250610_121101_recovery.csv"
-            for path in (original, cleaned, false_match):
+            daily = root / "SR18078D250619_000101_cleaned.csv"
+            for path in (original, cleaned, false_match, daily):
                 path.write_text("", encoding="utf-8")
             result = discover_target_files(root, {"18078"})
-            self.assertEqual(result, [cleaned])
+            self.assertEqual(result, sorted([cleaned, daily]))
 
     def test_raw_parser_decodes_internal_groups(self):
         timestamp = pd.Timestamp("2025-06-06 08:54:07.952711")
@@ -263,6 +267,76 @@ class Test2025Adapter(unittest.TestCase):
 
 
 class TestRunData(unittest.TestCase):
+    def test_clock_fix_check_refuses_to_replace_existing_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "clock_fix.db"
+            connection = sqlite3.connect(database)
+            connection.execute("create table tblDetectionClockFixed (Rec_ID text)")
+            connection.execute("insert into tblDetectionClockFixed values ('R01')")
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                clock_fix_check(database, ["R01"])
+            connection = sqlite3.connect(database)
+            rows = connection.execute("select Rec_ID from tblDetectionClockFixed").fetchall()
+            connection.close()
+        self.assertEqual(rows, [("R01",)])
+
+    def test_2019_import_uses_shared_runtime_and_legacy_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw" / "R01").mkdir(parents=True)
+            pd.DataFrame({"Tag_ID": ["A1B2"], "TagType": ["study"], "pulseRate": [3.0]}).to_csv(root / "tags.csv", index=False)
+            pd.DataFrame({"Rec_ID": ["R01"], "Type": ["Teknologic"], "Tag_ID": ["A1B2"], "Ref_Elev": ["BM"],
+                          "X": [0.0], "Y": [0.0], "Z": [0.0], "X_t": [0.0], "Y_t": [0.0], "Z_t": [0.0]}).to_csv(root / "receivers.csv", index=False)
+            pd.DataFrame({"timeStamp": ["2018-06-07 13:17:08"], "WSEL": [1.0]}).to_csv(root / "wsel.csv", index=False)
+            pd.DataFrame({"meas_dt": ["2018-06-07 13:17:08", "2018-06-07 13:18:08"], "location": ["L", "L"],
+                          "depth_ft": ["1", "1"], "temp_f": [50.0, 50.0]}).to_csv(root / "temp.csv", index=False)
+            output_db = root / "out.db"
+            study = {"utc_conv": -7, "bm_elev": 262.585, "bm_elev_units": "meters", "output_units": "meters",
+                     "master_receiver": "R01", "synch_time_start": "2018-06-07 13:17:08",
+                     "synch_time_end": "2018-06-07 13:18:08"}
+            import_2019({"study": study}, {"raw_root": root / "raw", "tag_csv": root / "tags.csv",
+                         "receiver_csv": root / "receivers.csv", "wsel_csv": root / "wsel.csv",
+                         "temp_csv": root / "temp.csv", "output_db": output_db})
+            connection = sqlite3.connect(output_db)
+            tables = {row[0] for row in connection.execute("select name from sqlite_master")}
+            connection.close()
+        self.assertTrue({"tblTag", "tblReceiver", "tblWSEL", "tblInterpolatedTemp", "tblStudyParameters"} <= tables)
+
+    def test_piecewise_gps_interpolation_supports_linear_cubic_and_no_extrapolation(self):
+        gps = pd.DataFrame({"Rec_ID": ["R1"] * 4, "dateTime": pd.date_range("2025-01-01", periods=4, freq="h"),
+                            "easting": [0.0, 1.0, 4.0, 9.0], "northing": [0.0, 0.0, 0.0, 0.0]})
+        query = pd.DataFrame({"Rec_ID": ["R1"] * 3, "dateTime": pd.to_datetime(
+            ["2024-12-31 23:00", "2025-01-01 01:30", "2025-01-01 05:00"])})
+        linear = interpolate_positions(gps, query, method="linear")
+        cubic = interpolate_positions(gps, query, method="cubic")
+        self.assertTrue(linear.easting.iloc[[0, 2]].isna().all())
+        self.assertAlmostEqual(linear.easting.iloc[1], 2.5)
+        self.assertAlmostEqual(cubic.easting.iloc[1], 2.25)
+
+    def test_receiver_gps_table_uses_receiver_coordinate_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gps.csv"
+            pd.DataFrame({"receiverName": ["CFD04", "CFD04", "ZOI01"],
+                          "dateTime": ["2025-01-01 00:00", "2025-01-01 01:00", "2025-01-01 00:00"],
+                          "easting": [100.0, 110.0, 200.0], "northing": [1000.0, 1010.0, 2000.0]}).to_csv(path, index=False)
+            receivers = pd.DataFrame({"Rec_ID": ["CFD04"], "easting": [90.0], "northing": [990.0]})
+            result = load_receiver_gps(str(path), receivers)
+        self.assertEqual(result.Rec_ID.tolist(), ["CFD04", "CFD04"])
+        self.assertEqual(result.X.tolist(), [10.0, 20.0])
+
+    def test_position_uses_dynamic_gps_and_static_fallback(self):
+        solver = position.__new__(position)
+        solver.ephemeris = pd.DataFrame({"Rec_ID": ["CFD04", "ZOI01"], "X_t": [0.0, 50.0],
+                                         "Y_t": [0.0, 60.0], "Z_t": [-3.0, -4.0]})
+        solver.dynamic_positions = pd.DataFrame({"Rec_ID": ["CFD04", "CFD04"], "seconds": [100.0, 200.0],
+                                                  "X": [10.0, 30.0], "Y": [20.0, 40.0]})
+        self.assertEqual(solver.receiver_position_at("CFD04", 150.0, -3.0).tolist(), [20.0, 30.0, -3.0])
+        self.assertEqual(solver.receiver_position_at("ZOI01", 150.0, -4.0).tolist(), [50.0, 60.0, -4.0])
+        with self.assertRaises(ValueError):
+            solver.receiver_position_at("CFD04", 250.0, -3.0)
+
     def test_acoustic_codes_are_upper_cased_and_excel_damage_reversed_only_when_unique(self):
         self.assertEqual(normalize_acoustic_code("27a0"), ("27A0", None))
         self.assertEqual(normalize_acoustic_code("74")[0], "0074")
@@ -340,10 +414,10 @@ class TestRunData(unittest.TestCase):
 
     def test_legacy_command_uses_env_name_or_folder(self):
         by_name = legacy_command({"env": "jsat_legacy"}, "process", "run.toml")
-        self.assertEqual(by_name[by_name.index("run") + 1:by_name.index("run") + 3], ["-n", "jsat_legacy"])
+        self.assertTrue(by_name[1].endswith("scripts\\legacy_pipeline.py"))
+        self.assertEqual(by_name[-2:], ["process", "run.toml"])
         by_path = legacy_command({"env": "C:\\envs\\jsat_legacy"}, "process", "run.toml")
-        self.assertIn("-p", by_path)
-        self.assertEqual(by_path[-2:], ["process", "run.toml"])
+        self.assertEqual(by_path, by_name)
 
     def test_finish_database_sets_study_rates_and_provisional_signal_fields(self):
         with tempfile.TemporaryDirectory() as directory:

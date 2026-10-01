@@ -6,11 +6,11 @@ Usage (from the repo folder, env jsat_3d):
     python scripts/run_data.py --dry-run           shows the plan, runs nothing
     python scripts/run_data.py --skip-build        reuse output_db; only apply [study] and run later steps
 
-data_format = "ats"         2025 ATS raw files -> parse_ats_raw_to_legacy.py (this env)
-data_format = "teknologic"  2019 Teknologic files -> Kevin's own import functions (legacy env)
+data_format = "ats"         2025 ATS raw files -> parse_ats_raw_to_legacy.py
+data_format = "teknologic"  2019 Teknologic files -> shared legacy-compatible importer
 Both give the same legacy tables. With [legacy] run = true, scripts/legacy_pipeline.py then runs
-Kevin's unchanged jsats3d.py workflow (metronome, clock fix, deep receivers, study tags, Deng) in
-the legacy environment (environment_legacy.yml).
+Kevin's preserved jsats3d.py workflow (metronome, clock fix, deep receivers, study tags, Deng)
+in the shared environment.
 
 Species are turned into acoustic tag codes through PTAGIS released_v0 ("Acoustic Tag Value").
 Beacons are always added when tags are filtered, so clock synchronization stays possible.
@@ -222,11 +222,8 @@ def parser_command(paths, start, end, serials, tags):
 
 
 def legacy_command(legacy, subcommand, run_file):
-    """Run scripts/legacy_pipeline.py in the legacy environment (a conda env name or an env folder path)."""
-    env = str(legacy.get("env") or "jsat_legacy")
-    conda = os.environ.get("CONDA_EXE") or "conda"
-    target = ["-p", env] if ("/" in env or "\\" in env) else ["-n", env]
-    return [conda, "run", *target, "--no-capture-output", "python", str(LEGACY), subcommand, str(run_file)]
+    """Run the preserved legacy workflow in the active shared environment."""
+    return [sys.executable, str(LEGACY), subcommand, str(run_file)]
 
 
 def dbscan_command(output_db, dbscan, start, end):
@@ -273,8 +270,14 @@ def finish_database(db, study, start, end, signal_proxies, pulse_rates=None):
                 "THEN substr(trim(BitPeriod), 1, instr(trim(BitPeriod), ' ') - 1) ELSE trim(BitPeriod) END AS REAL) "
                 "WHERE SNR IS NULL AND SigStr IS NOT NULL AND Threshold IS NOT NULL").rowcount
         # Legacy queries every tag and receiver with WHERE Tag_ID / Rec_ID; indexes change speed, not results.
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_raw_tag_rec ON tblDetectionRaw (Tag_ID, Rec_ID)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_raw_rec ON tblDetectionRaw (Rec_ID)")
+        raw_columns = {row[1] for row in connection.execute("PRAGMA table_info(tblDetectionRaw)")}
+        indexes = [("idx_raw_tag_rec", ("Tag_ID", "Rec_ID")), ("idx_raw_rec", ("Rec_ID",)),
+                   ("idx_raw_tag_rec_seconds", ("Tag_ID", "Rec_ID", "seconds")),
+                   ("idx_raw_tag_seconds", ("Tag_ID", "seconds"))]
+        for name, columns in indexes:
+            if set(columns) <= raw_columns:
+                connection.execute("CREATE INDEX IF NOT EXISTS %s ON tblDetectionRaw (%s)" %
+                                   (name, ", ".join(columns)))
         connection.commit()
     finally:
         connection.close()
@@ -301,8 +304,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(argv=None):
-    args = parse_args(argv)
+def prepare_run(args):
     run_file = Path(args.run_file).resolve()
     run = read_run_file(run_file)
     paths, selection, study, legacy, dbscan = (run[k] for k in ("paths", "selection", "study", "legacy", "dbscan"))
@@ -315,22 +317,28 @@ def main(argv=None):
     else:
         check_output(output_db, paths, bool(run.get("overwrite", False)), data_format)
     start, end = check_time(selection)
-    ats = data_format == "ats"
+    return args, run_file, run, paths, selection, study, legacy, dbscan, output_db, start, end
 
-    species_codes, repaired, unresolved, tags, serials = set(), [], [], set(), []
-    if ats:
-        serials = receiver_serials(paths["config_xlsx"], selection.get("receivers") or [])
-        species = selection.get("species") or []
-        if species:
-            species_codes, repaired, unresolved = load_species_tags(paths["released_file"], species)
-        tags = species_codes | normalize_tags(selection.get("tags") or [])
 
+def select_inputs(data_format, paths, selection):
+    if data_format != "ats":
+        return set(), [], [], set(), []
+    serials = receiver_serials(paths["config_xlsx"], selection.get("receivers") or [])
+    species = selection.get("species") or []
+    if not species:
+        return set(), [], [], normalize_tags(selection.get("tags") or []), serials
+    codes, repaired, unresolved = load_species_tags(paths["released_file"], species)
+    return codes, repaired, unresolved, codes | normalize_tags(selection.get("tags") or []), serials
+
+
+def print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
+                      species_codes, repaired, unresolved, study, legacy):
     print("Run file:    %s" % run_file)
     print("Data format: %s" % data_format)
-    print("Output DB:   %s%s" % (output_db, " (reused)" if args.skip_build else ""))
-    if ats:
+    print("Output DB:   %s" % output_db)
+    if data_format == "ats":
         print("Time (PDT):  %s to %s" % (start or "first detection", end or "last detection"))
-        print("Receivers:   %s" % (", ".join(selection.get("receivers")) if serials else "all 20 targets"))
+        print("Receivers:   %s" % (", ".join(selection.get("receivers")) if selection.get("receivers") else "all 20 targets"))
         if species_codes:
             print("Species:     %s -> %s acoustic tags" % (", ".join(selection["species"]), len(species_codes)))
         print("Tags:        %s" % ("%s study tags + all configured beacons" % len(tags) if tags else "ALL tags (no filter)"))
@@ -339,16 +347,19 @@ def main(argv=None):
         for raw, reason in unresolved:
             print("WARNING PTAGIS code %r skipped: %s" % (raw, reason))
     else:
-        print("Teknologic import takes every tag inside the [study] sync window (legacy behaviour);"
-              " choose tags to position with [legacy] study_tags.")
+        print("Teknologic import takes every tag inside the [study] sync window (legacy behaviour); choose tags to position with [legacy] study_tags.")
     if legacy.get("run"):
         print("Legacy:      master %s, surface %s, deep %s, method %s, env %s"
               % (study.get("master_receiver"), legacy.get("surface_receivers"), legacy.get("deep_receivers"),
                  legacy.get("method", "KNN"), legacy.get("env") or "jsat_legacy"))
 
+
+def build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, output_db, start, end, tags):
+    ats = data_format == "ats"
     steps = []
     if not args.skip_build:
         if ats:
+            serials = receiver_serials(paths["config_xlsx"], selection.get("receivers") or [])
             steps.append(("parse ATS raw files", parser_command(paths, start, end, serials, tags)))
         else:
             steps.append(("legacy 2019 import", legacy_command(legacy, "import-2019", run_file)))
@@ -369,6 +380,35 @@ def main(argv=None):
         if receivers and not needed <= receivers:
             raise ValueError("[dbscan] needs receivers %s in [selection] receivers" % sorted(needed - receivers))
         steps.append(("pairwise beacon DBSCAN", dbscan_command(output_db, dbscan, start, end)))
+    return steps
+
+
+def run_steps(steps, manifest, manifest_path):
+    for name, step in steps:
+        print("\n=== %s ===" % name)
+        sys.stdout.flush()
+        began = datetime.now()
+        if callable(step):
+            step()
+            code, command = 0, None
+        else:
+            code, command = subprocess.run(step, cwd=REPO).returncode, step
+        manifest["steps"].append({"step": name, "command": command, "return_code": code,
+                                  "minutes": round((datetime.now() - began).total_seconds() / 60, 1)})
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+        if code != 0:
+            print("STOPPED: %s failed (exit %s). Run record: %s" % (name, code, manifest_path))
+            return code
+    return 0
+
+
+def main(argv=None):
+    args, run_file, run, paths, selection, study, legacy, dbscan, output_db, start, end = prepare_run(parse_args(argv))
+    data_format = run["data_format"]
+    species_codes, repaired, unresolved, tags, serials = select_inputs(data_format, paths, selection)
+    print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
+                      species_codes, repaired, unresolved, study, legacy)
+    steps = build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, output_db, start, end, tags)
     if args.dry_run:
         print("Dry run: nothing run. Steps: %s" % "; ".join(name for name, _ in steps))
         return 0
@@ -387,21 +427,9 @@ def main(argv=None):
     }
     manifest_path = output_db.with_suffix(".run.json")
     output_db.parent.mkdir(parents=True, exist_ok=True)
-    for name, step in steps:
-        print("\n=== %s ===" % name)
-        sys.stdout.flush()
-        began = datetime.now()
-        if callable(step):
-            step()
-            code, command = 0, None
-        else:
-            code, command = subprocess.run(step, cwd=REPO).returncode, step
-        manifest["steps"].append({"step": name, "command": command, "return_code": code,
-                                  "minutes": round((datetime.now() - began).total_seconds() / 60, 1)})
-        manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
-        if code != 0:
-            print("STOPPED: %s failed (exit %s). Run record: %s" % (name, code, manifest_path))
-            return code
+    code = run_steps(steps, manifest, manifest_path)
+    if code:
+        return code
     manifest["finished"] = datetime.now().isoformat(timespec="seconds")
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     print("\nDone. Database: %s\nRun record: %s" % (output_db, manifest_path))

@@ -23,6 +23,7 @@ try:
         apply_tag_pulse_rates,
         load_beacon_registry,
         load_environment,
+        load_receiver_gps,
         load_receiver_table,
         load_temperature_string,
         tag_types,
@@ -32,6 +33,7 @@ except ModuleNotFoundError:
         apply_tag_pulse_rates,
         load_beacon_registry,
         load_environment,
+        load_receiver_gps,
         load_receiver_table,
         load_temperature_string,
         tag_types,
@@ -51,7 +53,8 @@ RAW_COLUMNS = [
 INTERNAL_PATTERN = re.compile(
     r"^(\S{6}) (\S{4}) (\S{2}) (\S)(\S{3}) (\S{3}) (\S)$"
 )
-SERIAL_PATTERN = re.compile(r"^SR(\d+)(?=_|\.)", re.IGNORECASE)
+# Serial ends at "_" or "."; ATS daily files instead put "D<yymmdd>" right after it (SR20026D250619_000101).
+SERIAL_PATTERN = re.compile(r"^SR(\d+)(?=[_.]|D\d{6}_)", re.IGNORECASE)
 CORRECTED_SUFFIXES = ("_cleaned", "_recovered", "_recovery")
 STATUS_MARKERS = {
     "GPS111", "RTC222", "001111", "006600", "007700", "0000SL",
@@ -88,6 +91,8 @@ def parse_args():
     parser.add_argument("--end")
     parser.add_argument("--chunksize", type=int, default=50_000)
     parser.add_argument("--max-files", type=int)
+    # 8 workers ran out of memory on the full 303-file season (2026-09-28); each large file is held in RAM until written.
+    parser.add_argument("--workers", type=int, default=4, help="Files parsed in parallel (memory scales with this)")
     parser.add_argument(
         "--serial",
         action="append",
@@ -422,8 +427,11 @@ def _parse_worker(task, tags=None, start=None, end=None):
 def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers, temperature_csv, hobo_dir):
     receiver_table = load_receiver_table(gps_path, config_path)
     receiver_table = receiver_table[receiver_table["Rec_ID"].isin(receivers)]
+    receiver_gps = load_receiver_gps(gps_path, receiver_table)
     receiver_table.to_sql("tblReceiver", connection, if_exists="replace", index=False)
+    receiver_gps.to_sql("tblReceiverGPS", connection, if_exists="replace", index=False)
     print("Created tblReceiver: %s rows" % len(receiver_table))
+    print("Created tblReceiverGPS: %s rows" % len(receiver_gps))
 
     beacon_registry = load_beacon_registry(config_path)
     raw_tags = pd.read_sql("select distinct Tag_ID from tblDetectionRaw", connection)
@@ -502,7 +510,7 @@ def main():
     )
     totals = {"detections": 0, "gps": 0, "clock_events": 0}
     worker = partial(_parse_worker, tags=tags, start=start, end=end)
-    workers = min(8, (os.cpu_count() or 2))
+    workers = max(1, min(args.workers, os.cpu_count() or 2))
     try:
         with Pool(processes=workers) as pool:
             for name, rows, gps_count, clock_count, error in pool.imap_unordered(worker, tasks):

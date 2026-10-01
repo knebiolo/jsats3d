@@ -60,6 +60,9 @@ def create_project_db(directory,dbName):
     c.execute('''DROP TABLE IF EXISTS tblReceiver''')
     c.execute('''DROP TABLE IF EXISTS tblWSEL''')
     c.execute('''DROP TABLE IF EXISTS tblTemp''')
+    conn.commit()
+    c.close()
+    conn.close()
                
 
 def set_study_parameters(utc_conv,bm_elev,bm_elev_units,output_units,masterReceiver,synch_time_start,synch_time_end,dbName):
@@ -81,7 +84,8 @@ def set_study_parameters(utc_conv,bm_elev,bm_elev_units,output_units,masterRecei
 
     conn.executemany('INSERT INTO tblStudyParameters VALUES (?,?,?,?,?,?,?)',params)
     conn.commit()
-    c.close()         
+    c.close()
+    conn.close()
                         
 def study_data_import(dataFrame,dbName,tblName):
     '''function imports formatted data into project database. The code in its current 
@@ -98,6 +102,7 @@ def study_data_import(dataFrame,dbName,tblName):
     dataFrame.to_sql(tblName,con = conn,index = False, if_exists = 'append') 
     conn.commit()   
     c.close()
+    conn.close()
     
 def temp_interpolator(projectDB,interp_type):
     '''Python function that creates a temperature interpolator
@@ -112,7 +117,7 @@ def temp_interpolator(projectDB,interp_type):
     c.close() 
     temp['timeStamp'] = pd.to_datetime(temp.timeStamp)
     temp.sort_values('timeStamp', inplace = True)
-    seconds = pd.DatetimeIndex(temp.timeStamp).astype(np.int64)/1.0e9
+    seconds = pd.DatetimeIndex(temp.timeStamp).as_unit('ns').astype(np.int64) / 1.0e9
     temp['seconds'] = seconds.values
     temp.drop_duplicates('seconds',keep = 'first',inplace = True)
     temp.set_index('seconds',inplace = True,drop = False)
@@ -154,7 +159,7 @@ def teknologic_import(UTC_conv,inputWS, dbName, recName):
         det['Tag_ID'] = det['Tag_ID'].str.strip()
         det['timeStamp'] = det.apply(timeStamp,axis = 1)                           # apply timestamp to every row in the dataframe  
         index = pd.DatetimeIndex(det.timeStamp.values)
-        det['seconds'] = index.astype(np.int64)//1.0e9
+        det['seconds'] = index.as_unit('ns').astype(np.int64) / 1.0e9
         det['seconds'] = det.seconds.astype(np.float64)
         det['seconds'] = np.round(det.seconds + (det.Microseconds/1.0e6),6)
 
@@ -163,12 +168,14 @@ def teknologic_import(UTC_conv,inputWS, dbName, recName):
         det = det[det.timeStamp < synch_time_end]
         print ("Length of dataframe after removing detections outside of synchronization time is %s"%(len(det)))
         det.sort_values(by = 'seconds', ascending = True, inplace = True)
-        det_data = det_data.append(det)
+        det_data = pd.concat([det_data, det], ignore_index=True)
     det_data.drop(['Sequence','Year','Month','Day','Hour','Minute','Second','UnixSeconds','Microseconds'],axis = 1, inplace = True)
     det_data.drop_duplicates(keep = 'first', inplace = True)                      # wtf duplicate data
-    det_data.to_sql('tblDetectionRaw',conn,'sqlite',if_exists = 'append', index = False)                               # write dataframe to full radio table in the sqlite database
+    det_data['timeStamp'] = det_data['timeStamp'].astype(str)
+    det_data.to_sql('tblDetectionRaw', con=conn, if_exists='append', index=False)                                      # write dataframe to full radio table in the sqlite database
     conn.commit()   
     c.close()
+    conn.close()
     #del det
     # create and apply timestamp
 
@@ -180,6 +187,7 @@ def acoustic_data_import(site,recType,rawDataFiles,projectDB):
     c = conn.cursor()
     UTC_conv = pd.read_sql('SELECT UTC_Conv FROM tblStudyParameters',con = conn).UTC_Conv.values[0]
     c.close()
+    conn.close()
     if recType == 'Teknologic':
         teknologic_import(UTC_conv,rawDataFiles,projectDB,site)
 
@@ -240,37 +248,35 @@ class beacon_epoch():
     def host_receiver_enumeration(self):          
         # Next calculate the transmission number
         self.host_dat['lag'] = self.host_dat.seconds.diff()             # let's first calculate the lag between detections.
-        self.host_dat.fillna(0,inplace = True)
-        self.host_dat['metronome_transmission'] = np.repeat(np.nan,len(self.host_dat)) # create an empty column for transmission number
-        transNo = 0
-        for i in self.host_dat.iterrows():                                     # for every row in our dataframe 
-            curr_lag = i[1]['lag']                                             # get the current lag
-            if curr_lag < 0.5 * self.pulseRate:                                # if the current lag is less than 1/2 the transmission rate, we are in the same epoch
-                self.host_dat.at[i[0],'metronome_transmission'] = transNo      # set value
-                #print ("Beacon trnasmission %s"%(transNo))
-            else:                                                              # if it isn't, we are in the next epoch
-                transNo = transNo + 1                                          # increase transmission number enumerator by 1
-                self.host_dat.at[i[0],'metronome_transmission'] = transNo      # set value        
-                #print ("Beacon tramsmission %s"%(transNo))
+        # numeric-only fill: additive ATS text columns keep NULL (2019 result unchanged; string cols had no NaN)
+        numeric_cols = self.host_dat.select_dtypes(include=[np.number]).columns
+        self.host_dat[numeric_cols] = self.host_dat[numeric_cols].fillna(0)
+        self.host_dat['metronome_transmission'] = self.host_dat['lag'].ge(
+            0.5 * self.pulseRate).cumsum()
         #self.host_dat[['Tag_ID','Rec_ID','timeStamp','metronome_transmission']].to_csv(os.path.join(self.scratchWS,'check.csv'),index = False)
         conn = sqlite3.connect(self.projectDB, timeout = 30.0)
         c = conn.cursor()
         self.host_dat.dropna(axis = 0, subset = ['metronome_transmission'], inplace = True)
-        self.host_dat.to_sql('tblMetronomeUnfiltered',conn, 'sqlite', if_exists = 'append', index = False)  
+        self.host_dat.to_sql('tblMetronomeUnfiltered', con=conn, if_exists='append', index=False)
         c.close()
         
     def adjacent_receiver_enumeration(self):
         self.child_dat['metronome_transmission'] = np.zeros(len(self.child_dat))         # create a metronome transmission column
-        for i in self.host_dat.metronome_transmission.values:              # for every unique transmission in the host data (eww)
-            trans_time = self.host_dat[self.host_dat.metronome_transmission == i].seconds.min() # get the time of transmission of this beacon tag pulse - we can have more than 1 b/c of multipath so take the min time 
-            dl = trans_time - (0.5*self.pulseRate)
-            ul = trans_time + (0.5*self.pulseRate)
-
-            # find where rows associated with this transmission and write the transmission number to those rows
-            self.child_dat.loc[(self.child_dat.seconds >= dl) & (self.child_dat.seconds <= ul),'metronome_transmission'] = i
+        epochs = self.host_dat.groupby('metronome_transmission').seconds.min().sort_values()
+        host_seconds = epochs.to_numpy()
+        host_numbers = epochs.index.to_numpy()
+        child_seconds = self.child_dat.seconds.to_numpy()
+        right = np.searchsorted(host_seconds, child_seconds, side='left')
+        left = np.maximum(right - 1, 0)
+        right = np.minimum(right, len(host_seconds) - 1)
+        left_distance = np.abs(child_seconds - host_seconds[left])
+        right_distance = np.abs(child_seconds - host_seconds[right])
+        nearest = np.where(left_distance <= right_distance, left, right)
+        within_window = np.minimum(left_distance, right_distance) <= 0.5 * self.pulseRate
+        self.child_dat.loc[within_window, 'metronome_transmission'] = host_numbers[nearest[within_window]]
                     
         conn = sqlite3.connect(self.projectDB, timeout = 30.0)
-        self.child_dat.to_sql('tblMetronomeUnfiltered',conn, 'sqlite', if_exists = 'append', index = False)   
+        self.child_dat.to_sql('tblMetronomeUnfiltered', con=conn, if_exists='append', index=False)
         c = conn.cursor()        
         conn.commit()
         c.close()
@@ -345,24 +351,18 @@ class multipath_data_object():
                     self.data.set_index(index, inplace = True, drop = True)
                     max_count = det_counts.row_count.max()                     # get the max row count
                     host_rec = det_counts[det_counts.row_count == max_count].Rec_ID.values[0] # the host receiver is the one with the maximum number of rows 
-                    host_dat = self.data[self.data.Rec_ID == host_rec]         # extract the host data
+                    host_dat = self.data[self.data.Rec_ID == host_rec].copy() # extract the host data
                     host_dat['lag'] = host_dat.seconds_fix.diff()              # let's first calculate the lag between detections.
-                    host_dat.fillna(0,inplace = True)
-                    for i in host_dat.iterrows():                              # for every row in our dataframe 
-                        curr_lag = i[1]['lag']                                 # get the current lag
-                        if curr_lag < 0.5 * self.pulseRate:                    # if the current lag is less than 1/2 the transmission rate, we are in the same epoch
-                            host_dat.at[i[0],'transNo'] = transNo              # set value
-                            self.data.at[i[0],'transNo'] = transNo             # set value                            
-                        else:                                                  # if it isn't, we are in the next epoch
-                            transNo = transNo + 1                              # increase transmission number enumerator by 1
-                            host_dat.at[i[0],'transNo'] = transNo              # set value        
-                            self.data.at[i[0],'transNo'] = transNo             # set value
-                    
-                    #rec_dat = self.data[self.data.Rec_ID != host_rec]          # get every other reciever's data                        
-                    #self.data.dropna(subset  = 'transNo',axis = 1, inplace = True)
+                    # numeric-only fill: additive ATS text columns keep NULL (2019 result unchanged)
+                    numeric_cols = host_dat.select_dtypes(include=[np.number]).columns
+                    host_dat[numeric_cols] = host_dat[numeric_cols].fillna(0)
+                    # same epoch rule as the row loop: a lag >= half the pulse rate starts the next epoch
+                    host_dat['transNo'] = host_dat['lag'].ge(0.5 * self.pulseRate).cumsum()
+                    self.data.loc[self.data.Rec_ID == host_rec, 'transNo'] = host_dat['transNo'].values
 
-                    for i in host_dat.transNo.values:                          # for every unique transmission in the host data (eww)
-                        trans_time = host_dat[host_dat.transNo == i].seconds.min() # get the time of transmission of this beacon tag pulse - we can have more than 1 b/c of multipath so take the min time 
+                    # ascending epochs preserve the original last-write-wins window assignment
+                    epoch_times = host_dat.groupby('transNo').seconds.min()
+                    for i, trans_time in epoch_times.sort_index().items():
                         dl = trans_time - (0.5*self.pulseRate)
                         ul = trans_time + (0.5*self.pulseRate)
 
@@ -425,7 +425,7 @@ def multipath_2(multipath_object):
             else:
                 conn = sqlite3.connect(multipath_object.projectDB, timeout = 30.0)
                 c = conn.cursor()
-                recDat.to_sql('tblMetronomeFiltered',conn, 'sqlite', if_exists = 'append', index = False)
+                recDat.to_sql('tblMetronomeFiltered', con=conn, if_exists='append', index=False)
                 c.close()
         if multipath_object.metronome == True:
             conn = sqlite3.connect(multipath_object.projectDB, timeout = 30.0)
@@ -450,7 +450,7 @@ def multipath_data_management(inputWS,projectDB,primary = True, metronome = Fals
     for f in files:
         dat = pd.read_csv(os.path.join(inputWS,f))
         #dat.drop(['FreqOff','Valid'],axis = 1,inplace = True)
-        dat.to_sql(tblName,con = conn,index = False, if_exists = 'append', chunksize = 1000)
+        dat.to_sql(tblName, con=conn, index=False, if_exists='append', chunksize=1000)
         os.remove(os.path.join(inputWS,f))
         del dat  
     # create an index on tblMetronomeUnfiltered 
@@ -509,9 +509,11 @@ def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = Non
                     primary['chunk'] = np.random.choice(chunks,len(primary))
                     for chunk in chunks:
                         chunk_df = primary[primary.chunk == chunk]
+                        if chunk_df.empty:
+                            continue
                         
                         # calculate distance to 20 nearest neighbors
-                        neighbors = NearestNeighbors(n_neighbors=20)
+                        neighbors = NearestNeighbors(n_neighbors=min(20, len(chunk_df)), n_jobs=-1)
                         neighbors_fit = neighbors.fit(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)
                         distances, indices = neighbors_fit.kneighbors(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)       
                         distances = np.sort(distances, axis=0) 
@@ -520,7 +522,9 @@ def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = Non
                         ext_dist = np.quantile(distances, q = [0.1,0.4,0.75,0.80,0.90,0.95,0.99])
                         
                         # apply dbscan and plot clusters
-                        test = DBSCAN(eps = ext_dist[5] ,min_samples = 6, metric = 'euclidean').fit(np.vstack((chunk_df.amp_n,chunk_df.nbw_n,chunk_df.snr_n)).T)
+                        eps = max(float(ext_dist[5]), np.nextafter(0.0, 1.0))
+                        test = DBSCAN(eps=eps, min_samples=6, metric='euclidean').fit(
+                            np.vstack((chunk_df.amp_n, chunk_df.nbw_n, chunk_df.snr_n)).T)
                         
                         # apply labels to the chunked dataset
                         chunk_df['dbscan_cluster'] = test.labels_
@@ -532,19 +536,21 @@ def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = Non
                         # plt.show()
                         
                         # remove non clusters and then get cluster with min median signal to noise ratio
-                        chunk_df = chunk_df[chunk_df != -1]
+                        chunk_df = chunk_df[chunk_df.dbscan_cluster != -1]
+                        if chunk_df.empty:
+                            continue
                         clst_cnt = chunk_df.groupby(['dbscan_cluster'])['NBW'].min()
                         chunk_df = chunk_df[chunk_df.dbscan_cluster == clst_cnt.idxmin()]
                         
                         chunk_df.drop(['dbscan_cluster'], axis = 1, inplace = True) 
 
                         # paste to filtered data
-                        primary_filtered = primary_filtered.append(chunk_df)
+                        primary_filtered = pd.concat([primary_filtered, chunk_df], ignore_index=True)
                 else:
                     primary_filtered = primary
                         
  
-                train_dat = primary_filtered.append(multi)
+                train_dat = pd.concat([primary_filtered, multi], ignore_index=True)
     
                 print ("Generate training and testing datasets")
                 # generate training data and test data
@@ -611,7 +617,7 @@ def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = Non
                 
                 elif method == 'KNN':
                     # create k-nearest neighbor classifier
-                    knn = KNeighborsClassifier(n_neighbors = 2)
+                    knn = KNeighborsClassifier(n_neighbors=2, n_jobs=-1)
                     # train a model using the training data from above
                     knn.fit(X_train_s,y_train_s)
                     # make a prediction 
@@ -773,7 +779,7 @@ class clock_fix_object():
         # get timestamped WSEL data and create an interpolator so we can get WSEL at t
         WSELdf = pd.read_sql('SELECT * FROM tblWSEL',con = conn)
         WSELdf['timeStamp'] = pd.to_datetime(WSELdf.timeStamp)
-        WSELdf['seconds'] = pd.DatetimeIndex(WSELdf.timeStamp).astype(np.int64)/1.0e9
+        WSELdf['seconds'] = pd.DatetimeIndex(WSELdf.timeStamp).as_unit('ns').astype(np.int64) / 1.0e9
         self.benchmark_elev = pd.read_sql("SELECT BM_Elev from tblStudyParameters", con = conn).values
         self.elev_units = pd.read_sql('SELECT BM_Elev_Units FROM tblStudyParameters', con = conn).BM_Elev_Units.values[0]
         self.output_units = pd.read_sql('SELECT Output_Units FROM tblStudyParameters', con = conn).Output_Units.values[0]
@@ -865,7 +871,7 @@ def clock_fix(clock_fix_object):
             c.close() 
             temp['timeStamp'] = pd.to_datetime(temp.timeStamp)
             temp.sort_values('timeStamp', inplace = True)
-            seconds = pd.DatetimeIndex(temp.timeStamp).astype(np.int64)/1.0e9
+            seconds = pd.DatetimeIndex(temp.timeStamp).as_unit('ns').astype(np.int64) / 1.0e9
             temp['seconds'] = seconds.values
 
             # calculate time difference of arrival (TDoA) and then change in TDoA
@@ -936,9 +942,13 @@ def clock_fix(clock_fix_object):
                     
                     # apply dbscan and plot clusters and get progressively less strict
                     if i == 0:
-                        test = DBSCAN(eps = ext_dist[0],min_samples = 3, metric = 'euclidean').fit(np.vstack((ts,ddoa)).T)                      
+                        eps = float(np.asarray(ext_dist[0]).reshape(-1)[0])
+                        test = DBSCAN(eps=eps, min_samples=3, metric='euclidean').fit(
+                            np.vstack((ts, ddoa)).T)
                     else:
-                        test = DBSCAN(eps = ext_dist[1],min_samples = 3, metric = 'euclidean').fit(np.vstack((ts,ddoa)).T)                     
+                        eps = float(np.asarray(ext_dist[1]).reshape(-1)[0])
+                        test = DBSCAN(eps=eps, min_samples=3, metric='euclidean').fit(
+                            np.vstack((ts, ddoa)).T)
                     
                     # create a dataframe of time, ddoa, and labels, identify the first new label 
                     results = pd.DataFrame.from_dict({'ts':ts,'ddoa':ddoa,'class_':test.labels_})
@@ -1063,7 +1073,7 @@ def epoch_fix_data_management(inputWS,projectDB):
     c = conn.cursor()
     for f in files:
         dat = pd.read_csv(os.path.join(inputWS,f))#,dtype = {"detHist":str})
-        dat.to_sql('tblDetectionClockFixed',con = conn,index = False, if_exists = 'append', chunksize = 1000)
+        dat.to_sql('tblDetectionClockFixed', con=conn, index=False, if_exists='append', chunksize=1000)
         os.remove(os.path.join(inputWS,f))
         del dat
     # create an index on tblMetronomeUnfiltered 
@@ -1096,7 +1106,7 @@ class position():
             dat = pd.read_sql('SELECT * FROM tblDetectionFilterSecondary WHERE Tag_ID = "%s" AND Rec_ID = "%s"'%(self.tag,i), con = conn)
             dat = dat[dat.multipath != 1]
             dat = dat[dat.multipath_prediction != 1]
-            self.tag_data = self.tag_data.append(dat)
+            self.tag_data = pd.concat([self.tag_data, dat], ignore_index=True)
             
         # build an ephemeris
         self.recDist = pd.DataFrame(columns = ['rec_i','rec_j','dist'])
@@ -1106,12 +1116,19 @@ class position():
         self.ephemeris = pd.read_sql(recSQL, con = conn)
         self.ephemeris.set_index('Rec_ID',drop = False,inplace = True)
         self.convex_hull = ConvexHull(np.array(self.ephemeris[['X_t','Y_t','Z_t']]))
+        self.dynamic_positions = pd.DataFrame(columns=['Rec_ID', 'seconds', 'X', 'Y'])
+        tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type = 'table'", con=conn).name.tolist()
+        if 'tblReceiverGPS' in tables:
+            self.dynamic_positions = pd.read_sql('SELECT * FROM tblReceiverGPS', con=conn)
+            self.dynamic_positions['seconds'] = (
+                pd.DatetimeIndex(self.dynamic_positions.dateTime).as_unit('ns').astype(np.int64) / 1.0e9
+            )
                                                                 
         # get timestamped WSEL data and create an interpolator so we can get WSEL at t
         WSELdf = pd.read_sql('SELECT * FROM tblWSEL',con = conn)
         WSELdf.dropna(inplace = True)
         WSELdf['timeStamp'] = pd.to_datetime(WSELdf.timeStamp)
-        WSELdf['seconds'] = WSELdf.timeStamp.astype(np.int64)/1.0e9
+        WSELdf['seconds'] = pd.DatetimeIndex(WSELdf.timeStamp).as_unit('ns').astype(np.int64) / 1.0e9
         print ("max timestamp is %s"%(WSELdf.seconds.max()))
         self.benchmark_elev = pd.read_sql("SELECT BM_Elev from tblStudyParameters", con = conn).values[0]
         self.elev_units = pd.read_sql('SELECT BM_Elev_Units FROM tblStudyParameters', con = conn).BM_Elev_Units.values[0]
@@ -1130,6 +1147,20 @@ class position():
         self.interpolator = temp_interpolator(self.projectDB,'linear')      # create a temperature interpolator
 
         c.close()
+        conn.close()
+
+    def receiver_position_at(self, rec_id, timestamp, z_value):
+        """Return receiver X/Y from GPS at time, retaining legacy Z handling."""
+        static = self.ephemeris[self.ephemeris.Rec_ID == rec_id].iloc[0]
+        dynamic = self.dynamic_positions[self.dynamic_positions.Rec_ID == rec_id]
+        if dynamic.empty:
+            return np.array([static.X_t, static.Y_t, z_value])
+        dynamic = dynamic.sort_values('seconds').drop_duplicates('seconds', keep='last')
+        if timestamp < dynamic.seconds.min() or timestamp > dynamic.seconds.max():
+            raise ValueError("No GPS position for %s at %.6f; refusing extrapolation" % (rec_id, timestamp))
+        x = np.interp(timestamp, dynamic.seconds, dynamic.X)
+        y = np.interp(timestamp, dynamic.seconds, dynamic.Y)
+        return np.array([x, y, z_value])
     
     def Deng(self,print_output = False):
         def point_in_hull(point,hull):
@@ -1206,25 +1237,17 @@ class position():
                                 #t_Z = self.benchmark_elev - Zt
                                 return Zt
                                 
-                        r0Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == ref].X_t.values[0],
-                                    self.ephemeris[self.ephemeris.Rec_ID == ref].Y_t.values[0],
-                                    z_at_t(t_ref,ref)]) #(X,Y,Z of reciever 0)
+                        r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref))
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(ref,r0Pos))
                         self.z_translation = r0Pos[2]
-                        r1Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r1].X_t.values[0],
-                                    self.ephemeris[self.ephemeris.Rec_ID == r1].Y_t.values[0],
-                                    z_at_t(t1,r1)]) #(X,Y,Z of reciever 1)
+                        r1Pos = self.receiver_position_at(r1, t1, z_at_t(t1, r1))
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r1,r1Pos))      
-                        r2Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r2].X_t.values[0],
-                                    self.ephemeris[self.ephemeris.Rec_ID == r2].Y_t.values[0],
-                                    z_at_t(t2,r2)]) #(X,Y,Z of reciever 2)
+                        r2Pos = self.receiver_position_at(r2, t2, z_at_t(t2, r2))
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r2,r2Pos))                            
-                        r3Pos = np.array([self.ephemeris[self.ephemeris.Rec_ID == r3].X_t.values[0],
-                                    self.ephemeris[self.ephemeris.Rec_ID == r3].Y_t.values[0],
-                                    z_at_t(t3,r3)]) #(X,Y,Z of reciever 3)         
+                        r3Pos = self.receiver_position_at(r3, t3, z_at_t(t3, r3))
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r3,r3Pos))
                                                   
@@ -1263,6 +1286,17 @@ class position():
                             q = 0.25 * b.T * R.I * R.T.I * b
                             if print_output == True:
                                 print ('a = %s, p = %s, q = %s'%(a,p,q))
+                            discriminant = float(np.asarray(p**2 - a*q).reshape(-1)[0])
+                            coefficient = float(np.asarray(a).reshape(-1)[0])
+                            if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
+                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,
+                                                              'negative quadratic discriminant - no solution','']]),
+                                                   columns=Solution_Cols)
+                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
+                                sol_no = sol_no + 1
+                                tested.append(recs)
+                                continue
                             # Solve for ToA
                             T_0a = (-p + np.sqrt(p**2 - a*q))/a
                             T_0b = (-p - np.sqrt(p**2 - a*q))/a
@@ -1279,7 +1313,7 @@ class position():
                                                             r0Pos[2] + S1a.item(2),
                                                             T_0a.item(0),
                                                             tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
-                                SolutionA = SolutionA.append(row)
+                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
                                 del row  
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
@@ -1289,7 +1323,7 @@ class position():
                                 if print_output == True:
                                     print ("No solution A found time step %s"%(j))
                                 row = pd.DataFrame(np.array([[j,sol_no, ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                SolutionA = SolutionA.append(row)
+                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
                                 
                             if np.sign(T_0b) > 0:
                                 S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
@@ -1301,7 +1335,7 @@ class position():
                                                             r0Pos[2] + S1b.item(2),
                                                             T_0b.item(0),
                                                             tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
-                                SolutionB = SolutionB.append(row)
+                                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
                                 del row
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
@@ -1310,14 +1344,14 @@ class position():
                                 if print_output == True:
                                     print ("No solution B found time step %s"%(j))
                                 row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                SolutionA = SolutionA.append(row)
+                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
 
                         except:
                             if print_output == True:
                                 fuck
                                 print ("Singular matrix encountered, no solution at transmission %s"%(j))
                             row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
-                            SolutionA = SolutionA.append(row)
+                            SolutionA = pd.concat([SolutionA, row], ignore_index=True)
 
                         #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
                         # increase solution counter for this timestep by 1
@@ -1330,8 +1364,8 @@ class position():
                 if print_output == True:
                     print ("Not enough receivers for a solution at time step %s"%(j))
                 row = pd.DataFrame(np.array([[j,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,'not enough receivers for solution','']]), columns = Solution_Cols)
-                SolutionA = SolutionA.append(row)
-                SolutionB = SolutionB.append(row)                
+                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
             
         def distF(row):
             pos1 = np.asarray(row['pos'])
@@ -1487,7 +1521,7 @@ def positions_data_management(pos_type,inputWS,projectDB):
             #dat.drop(labels = ['in_hull','Unnamed: 0'], axis = 1, inplace = True)
             dat['solution'] = np.repeat(solution,len(dat))
             dat['Tag_ID'] = np.repeat(fishy,len(dat))
-            dat.to_sql('tblPositions_Deng',con = conn,index = False, if_exists = 'append', chunksize = 1000)
+            dat.to_sql('tblPositions_Deng', con=conn, index=False, if_exists='append', chunksize=1000)
             #os.remove(os.path.join(inputWS,f))
             del dat
         #c.execute('''CREATE INDEX idx_combined_solution ON tblPositions_Deng (Tag_ID, solution, transNo)''')

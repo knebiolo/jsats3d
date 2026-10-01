@@ -48,6 +48,7 @@ def parse_args():
     p.add_argument("--rowid-range", nargs=2, type=int, help="Bound the scan to a rowid block")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--output-db", help="Write legacy-style tblMetronomeFiltered / tblMetronomeSecondFiltered here")
+    p.add_argument("--no-interactive", action="store_true", help="Skip the Plotly HTML review plot")
     return p.parse_args()
 
 
@@ -223,22 +224,35 @@ def summarize(res, anchor):
     return pd.DataFrame(seg_rows), pd.DataFrame(sum_rows)
 
 
-def write_legacy_tables(path, det, res, anchor_epochs, tag, anchor):
+def write_legacy_tables(path, det, res, anchor_epochs, tag, anchor, beacon_rec, period):
     """Legacy-style metronome tables. transNo = anchor epoch number; seconds are uncorrected."""
     first_map = res[["Rec_ID", "burst", "transNo", "dbscan_class", "delta_s"]]
+    suspect = set(res.loc[res.dbscan_class == "anchor_suspect", "t_anchor"])
     a = anchor_epochs.assign(Rec_ID=anchor)
-    anchor_class = np.where(a.t_anchor.isin(set(res.loc[res.dbscan_class == "anchor_suspect", "t_anchor"])), "anchor_suspect", "anchor")
+    anchor_class = np.where(a.t_anchor.isin(suspect), "anchor_suspect", "anchor")
     anchor_bursts = det[(det.Rec_ID == anchor) & (det.det_rank == 1)][["Rec_ID", "burst", "seconds"]]
     anchor_bursts = anchor_bursts.merge(a[["t_anchor", "transNo"]].assign(dbscan_class=anchor_class, delta_s=0.0),
                                         left_on="seconds", right_on="t_anchor").drop(columns=["seconds", "t_anchor"])
     first_map = pd.concat([first_map, anchor_bursts.assign(Rec_ID=anchor)], ignore_index=True)
+    # Host passthrough (2019 'excluded host' branch): the pairwise delta is undefined for the
+    # beacon host, so its rank-1 bursts join the epoch numbering unclassified. clock_fix reads
+    # host ToT from tblMetronomeFiltered and host clock data from tblMetronomeSecondFiltered.
+    host = det[(det.Rec_ID == beacon_rec) & (det.det_rank == 1)][["Rec_ID", "burst", "seconds"]].sort_values("seconds")
+    hm = pd.merge_asof(host, a[["t_anchor", "transNo"]].sort_values("t_anchor"),
+                       left_on="seconds", right_on="t_anchor", direction="nearest", tolerance=0.5 * period)
+    hm = hm.dropna(subset=["transNo"])
+    hm = hm.assign(err=(hm.seconds - hm.t_anchor).abs()).sort_values("err").drop_duplicates("transNo")
+    hm["dbscan_class"] = np.where(hm.t_anchor.isin(suspect), "anchor_suspect", "host")
+    hm["delta_s"] = np.nan
+    first_map = pd.concat([first_map, hm[["Rec_ID", "burst", "transNo", "dbscan_class", "delta_s"]]],
+                          ignore_index=True)
     rows = det.merge(first_map, on=["Rec_ID", "burst"], how="inner")
     rows["Tag_ID"] = tag
     rows["timeStamp"] = pd.to_datetime(rows.seconds, unit="s").dt.strftime("%Y-%m-%d %H:%M:%S.%f")
     rows["multipath"] = (rows.det_rank > 1).astype(int)
     primary = rows[["Rec_ID", "Tag_ID", "timeStamp", "seconds", "transNo", "det_rank", "multipath"]]
     second = rows[rows.multipath == 0].copy()
-    second["multipath_prediction"] = (~second.dbscan_class.isin(["clean", "anchor"])).astype(int)
+    second["multipath_prediction"] = (~second.dbscan_class.isin(["clean", "anchor", "host"])).astype(int)
     second = second[["Rec_ID", "Tag_ID", "timeStamp", "seconds", "transNo", "det_rank", "multipath",
                      "multipath_prediction", "dbscan_class", "delta_s"]]
     con = sqlite3.connect(path)
@@ -282,6 +296,30 @@ def plot_before_after(res, folder, title):
         plt.close(fig)
 
 
+def plot_interactive_before_after(res, path, title, max_points=50000):
+    """Write a zoomable review plot, downsampling only the browser copy."""
+    import plotly.graph_objects as go
+    figure = go.Figure()
+    for rid, group in res.groupby("Rec_ID"):
+        group = group.sort_values("t_anchor")
+        step = max(1, int(np.ceil(len(group) / max_points)))
+        group = group.iloc[::step]
+        time = pd.to_datetime(group.t_anchor, unit="s")
+        drift = group.sound_speed * group.delta_s
+        clean = group.dbscan_class == "clean"
+        figure.add_trace(go.Scattergl(x=time, y=drift, mode="markers", name="%s raw" % rid,
+                                      visible="legendonly", marker={"size": 4, "color": "black"},
+                                      hovertemplate="%%{x}<br>drift %%{y:.4f} m<extra>%s raw</extra>" % rid))
+        figure.add_trace(go.Scattergl(x=time[~clean], y=drift[~clean], mode="markers", name="%s removed" % rid,
+                                      visible="legendonly", marker={"size": 6, "color": "red"},
+                                      hovertemplate="%%{x}<br>drift %%{y:.4f} m<extra>%s removed</extra>" % rid))
+        figure.add_trace(go.Scattergl(x=time[clean], y=drift[clean], mode="markers", name="%s clean" % rid,
+                                      marker={"size": 5}, hovertemplate="%%{x}<br>drift %%{y:.4f} m<extra>%s clean</extra>" % rid))
+    figure.update_layout(title=title + " | interactive review", xaxis_title="Time (PDT)",
+                         yaxis_title="Clock drift (m)", template="plotly_white")
+    figure.write_html(path, include_plotlyjs=True)
+
+
 def main():
     args = parse_args()
     rec, tag, period, det = load(args)
@@ -297,6 +335,8 @@ def main():
     segments.to_csv(stem + "_segments.csv", index=False)
     summary.to_csv(stem + "_summary.csv", index=False)
     plot_before_after(res, stem + "_before_after", "beacon %s vs %s" % (args.beacon_receiver, args.anchor))
+    if not args.no_interactive:
+        plot_interactive_before_after(res, stem + "_interactive.html", "beacon %s vs %s" % (args.beacon_receiver, args.anchor))
     print("Beacon %s (%s), period %.1f s, anchor %s" % (tag, args.beacon_receiver, period, args.anchor))
     print("Fixed parameters: budget %.1f ms, window %.1f periods, min_samples %d, anchor majority %.2f of >=%d, "
           "max reflection delay %.0f ms" % (TIMING_BUDGET_S * 1e3, TIME_WINDOW_PERIODS, MIN_SAMPLES,
@@ -309,7 +349,8 @@ def main():
     print("WARNING: beacon host %s position is unsurveyed; its error is absorbed as constant per-receiver offsets"
           % args.beacon_receiver)
     if args.output_db:
-        n1, n2 = write_legacy_tables(args.output_db, det, res, anchor_epochs, tag, args.anchor)
+        n1, n2 = write_legacy_tables(args.output_db, det, res, anchor_epochs, tag, args.anchor,
+                                     args.beacon_receiver, period)
         print("Wrote %s: tblMetronomeFiltered %d rows, tblMetronomeSecondFiltered %d rows" % (args.output_db, n1, n2))
     print("No source detections modified. Outputs: %s_*" % stem)
 

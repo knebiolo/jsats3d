@@ -38,23 +38,26 @@ receivers = []
 [study]
 # Written to tblStudyParameters (legacy set_study_parameters fields).
 utc_conv         = -7          # proposed, pending owner confirmation
-bm_elev          = ''          # REQUIRED for [legacy] run (legacy clock_fix reads it). Unknown for 2025: PM question
+# PROVISIONAL (project lead + Drew 2026-10-01, Kevin confirmation pending): 2019 benchmark
+# 861.5 ft (262.585 m), same site/datum. Inert for 2025 math: all receivers are BM-referenced.
+bm_elev          = 861.5
 bm_elev_units    = 'feet'
 output_units     = 'meters'
 # Legacy clock reference: must host its own beacon and be a surface receiver (position known).
 # ZOI08 (beacon 7DB7) is heard by all receivers and has few clock jumps. ZOI02 is on the bottom,
 # so under the legacy workflow it is a deep receiver, not a master. Pending Kevin.
 master_receiver  = 'ZOI08'
-synch_time_start = ''          # blank = [selection] start
-synch_time_end   = ''          # blank = [selection] end
+# Decision 2026-09-30 (project lead): sync window = deployment window (array config sheet).
+synch_time_start = '2025-06-04 00:00:00'
+synch_time_end   = '2025-09-17 00:00:00'
 # Pulse rates (s) to set in tblTag, e.g. { '27A0' = 3.2 }. Legacy skips study tags without one.
 # The 5 test tags already get provisional rates from the parser.
 pulse_rates      = {}
 
 [legacy]
-# Run Kevin's unchanged jsats3d.py workflow after the build (legacy env, environment_legacy.yml).
+# Run Kevin's preserved jsats3d.py workflow after the build in the shared jsat_3d environment.
 run               = false
-env               = 'jsat_legacy'   # conda env name, or a full env folder path
+env               = 'jsat_legacy'   # deprecated compatibility field; ignored by shared runner
 method            = 'KNN'           # multipath_classifier: KNN (paper choice), SVM, NB, CART
 # Receivers with known positions (phase 1). Must include master_receiver.
 # PM 2026-09-28: ZOI11 and CFD01 excluded. CFD05 hears very little (hydrophone issue).
@@ -65,8 +68,8 @@ deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
 deep_solution     = 'B'             # Deng root used for the deep receiver median (kernels uses B)
 # Study tags to position. [] = every study tag in tblTag that has a pulseRate.
 study_tags        = []
-# PROVISIONAL, needs Kevin: ATS has no SNR/NBW. true fills SNR = SigStr - Threshold and
-# NBW = BitPeriod so the legacy classifier can run. false leaves them NULL (classifier drops all rows).
+# Decision 2026-09-30 (project lead): 2025 multipath rejection uses DBSCAN (System Prompt
+# Section 7), not the legacy SNR/NBW classifier. Proxies stay off; SNR/NBW remain NULL.
 signal_proxies    = false
 work_dir          = ''              # blank = output/<db name>_legacy
 

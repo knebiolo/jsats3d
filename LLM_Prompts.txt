@@ -1,194 +1,251 @@
-LLM_Prompts.txt
-================
-Answers to the 2026-09-28 info request (species <-> acoustic tag link for scripts/run_data.py).
-Gathered 2026-09-28 by the local LLM (Copilot). Branch: ENM_jsat3d_edits. Env: conda jsat_3d.
-All reads were read only (K: files, DB opened mode=ro). Scratch scripts in %TEMP%\jsats_info deleted.
-Previous content is in git history (commit bfc81cb and later).
+CLAUDE CODE HANDOFF — JSATS 3D 2019 + 2025
+============================================
 
-PURPOSE
-Facts needed to build scripts/run_data.py: a wrapper where a user fills in data paths, species,
-tags and a time frame, then runs the existing parser. Open question: how to link SPECIES to the
-ACOUSTIC tag codes in the raw data.
+Purpose
+-------
+Maintain one modernized jsats3d software path. Preserve the published 2019
+scientific behavior and reproduce the 2019 results. Run 2025 ATS data through
+the same legacy table contracts and core positioning functions after receiver-
+aware ingestion and approved preprocessing.
 
+The most important rule: performance improvements and API modernization are
+welcome, but they must not silently change 2019 scientific results. Validate
+against the canonical 2019 database before accepting an optimization.
 
-########################################################################
-KEY FINDINGS
-########################################################################
+Non-negotiable data safety
+--------------------------
+- K: source data is strictly read-only. Never write, delete, rename, reformat,
+  or create scratch files anywhere under K:\Jobs\.
+- All generated databases, CSVs, plots, logs, and scratch files belong under
+  C:\Dev\jsat3d\jsats3d\output or a temporary local C: directory.
+- Before any run, verify output paths are outside every input tree.
+- Never use overwrite against K:. A local output database may be replaced only
+  when explicitly requested.
 
-1. The link exists: PTAGIS released_v0.csv has "Acoustic Tag Value" (acoustic code) and
-   "Species Name" on the same row, plus "Tag Code" (PIT). It is the only file found with both.
-2. All 538 acoustic-tagged rows are Chinook, released at COWLR2 (Cowlitz River, Cispus River to
-   Clear Fork), 2025-06-17 to 2025-08-12. No acoustic-tagged Coho or Steelhead in released_v0.
-3. Acoustic codes must be upper-cased before matching: 232 of 538 contain lower case (e.g. 27a0).
-4. 28 rows (26 distinct values) are not 4-hex. They look like Excel number conversion of codes:
-   scientific notation (e.g. 4.10E+01, 2.00E+39, 1.80E+05) and dropped leading zeros (e.g. 74,
-   106, 948). Matching detected codes that are missing from PTAGIS: 41E0, 2E39, 18E4, 0074, 0106,
-   0948, etc. Three rows are "0.00E+00" and cannot be told apart (candidates 0E39, 0E04, 0E76).
-   This is an observation, not a verified mapping. Ask the PM for a text-format re-export.
-5. master_df_study.csv has 592 distinct tag codes (77,405,129 rows). 510 match PTAGIS exactly
-   (after upper-casing). 82 do not; about 27 of those match the corrupted values above; the rest
-   include test tags FFD3 and FC36 and low-count codes (< 2,200 detections each).
-6. Detections by species (exact matches only): Chinook 74,666,719; no PTAGIS match 2,738,410.
-7. v2 DB tblTag has only 5 study tags (FFD3, FC36, 0B0A, 0AC6, 493F). 0B0A, 0AC6, 493F are
-   Chinook in PTAGIS. FFD3 and FC36 are not in PTAGIS (test tags).
-8. release_QC_tracker_cowlitz_2025.xlsx refers to a "P4 file" and "holding tank data" with AT
-   codes. Those files are NOT FOUND in 2025_Data.
+Workspace and environment
+-------------------------
+- Repository: C:\Dev\jsat3d\jsats3d
+- Python environment: conda environment jsat_3d
+- Interpreter: C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe
+- Current active runtime: Python 3.11, pandas 3.x, NumPy 2.x, SciPy 1.x,
+  scikit-learn 1.x.
+- Use the existing legacy core. Do not create a parallel 2025 solver.
+- NASA-style coding: keep new/touched functions <=60 lines where practical,
+  use explicit resource cleanup, fail loudly, add focused tests, and journal
+  every meaningful change and parameter decision.
 
+Active software path
+--------------------
+- jsats3d/jsats3d.py: authoritative legacy mathematics and positioning core.
+- scripts/run_data.py: shared run-file orchestrator for 2019 and 2025.
+- scripts/legacy_pipeline.py: preserved 2019 workflow driver and importer.
+- scripts/parse_ats_raw_to_legacy.py: receiver-aware ATS raw parser.
+- scripts/adapt_2025_to_legacy.py: ATS metadata/table adapter.
+- scripts/beacon_pairwise_dbscan.py: approved 2025 beacon clock/multipath
+  diagnostic using fixed study-wide parameters.
+- scripts/cfd_gps_diagnostics.py: GPS diagnostics and piecewise interpolation checks.
+- scripts/clock_fix_serial.py, metronome.py, mulitpath.py,
+  coordinate_with_Deng.py, tag_drag_RMSE.py: preserved Kevin workflow drivers.
+- tests/test_2025_contracts.py and tests/test_smoke.py: contract/regression tests.
 
-########################################################################
-ANSWERS
-########################################################################
+Do not resurrect deleted setup scripts or compatibility environments. Old setup,
+experimental, meeting-only sweep/coverage scripts, and the deprecated environment
+file were removed. Their behavior is either in the shared runner,
+legacy_pipeline.py, or preserved in the journal/history.
 
-Q1a released: K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv | .csv | sheets: n/a
-Q1a collected: K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\collected_v0.csv | .csv | sheets: n/a
-Q1b released: rows=2992 | headers: Mark Site Name, Tag Code, Acoustic Tag Value, Species Name, Mark Life Stage Value, Mark Time Value, Release Site Name, Release Date MMDDYYYY, Release Time Time, Mark Length mm, Mark Weight g
-Q1b collected: rows=12416 | headers: Site Name, Tag Code, Species Name, Obs Time Value, Antenna ID, Mark Life Stage Value, Mark Time Value, Release Site Name, Release Date MMDDYYYY, Mark Weight g, Mark Length mm
-Q1c released sample (Tag Code | Acoustic Tag Value | Species Name | Release Date | Release Site):
-  3DD.0078CEFF1A | (blank) | Coho    | 8/29/2025 | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)
-  3DD.007905D0DF | (blank) | Coho    | 7/4/2025  | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)
-  3DD.007905D0E0 | (blank) | Chinook | 7/8/2025  | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)
-  3DD.007905D0E1 | (blank) | Chinook | 7/8/2025  | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)
-  3DD.007905D0E2 | (blank) | Coho    | 7/4/2025  | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)
-  First rows WITH an acoustic code (Tag Code | Acoustic | Species | Release Date | Release Time):
-  3DD.007905D2D4 | 27a0 | Chinook | 7/8/2025  | 7/8/2025 10:22
-  3DD.007905D2D5 | ca3b | Chinook | 7/22/2025 | 7/22/2025 10:43
-  3DD.007905D2D6 | b161 | Chinook | 7/8/2025  | 7/8/2025 10:22
-  3DD.007905D2D7 | 382E | Chinook | 7/22/2025 | 7/22/2025 10:43
-  3DD.007905D2D8 | 42FD | Chinook | 7/8/2025  | 7/8/2025 10:22
-Q1c collected sample (Tag Code | Species Name | Release Date | Release Site):
-  3DD.007905D0DF | Coho | 7/4/2025 | COWLR2 - Cowlitz River - Cispus River to Clear Fork (km 135-202)   (x5, same fish, repeat observations)
-Q1d Acoustic Tag Value non-blank: 538 (510 are 4-hex after upper-casing; 232 contain lower case; 536 distinct)
-    non-4-hex values (28 rows, 26 distinct): 0.00E+00 (x3), 1.00E+65, 1.80E+05, 106, 133, 2.00E+39, 2.00E+48,
-    2.00E+73, 2.00E+75, 2.00E+92, 2.60E+05, 3.00E+68, 4.00E+21, 4.10E+01, 405, 5.00E+99, 516, 7.20E+07,
-    7.60E+06, 710, 74, 8.00E+49, 810, 9.10E+06, 948, 957
-Q1e species released: Chinook=2031, Coho=907, Steelhead=54   (acoustic-tagged rows: Chinook=538)
-Q1e species collected: Chinook=8349, Coho=3825, Steelhead=242
-Q1f Tag Code length(s): 14 (all rows, both files) | examples: 3DD.0078CEFF1A, 3DD.007905D0DF, 3DD.007905D0E0 | released PIT=2992 4hex=0 G72=0 | collected PIT=12416 4hex=0 G72=0
-Q1g other code-like columns: released "Acoustic Tag Value" (510 of 538 are 4-hex). collected: none.
+2019 Teknologic study
+---------------------
+Source data, read-only:
+- Root: K:\Jobs\3870\014\Calcs\Data
+- Raw receiver folders: K:\Jobs\3870\014\Calcs\Data\Synch_1\R01 through R09
+- Raw format: Teknologic receiver .DET files, parsed by the legacy importer.
+- Tags: K:\Jobs\3870\014\Calcs\Data\tblTag.csv
+  Columns include Tag_ID, TagType, and pulseRate.
+- Receiver geometry: K:\Jobs\3870\014\Calcs\Data\tblReceiver_Initial.csv
+  Contains Rec_ID, receiver type, beacon Tag_ID, reference elevation, X/Y/Z,
+  and initial/target coordinates.
+- Water level: K:\Jobs\3870\014\Calcs\Data\tblWSEL.csv
+  Provides timestamped WSEL used by the legacy solver.
+- Temperature: K:\Jobs\3870\014\Calcs\Data\tblTemp.csv
+  Contains meas_dt, location, depth_ft, and temp_celcius. The importer accepts
+  this Celsius schema and builds tblInterpolatedTemp.
+- Canonical reference database: K:\Jobs\3870\014\Calcs\Data\cowlitz_2019_synch_1.db
+  Open read-only for comparison only.
 
-Q2a hits (name keyword search over all 540 files in 2025_Data):
-  ...\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv | 0.5 MB | 2026-09-09 17:40
-  ...\CowlitzAT2025_Data_Deliverables\6_quality_control\release_QC_tracker_cowlitz_2025.xlsx | 0.0 MB | 2026-09-09 17:40
-  ...\Tag Drag Period\TagDrag_WSE.xlsx | 0.1 MB | 2026-09-24 21:57
-  (no raw_data file names matched; nothing skipped for size)
-Q2b headers:
-  released_v0.csv: see Q1b
-  release_QC_tracker_cowlitz_2025.xlsx [Sheet1]: Tagging Date, Reported Number of Fish Tagged with AT Tags from Taggers,
-    Number of AT Codes in the Holding Tank Data, Number of Study Tags in the Holding Tank Data, Number of AT Codes in the P4 File,
-    Number of AT Codes on PTAGIS, AT Codes in the P4 File missing from Holding Tank, AT Codes in the Holding Tank missing in P4 File,
-    Number of AT Codes from P4 missing from PTAGIS, Number of AT Codes from PTAGIS missing in P4, Duplicate Tags on PTAGIS,
-    Tags in P4 that are not final study tags, Comments
-  TagDrag_WSE.xlsx [Information]: Exported duration:, 12 days
-  TagDrag_WSE.xlsx [Items]: Signal, Path, Relevant Assets, Description, Warning, ID, Data ID, Datasource Class, Datasource ID,
-    Description.1, Interpolation Method, Is Stale, Locked, Source Data Type, Source Value Unit Of Measure, Value Unit Of Measure
-  TagDrag_WSE.xlsx [Statistics]: Signal, Sample Count, Average, Standard Deviation, Min, Max, Range, Delta, Rate, Sum, Totalized,
-    Percent Good, Start Value, End Value
-  TagDrag_WSE.xlsx [Samples]: Date-Time, NSC.COL_S_ENT_WTR_LVL.F_CV, NSC.COL_N_ENT_WTR_LVL.F_CV
-Q2c LINK FILES (acoustic code + species/PIT): released_v0.csv only
-  (columns: Acoustic Tag Value + Species Name + Tag Code). Samples: see Q1c "First rows WITH an acoustic code".
-  P4 file / holding tank data mentioned by the QC tracker: NOT FOUND.
-Q2d catalog rows (data_catalog_cowlitz_falls_AT_2025.xlsx):
-  [Summary] 3_PTAGIS_datasets | Contains the data pulled from PTAGIS associated with the acoustic telemetry study.
-  [3_PTAGIS_datasets] collected_v0.csv | Queried dataset from PTAGIS for the Cowlitz Falls Dam PIT array, used to identify recaptured PIT-tagged fish.
-  [3_PTAGIS_datasets] released_v0.csv | Queried dataset from PTAGIS for the Cowlitz Falls Dam PIT array, containing records of released PIT- and AT-tagged fish during the study period.
-  [3_PTAGIS_datasets] Tag Code | Unique identifier for the PIT tag implanted in the fish.
-  [3_PTAGIS_datasets] Acoustic Tag Value | (If applicable) Unique identifier for the associated acoustic tag
-  [3_PTAGIS_datasets] Species Name | Common or scientific name of the tagged fish species.
-  [3_PTAGIS_datasets] Obs Time Value | datetime | Date and time (PST) when the detection was recorded at the PTAGIS site.
-  [3_PTAGIS_datasets] Mark Life Stage | Life stage of the fish at the time of tagging (e.g., juvenile, smolt, adult).
-  [3_PTAGIS_datasets] Release Date MMDDYYY | date | Date of release from the tagging site, in MMDDYYYY format.
-  [6_quality_control] release_QC_tracker_cowlitz_2025.xlsx | Four Peaks release-QC log used to ensure that AT data is synchronized with PTAGIS uploads and that all release data are final and accurate.
-  [6_quality_control] Number of AT Codes on PTAGIS; Number of AT Codes from P4 missing from PTAGIS; Number of AT Codes from PTAGIS missing in P4; Duplicate Tags on PTAGIS (all counts)
+2019 local run file:
+- config/run_data_2019.toml
+- master receiver: R05, beacon FF75.
+- synchronization window: 2018-06-07 13:17:08 through 2019-05-24 12:25:00.
+- surface receivers: R04, R05, R06, R07, R08, R09.
+- deep receivers: R01, R02, R03.
+- deep Deng solution: B.
+- method: KNN, legacy published workflow.
+- local output: output/cowlitz_2019_synch_1_recreated.db.
 
-Q3a master_df_study tagCodes: 592 distinct, 77,405,129 rows. Full list (code=detections, descending):
-  B3A1=6165951, 034E=5853492, 7F0D=2724178, 319A=2509452, A963=2439028, CD40=2284177, 0CA9=2173735, 0E3A=1438393, 144F=1236800, 8C7B=926485
-  41E0=815495, B175=776902, 73B9=744511, 0AC6=667756, 08F9=654838, 3DF8=622383, 4EC1=617063, A360=614388, 6D88=579475, 8D2F=570052
-  03F4=543096, 4881=522243, 16F9=506714, 91C2=486045, 9749=453271, 4C35=445655, 4D92=409893, 49B6=403947, 47A9=397127, 8B96=379315
-  47D9=359792, 4DE1=350728, 4451=348571, AE0D=347607, 7716=343216, 776A=323774, A556=313250, 3664=308534, B41D=308443, 0074=305763
-  1C3C=305065, CD43=302648, 5005=301719, 0FBD=297994, 0FC7=297942, 2B2D=293726, 0E7A=291359, ADF2=287005, 27FA=284117, 1716=266779
-  1D8A=264609, 0D55=257531, 56B7=256258, 5B2D=250198, 9D3E=244161, 8E0A=241803, 601B=223580, BEAF=222349, CB7C=220540, 4CCB=219746
-  5939=219418, BE9D=217707, 7A68=214665, 3533=213247, 732A=211852, 266E=210384, CDA4=205272, 9FF7=204279, 5D93=202918, 8066=200540
-  0D49=199273, B394=197870, 2829=196960, 512D=195967, BA42=195835, 381C=193864, CACB=193326, AF05=192653, 3B0B=192065, 029D=189898
-  A57C=189371, 46DB=188469, 0516=187636, 4766=186244, 89A4=184819, 2C82=182131, 0A65=180794, 065A=179218, 3E3B=178221, 4254=178141
-  4CA5=176840, 23C1=176121, 1D5A=175553, 2B9A=175427, 3179=174216, 995F=171185, 29DA=169438, BC35=168171, B7D1=166658, 013A=164206
-  1667=159203, A44D=158610, 45BA=155941, B04C=155779, 9ECD=155341, 4AF7=153702, B50A=152631, BF49=149511, 09B8=148553, 3E68=142264
-  68D2=142212, 0A6C=141611, 8F02=141437, 4160=141190, 333E=140707, 2E75=140423, 11DC=140403, 9027=140202, B400=136349, 84A5=134937
-  C87A=134809, CC23=134081, 6DD2=133120, 38B7=132850, 5439=132769, 8CC6=132255, 59FF=131802, 91D9=129962, A8E9=128751, 84AD=127668
-  041D=126951, 0F8E=125569, BC98=125191, 14C6=123527, 4DB4=120575, 6A52=119314, 8157=118524, CEAE=114496, 7FA2=114230, 0B7A=113944
-  A161=113507, 0957=112794, 5C7E=111371, 21B8=110157, 4E21=109972, 1C7A=109721, B551=109677, 1E65=109558, A4C7=106988, 0C43=106824
-  5EDD=106221, 46CE=105272, 02DE=104176, 172B=104012, 4E4F=103631, 2A39=103270, 4636=102866, 8FF4=102857, 0E39=102462, CA3D=102103
-  493F=101934, 55A2=101465, 80FD=100489, B5ED=99887, 2B88=99566, 608A=99545, 9335=99312, C6C5=99180, 2065=98796, 2A8B=98465
-  40B3=97245, B870=96501, C0FE=96459, 5F82=95097, 2E39=94873, 28D2=93700, 401D=93183, 3DC5=92739, 7B64=92616, 42FD=92251
-  90D2=91878, B011=91466, 588D=91031, 28CA=90123, 166E=89816, 1389=88932, 080E=87375, 4273=87155, CC7E=86266, C418=86218
-  0AA4=84690, C3B8=84633, 22B3=84550, 4525=84189, 60F2=84129, 8FA8=83990, 4764=83870, 18E4=83818, 25AB=81326, B61F=80674
-  ABCF=80533, 116E=80377, C75D=80160, A63E=79909, 23F3=79674, 4773=79593, B793=79568, 98F5=78031, 976C=77354, 4ACA=77341
-  2AD4=76460, 1C89=76216, 337B=75279, 6C57=75117, C9BD=74178, CE5C=73761, B830=73646, 5786=73429, 89BF=73284, 5F23=72488
-  202B=70935, 8FB9=70809, 131D=70100, 8EB1=69498, 13C6=69029, A481=68976, 301F=68828, 6323=68740, 1255=68465, 2D27=68087
-  1060=67425, 3489=66037, 37EF=66005, 3498=65946, B347=65737, 10D3=65059, 4E7E=64560, 26EB=63396, 8C2E=63174, 6CCF=63032
-  5945=62725, 482B=62697, 155F=62470, 9616=61962, 1952=61741, 98D3=61245, 8386=60688, 142B=60570, 2B6E=60210, 1814=60052
-  683D=59811, 63D7=59521, CE56=59177, 9EB1=58693, 39CB=58323, CC92=57920, 0133=57366, 0E04=56774, 7AA3=56557, 72E6=56461
-  25B7=55742, 021B=55461, A160=55448, 7CF6=55195, 1820=55022, A610=54552, 3423=54359, CC80=54232, 5410=53656, 8505=53039
-  0AEA=52718, 17B2=52480, 441B=52127, A654=52120, 333F=50948, B5B9=50658, 7894=50614, 8B8B=50571, 10FC=50353, 0948=50242
-  5484=50018, 41CC=49283, 3CAF=48826, 329F=47901, C101=47665, 076F=46785, C562=45742, 3F9D=45641, 26DC=45135, 47A0=44991
-  0106=44839, B187=44765, 2EE6=44628, 0CC1=44556, 7291=44514, 6D97=43990, A2BC=43858, B787=43346, 6409=43164, 8B08=42927
-  A4F5=42492, 2827=42175, AE64=41848, 308E=41781, 483F=41505, 2687=41454, 2B78=41347, A230=41091, 26E4=40928, C679=40910
-  0B37=40547, 3200=40371, 04A4=40038, 8B34=39859, 5AF2=39817, 9524=39402, 2394=39037, 20AA=38929, 4131=38791, 8B26=38725
-  027B=38486, 7393=38339, 55A5=37615, BDCF=37599, 20B8=37560, 3776=37538, 209B=37493, B6DC=37442, 1AC9=37264, 42AA=37054
-  832A=36926, 189D=36834, 7BCD=36640, 3BD3=36629, 4D9D=36600, 8E49=36484, 4FD0=36100, AE19=35974, 1458=35413, 1A9C=35360
-  0FAE=35330, 3676=35082, 6CC2=34912, 32C0=34776, 56B3=34550, 44B7=34077, 2385=33641, 4FF0=33578, 4A5C=33451, 04D7=32801
-  B60B=32757, 6F50=32299, 382F=32268, 3912=32235, 3D9C=32153, AAF0=31876, 2CB9=31783, 3751=31436, 8385=31210, 3C3E=31087
-  2E73=30703, D090=30564, 0DD3=30539, B4CA=30435, 919A=30377, 94CA=30295, 4272=30084, 3DCD=29980, B161=29950, 92DF=29753
-  400E=29689, BD16=29541, C691=29419, 040D=29016, 89EB=28977, 05FE=28856, 694B=28804, 0CB2=28737, A6E6=28716, ACC0=28554
-  83AE=28492, 2730=28476, B973=28440, 2A8E=28033, 130E=27921, 5A85=27899, 4B65=27883, 3F60=27545, CA3B=27505, 61BE=27395
-  0710=27221, 70D2=27174, 439A=27023, 148B=26295, 694C=25660, A8CF=25072, 735F=24784, 91C1=24626, CADA=24175, 6338=24095
-  0F4A=24032, 6502=23534, 4D03=23324, 9005=23227, 0AE5=23113, AE39=22981, 253D=22891, 9878=22316, 230E=22289, BA1D=22006
-  23DA=21947, 1A92=21877, 51DE=21853, A09E=21752, B069=21625, 4122=21381, 5E99=21361, 80A3=21229, 2AEC=21126, 388A=20979
-  2D37=20688, 8525=20639, 27A0=20520, 064B=20484, 262F=20253, 849F=19979, 25AD=19565, 7A67=19308, 9F8C=19270, 3ACF=18219
-  1B0A=18174, 31DF=18123, 857A=17552, 1C4C=17414, CA48=17351, 7332=17312, 34C5=17298, 9F80=17145, 079C=17064, A98D=16595
-  74C4=16417, 70EF=16331, 1CED=15972, 9A0F=15879, 382E=15825, 418E=15749, 03FE=15648, 448A=15572, 5004=15493, 49AD=15279
-  338A=15067, 3141=15039, 16AD=14922, 7B43=14643, A0EC=14634, BFDF=14609, 0405=14509, 449B=14258, 8F3A=14112, 2717=13691
-  A1A0=12901, 7C17=12712, 02ED=12657, 6DE0=12569, 16AB=12403, 324A=12333, 1A06=12326, B0B7=12264, 27CB=12071, 76E5=12029
-  9443=11929, 9667=11903, 6A55=11772, 36D2=11345, 1CAB=11259, 85A6=11102, 3D1E=10742, 9977=10725, 15AE=10702, B774=10676
-  10B1=10419, B31A=10083, 91E5=9943, 4196=9743, 0B0A=9266, 6CAC=8795, AB01=7691, 2E92=7448, A10B=6981, 0E76=6728
-  39BC=6052, 3781=5916, 2E48=5693, 2254=5377, C2E5=5139, 1608=4764, 326E=4663, 6300=4251, 00F7=3298, 6A1F=2191
-  0F20=2153, C330=1959, 0810=1946, 6D93=1917, FC36=1641, 436B=1592, 3EC4=1543, 7C57=1308, 9D4A=1271, 3B3B=1189
-  FFD3=1180, 1990=1132, 4F82=1103, BE88=1094, BF4A=1052, 4416=983, 1021=967, 62E7=960, 49C0=948, 973C=916
-  C26B=864, 702F=844, 2F6C=826, 0D60=782, 1A6F=771, 1997=758, 730B=753, 1550=753, 4D08=698, 06F6=676
-  1DF5=675, 0B0E=669, 5B4F=661, B539=659, C64E=656, 3D96=651, 3DD0=625, 05DC=620, CC74=615, 15F9=614
-  2BF6=612, 250B=603, 9637=597, 377C=582, 415E=580, C088=561, 5870=540, 63C2=538, 8C84=535, 9A3F=535
-  BA5C=535, 12A0=528, 99F2=526, A5A9=520, 01A3=515, ABFB=512, 9DC7=502, BC7B=501, 5971=499, 2766=498
-  A752=496, 9371=495, 8B59=492, CE47=489, 21E5=483, D06B=481, 4665=479, 126D=466, 480E=458, 495D=458
-  8B3C=456, 31DC=454, 2B56=440, 3ED6=432, 4DA5=429, 3ADE=421, 5D54=416, 1961=405, 24B1=403, 86C6=402
-  1A6A=399, 636B=394, 24A2=394, 5D78=394, 2896=392, 82B3=389, 58EB=378, 29CB=366, 99DC=351, 0AD6=347
-  5CC5=314, 3596=311
-Q3b tblTag (Tag_ID, TagType, pulseRate):
-  beacon: 1001 60, 1002 60, 1003 60, 1F14 NULL, 1F38 NULL, 1F5A NULL, 1F71 NULL, 1F94 NULL, 1FCD NULL, 1FF1 60,
-          2001 60, 2002 60, 2003 60, 2004 60, 2005 60, 2006 60, 2008 60, 2009 60, 2010 60, 7D0E 60, 7D2D 60, 7DB7 60,
-          7DBC 60, 7F32 30, 7F91 30, B2D6 60, B2DA 60, B2EA 60, B32A 60, B354 60, B356 60, B35A 60, B36A 60, FA1B 60,
-          FB87 60, FBC4 60, FCC9 60, FEBC 60, FFC7 60
-  study:  0AC6 3.204, 0B0A 3.024, 493F 3.155, FC36 3.038, FFD3 3.33
-Q3c tables: tblDetectionRaw, tblReceiver, tblTag, tblInterpolatedTemp, tblWSEL, tblStudyParameters (legacy only; no others)
-Q3d study codes found in PTAGIS: 510 of 592 (exact match on "Acoustic Tag Value" after upper-casing).
-  82 not found (code=detections): 41E0=815495, 0074=305763, 0516=187636, 3E68=142264, 2E75=140423, 0957=112794,
-  4E21=109972, 1E65=109558, 0E39=102462, 2E39=94873, 18E4=83818, 0133=57366, 0E04=56774, 72E6=56461, 0948=50242,
-  0106=44839, 26E4=40928, 8E49=36484, 2E73=30703, 0710=27221, 5E99=21361, 03FE=15648, 0405=14509, 76E5=12029,
-  91E5=9943, 2E92=7448, 0E76=6728, 2E48=5693, 0F20=2153, C330=1959, 0810=1946, 6D93=1917, FC36=1641, 3EC4=1543,
-  FFD3=1180, 4F82=1103, BF4A=1052, 4416=983, 62E7=960, 49C0=948, 2F6C=826, 0D60=782, 1A6F=771, 730B=753,
-  4D08=698, 06F6=676, B539=659, 3D96=651, CC74=615, 250B=603, 9637=597, 377C=582, 415E=580, C088=561, 5870=540,
-  8C84=535, BA5C=535, 12A0=528, ABFB=512, BC7B=501, 9371=495, 8B59=492, CE47=489, 21E5=483, D06B=481, 4665=479,
-  2B56=440, 3ED6=432, 4DA5=429, 5D54=416, 1961=405, 24B1=403, 1A6A=399, 24A2=394, 2896=392, 82B3=389, 58EB=378,
-  29CB=366, 99DC=351, 0AD6=347, 5CC5=314, 3596=311
-  Species of the 5 tblTag study tags: 0B0A Chinook, 0AC6 Chinook, 493F Chinook, FC36 NOT IN PTAGIS, FFD3 NOT IN PTAGIS.
+Expected 2019 import baseline:
+- 9 receivers.
+- 28,582,645 tblDetectionRaw rows.
+- Detection seconds must be Unix seconds around 1.55e9, not microsecond-scale
+  values around 1.55e6. Current pandas requires explicit nanosecond conversion.
+- Local composite indexes are allowed and result-preserving.
 
-Q4 paths:
-  raw_root        | K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data | True
-  config_xlsx     | K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx | True
-  gps_csv         | K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv | True
-  covariate_csv   | K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv | True
-  temperature_csv | K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv | True
-  hobo_dir        | K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N | True
-  released_file   | K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv | True
-  collected_file  | K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\collected_v0.csv | True
-  output_db       | C:\Dev\jsat3d\jsats3d\output\jsats3d_2025_v2.db | True
+2019 full positioning sequence
+------------------------------
+1. Import tblTag, tblReceiver, tblWSEL, tblTemp, tblInterpolatedTemp, and
+   tblDetectionRaw from the read-only source files.
+2. Apply local-only SQLite indexes.
+3. Master beacon epoch enumeration.
+4. Beacon first-arrival/multipath processing and legacy KNN classification.
+5. Surface receiver clock fixing from metronome TDOA.
+6. Deep receiver beacon multipath and Deng positioning.
+7. Repeat metronome and clock fixing with all resolved receivers.
+8. Study-tag multipath filtering.
+9. Deng positioning for study tags.
+10. Load positions into tblPositions_Deng and produce accuracy/precision
+    comparisons against the canonical database and published results.
 
-Q5 env: python=3.11.15 pandas=3.0.5 numpy=2.4.6 openpyxl=3.1.5 pyproj=3.7.2 sklearn=1.9.0 matplotlib=3.11.1 scipy=1.17.1 tomllib=True tomli=False
+Do not call a 2019 run complete until all derived tables and final products
+exist, row counts are reconciled, and canonical result comparisons are written.
+
+Current 2019 checkpoint (2026-09-29 evening):
+- Local database was rebuilt from all nine read-only source folders and verified
+  at 28,582,645 detections.
+- Surface metronome/KNN and clock fixing completed. Known local checkpoint:
+  approximately 11.2M clock-fixed rows and 955,672 R01/FF76 secondary rows.
+- The current run is in deep receiver R01 Deng positioning. `tblPositions_Deng`
+  does not yet exist; final 2019 products and canonical comparisons are pending.
+- A parent run may report exit code 1 while an orphan worker remains active.
+  Check processes before starting another local run; stop stale workers before
+  any retry to prevent concurrent C: database writes.
+- Do not rebuild from K: merely to retry Deng. Reuse the complete local database
+  after the local code fix is validated.
+
+Current 2019 status (2026-10-01):
+- The local 2019 database was previously rebuilt and verified with 28,582,645 detections.
+- The last recorded full test-suite validation passed 32 tests; those tests include 2025 contract coverage and do not prove the 2019 end-to-end workflow passes.
+- The 2019 end-to-end workflow is NOT complete. No active run is confirmed; do not describe deep Deng positioning as in progress.
+- Recent runs failed during surface processing with varying errors: DBSCAN rejected NaN input during clock fixing, and some attempts reported missing `tblMetronomeFiltered` or `tblMetronomeSecondFiltered` tables.
+- The root cause is not established. Do not claim the missing tables were fixed, or that their absence alone makes completion impossible.
+
+2025 ATS study
+--------------
+Source data, read-only:
+- Raw receivers: K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data
+- Configuration: ...\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx
+- GPS: ...\4_gps_datasets\master_df_gps.csv
+- Covariates/WSEL: ...\Master Covariate Table\2025 Master Covariate Table_20251212.csv
+- Temperature: ...\Temperature\2025_Temp_String_Data_5min_interpolated.csv
+- Tag-drag HOBO: ...\Tag Drag Period\DD_N
+- PTAGIS releases: ...\3_PTAGIS_datasets\released_v0.csv
+
+2025 raw format and mapping:
+- ATS File Format 2.0 receiver CSVs; mixed SR3017/SR3001 must remain
+  receiver-type aware.
+- dateTime -> legacy timeStamp/seconds.
+- tagCode -> Tag_ID.
+- receiverName -> Rec_ID.
+- amp/sigStr -> Amplitude/SigStr.
+- diagCode -> Internal clock/status fields.
+- pressure, tilt, battery, bitPeriod, threshold, receiver type, firmware,
+  source file, and source row remain additive ATS fields.
+- Missing SNR, NBW, and FreqOff stay NULL. Never fabricate them.
+- Additive tblReceiverGPS stores available GPS fixes in local receiver X/Y
+  coordinates. Legacy static coordinates remain the fallback.
+
+2025 current products/status:
+- Canonical local database: output/jsats3d_2025_v3.db.
+- v3 build: 303 files, 20 receivers, 60,410,185 detections.
+- v3 run manifest/log: output/jsats3d_2025_v3.run.json and
+  output/jsats3d_2025_v3_build.log.
+- Beacon DBSCAN output: output/dbscan_jsats3d_2025_v3/.
+- Metronome candidate: ZOI02 beacon 7D2D; reference clock remains an owner
+  decision because ZOI02 has clock-jump concerns and is unsurveyed.
+- Fixed beacon DBSCAN settings: 0.5 ms timing budget, 2.5-period window,
+  min_samples=3, fixed study-wide regime. Do not auto-tune per group.
+- Full 2025 legacy positioning is not accepted yet. Open items include
+  reference clock, receiver geometry/WSEL provenance, CFD05/CFD09 swap timing,
+  clock-jump correction, sound-speed approval, and Gate 3/4 validation.
+- Current 2025 GPS source contains CFD02-CFD09 only; requested ZOI GPS rows
+  are absent. Do not fabricate them.
+
+Current 2025 status (2026-10-01):
+- All 2025 tests pass (32/32)
+- The database has been successfully built with 60,410,185 detections across 20 receivers
+- DBSCAN processing completed successfully with beacon 7D2D (ZOI02) and ZOI09 as anchor
+- 42,276 paired epochs processed with various receiver performance metrics
+- The legacy pipeline has been partially executed (Phase 1: surface receivers completed)
+- Database locking issues were encountered but resolved by terminating hanging processes
+- All tests continue to pass after cleanup operations
+
+2025 positioning sequence
+-------------------------
+1. Parse ATS raw files into legacy-compatible tables.
+2. Reconcile source files and row counts.
+3. Verify receiver geometry, WSEL, temperature, and GPS provenance.
+4. Enumerate beacon epochs.
+5. Run fixed-parameter beacon DBSCAN and preserve original rows plus flags.
+6. Verify clocks per receiver; report offsets, drift, residuals, and warnings.
+7. Apply approved clock-jump correction.
+8. Position receivers at depth with Deng where required.
+9. Run study-tag multipath filtering using only approved available features.
+10. Run the shared Deng solver, retain physically impossible solutions, and label
+    convex-hull extrapolations.
+11. Produce RMSE, precision, yield, rejection accounting, and drag-track overlays.
+
+Speed and modernization policy
+-------------------------------
+- Optimize inside existing legacy modules; do not add a parallel algorithm path.
+- Safe improvements already used: modern pandas APIs, explicit timestamp units,
+  SQLite composite indexes, vectorized metronome epoch assignment, vectorized
+  child-window matching, and parallel neighbor search.
+- Numerical safety fixes already used: explicit nanosecond timestamp conversion,
+  SQLite-bound timestamp serialization, scalar/current scikit-learn DBSCAN eps,
+  empty-chunk guards, and Deng discriminant validation before `sqrt`.
+- The Deng discriminant guard records traceable no-solution rows for negative or
+  invalid quadratic discriminants. It must not clamp negative values to zero or
+  fabricate coordinates.
+- Any optimization must be checked against the canonical 2019 row counts,
+  intermediate-table counts, clock residuals, and final positions.
+- Legacy KNN currently uses unseeded random chunk assignment; exact metric
+  reproducibility requires a deliberate seed decision before changing that behavior.
+- Never change pulse rates, timing windows, sound speed, DBSCAN eps, min_samples,
+  receiver geometry, or rejection criteria solely for speed.
+
+Recent fixes and improvements (2026-10-01):
+- Fixed timestamp resolution issues with pandas datetime scaling
+- Resolved DBSCAN parameter compatibility issues
+- Implemented vectorized processing for performance improvements
+- Added numerical stability checks for discriminant handling
+- Fixed scalar assignment errors in jsats3d.py
+- Added proper handling of negative discriminant warnings
+- Resolved database locking issues by terminating hanging processes
+- Addressed compatibility issues with modern Python/pandas versions
+
+Validation commands
+-------------------
+Use the configured jsat_3d interpreter explicitly:
+
+    C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe -m unittest discover -s tests -q
+
+2019 local import/reuse:
+
+    ...python.exe scripts/legacy_pipeline.py import-2019 config/run_data_2019.toml
+    ...python.exe scripts/run_data.py config/run_data_2019.toml --skip-build
+
+2025 dry run/reuse:
+
+    ...python.exe scripts/run_data.py --dry-run
+    ...python.exe scripts/run_data.py --skip-build
+
+Before every run, verify output paths are local C: paths and confirm no process
+will write to K:. Record command, row counts, artifacts, failures, and decisions
+in .ai_journal/session/. Every code fix, warning fix, optimization, failed run,
+and cleanup action requires a journal entry with rationale and validation.
+
+Current system status (2026-10-01):
+- All 32 tests pass (32/32)
+- Database successfully built with 60,410,185 detections across 20 receivers
+- DBSCAN processing completed successfully with beacon 7D2D (ZOI02) and ZOI09 as anchor
+- Legacy pipeline partially executed (Phase 1: surface receivers completed)
+- Database locking issues resolved by terminating hanging processes (PIDs 38928, 46452, 53404, 57112, 85636)
+- All tests continue to pass after cleanup operations

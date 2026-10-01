@@ -1,21 +1,19 @@
 # Run file for scripts/run_data.py  (2019 Teknologic data, Nebiolo & Meyer 2021)
 #     conda run -n jsat_3d python scripts/run_data.py config/run_data_2019.toml
-# The import itself uses Kevin's functions (create_project_db, set_study_parameters,
-# study_data_import, acoustic_data_import) and his temperature_assessment.py averaging,
-# so it runs in the legacy env. Values below are from Kevin's projectSetup.py.
-# FILL IN the paths: the 2019 files are not on the K: 2025 share.
+# The import uses the shared legacy core and the versioned run configuration below.
+# Source paths provided by Kevin on 2026-09-29. Raw files remain read-only.
 
 data_format = 'teknologic'
 overwrite = false
 
 [paths]
 # One subfolder per receiver named by Rec_ID (R01, R02, ...), holding the Teknologic CSV files.
-raw_root      = 'C:\path\to\2019\Aggregated'
-tag_csv       = 'C:\path\to\2019\tblTag.csv'                  # Tag_ID, TagType, pulseRate
-receiver_csv  = 'C:\path\to\2019\tblReceiver_initial_B.csv'   # Rec_ID, Type, Tag_ID, Ref_Elev, X, Y, Z, X_t, Y_t, Z_t
-wsel_csv      = 'C:\path\to\2019\tblWSEL.csv'                 # timeStamp, WSEL
-temp_csv      = 'C:\path\to\2019\tblTemp.csv'                 # meas_dt, location, depth_ft, temp_f
-output_db     = 'output\cowlitz_2019_legacy.db'
+raw_root      = 'K:\Jobs\3870\014\Calcs\Data\Synch_1'
+tag_csv       = 'K:\Jobs\3870\014\Calcs\Data\tblTag.csv'                  # Tag_ID, pulseRate, TagType
+receiver_csv  = 'K:\Jobs\3870\014\Calcs\Data\tblReceiver_Initial.csv'    # legacy receiver metadata
+wsel_csv      = 'K:\Jobs\3870\014\Calcs\Data\tblWSEL.csv'                 # timeStamp, WSEL
+temp_csv      = 'K:\Jobs\3870\014\Calcs\Data\tblTemp.csv'                 # meas_dt, location, depth_ft, temp_celcius
+output_db     = 'output\cowlitz_2019_synch_1_recreated.db'
 
 [selection]
 # Not used for Teknologic: the legacy import keeps every tag inside the sync window.
@@ -31,11 +29,12 @@ bm_elev          = 262.585     # 861.5 ft / 3.28084
 bm_elev_units    = 'meters'
 output_units     = 'meters'
 master_receiver  = 'R05'
-synch_time_start = '2018-06-07 13:17:08'   # projectSetup.py "synch_time"
-synch_time_end   = ''                      # FILL IN (end of study)
+synch_time_start = '2018-06-07 13:17:08'   # canonical Synch_1 synchronization start
+synch_time_end   = '2019-05-24 12:25:00'
 
 [legacy]
 run               = true
+# Deprecated: shared run_data.py now executes the preserved workflow in jsat_3d.
 env               = 'jsat_legacy'
 method            = 'KNN'
 # FILL IN from the paper / tblReceiver: surface receivers with surveyed positions, master included.
