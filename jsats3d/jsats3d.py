@@ -1390,6 +1390,74 @@ class position():
         SolutionB.to_csv(os.path.join(self.outputWS,"%s_solutionB.csv"%(self.tag)))
 #            SolutionA3.to_csv(os.path.join(outputWS,'Production','Files',"%s_solutionA_filtered.csv"%(i)))
 #            SolutionB3.to_csv(os.path.join(outputWS,'Production','Files',"%s_solutionB_filtered.csv"%(i)))
+
+    @staticmethod
+    def deng_2d_roots(r0, r1, r2, tdoa_1, tdoa_2, SoS, fixed_z):
+        '''Deng's exact TDoA solution reduced to 2D: fish Z is fixed, so a reference
+        receiver plus two others give X and Y.  Same equations as Deng(),
+        R^T S = 0.5 b - SoS^2 t T0 with |S| = SoS T0, after moving the known
+        S_z = fixed_z - r0_z term to the right-hand side.  Returns
+        [(T0, X, Y), ...] for roots A then B, None where a root is not a positive time.'''
+        d = np.array([r1 - r0, r2 - r0])                                       # receiver offsets from the reference
+        t = np.array([tdoa_1, tdoa_2])
+        s_z = fixed_z - r0[2]
+        b = np.sum(d ** 2, axis = 1) - SoS ** 2 * t ** 2
+        M = d[:, :2]
+        if abs(np.linalg.det(M)) < 1e-9:
+            raise np.linalg.LinAlgError("receivers collinear in plan view")
+        u = np.linalg.solve(M, 0.5 * b - d[:, 2] * s_z)                        # [Sx, Sy] = u + v T0
+        v = np.linalg.solve(M, -SoS ** 2 * t)
+        a = v @ v - SoS ** 2
+        p = 2 * u @ v
+        q = u @ u + s_z ** 2
+        disc = p ** 2 - 4 * a * q
+        if not np.isfinite(disc) or disc < 0 or a == 0:
+            return None
+        roots = []
+        for T0 in ((-p + np.sqrt(disc)) / (2 * a), (-p - np.sqrt(disc)) / (2 * a)):
+            xy = u + v * T0
+            roots.append((T0, r0[0] + xy[0], r0[1] + xy[1]) if T0 > 0 else None)
+        return roots
+
+    def Deng2D(self, fixed_z):
+        '''2D positions (fish Z fixed at fixed_z, tblReceiver Z frame) from every
+        set of three receivers per transmission, first arrival per receiver.
+        Writes <tag>_2D_solutionA/B.csv with Deng() columns; in_hull is the plan-view hull.'''
+        from scipy.spatial import Delaunay
+        cols = ['transNo','solNo','r0','r1','r2','X','Y','Z','T01','ToA','comment','in_hull']
+        plan = Delaunay(np.array(self.ephemeris[['X_t','Y_t']], dtype = float))
+        rows = {'A': [], 'B': []}
+        data = self.tag_data.sort_values('seconds_fix').drop_duplicates(['transNo','Rec_ID'], keep = 'first')
+        for j, tDat in data.groupby('transNo', sort = True):
+            if len(tDat) < 3:
+                for s in rows:
+                    rows[s].append([j,9999,'','','',9999.,9999.,9999.,9999.,9999.,'not enough receivers for solution',''])
+                continue
+            for sol_no, combo in enumerate(combinations(range(len(tDat)), 3)):
+                sub = tDat.iloc[list(combo)]
+                recs = sub.Rec_ID.tolist()
+                times = sub.seconds_fix.to_numpy()
+                pos = [self.receiver_position_at(r, t, self.ephemeris.loc[r, 'Z_t']) for r, t in zip(recs, times)]
+                SoS = float(sos(self.interpolator(times[0])))
+                try:
+                    roots = self.deng_2d_roots(pos[0], pos[1], pos[2], round(times[1] - times[0], 6),
+                                               round(times[2] - times[0], 6), SoS, fixed_z)
+                    comment = 'negative quadratic discriminant - no solution' if roots is None else None
+                except (np.linalg.LinAlgError, ValueError) as error:
+                    roots, comment = None, 'no solution: %s' % error
+                for s, root in zip('AB', roots or [None, None]):
+                    if root is None:
+                        rows[s].append([j,sol_no] + recs + [9999.,9999.,9999.,9999.,9999.,
+                                        comment or 'negative time of arrival - no solution',''])
+                    else:
+                        inside = bool(plan.find_simplex([root[1], root[2]]) >= 0)
+                        rows[s].append([j,sol_no] + recs + [root[1], root[2], fixed_z, root[0], times[0],
+                                        'solution found', inside])
+        for s in rows:
+            frame = pd.DataFrame(rows[s], columns = cols)
+            setattr(self, 'Deng2DSolution%s' % s, frame)
+            frame.to_csv(os.path.join(self.outputWS, "%s_2D_solution%s.csv" % (self.tag, s)))
+
     def trajectory_plot_Deng(self, hull_filter = False, beacon = False):
 
         def distB(row):

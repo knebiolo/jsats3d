@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from scripts.adapt_2025_to_legacy import (
@@ -26,9 +27,9 @@ from scripts.parse_ats_raw_to_legacy import (
 )
 from scripts.extract_dbscan_features import extract_features
 from scripts.beacon_pairwise_dbscan import classify, cluster
-from scripts.legacy_pipeline import clock_fix_check, import_2019, widen_table
+from scripts.legacy_pipeline import clock_fix_check, import_2019, receiver_sets, widen_table
 from scripts.cfd_gps_diagnostics import interpolate_positions
-from jsats3d import position
+from jsats3d import position, sos
 from scripts.run_data import (
     check_inputs,
     check_output,
@@ -414,7 +415,7 @@ class TestRunData(unittest.TestCase):
 
     def test_legacy_command_uses_env_name_or_folder(self):
         by_name = legacy_command({"env": "jsat_legacy"}, "process", "run.toml")
-        self.assertTrue(by_name[1].endswith("scripts\\legacy_pipeline.py"))
+        self.assertEqual(Path(by_name[1]).name, "legacy_pipeline.py")
         self.assertEqual(by_name[-2:], ["process", "run.toml"])
         by_path = legacy_command({"env": "C:\\envs\\jsat_legacy"}, "process", "run.toml")
         self.assertEqual(by_path, by_name)
@@ -450,6 +451,29 @@ class TestRunData(unittest.TestCase):
             columns = [row[1] for row in con.execute("PRAGMA table_info(tblMetronomeSecondFiltered)")]
             con.close()
         self.assertEqual(columns, ["Rec_ID", "multipath_prediction", "amp_s"])
+
+    def test_deng_2d_recovers_fish_xy_at_fixed_depth(self):
+        c = float(sos(12.0))
+        fish = np.array([37.0, 52.0, -6.0])
+        recs = [np.array(r) for r in ([0.0, 0.0, -2.0], [120.0, 0.0, -5.5], [0.0, 120.0, -7.0])]
+        arrivals = [np.linalg.norm(fish - r) / c for r in recs]
+        order = np.argsort(arrivals)
+        r0, r1, r2 = (recs[i] for i in order)
+        t0, t1, t2 = (arrivals[i] for i in order)
+        roots = position.deng_2d_roots(r0, r1, r2, t1 - t0, t2 - t0, c, fish[2])
+        found = [r for r in roots if r is not None]
+        self.assertTrue(any(abs(x - 37.0) < 1e-6 and abs(y - 52.0) < 1e-6 for _, x, y in found))
+
+    def test_receiver_sets_keep_2019_default_and_split_2025(self):
+        surface, deep = ["R04", "R05"], ["R01"]
+        self.assertEqual(receiver_sets({}, surface, deep), (["R04", "R05", "R01"], [], ["R04", "R05"]))
+        legacy = {"receivers_3d": ["ZOI01", "ZOI04"], "receivers_2d": ["ZOI04", "CFD02"], "fixed_z_2d": -3.0}
+        three, two, reference = receiver_sets(legacy, ["ZOI04", "CFD02"], ["ZOI01"])
+        self.assertEqual((three, two, reference), (["ZOI01", "ZOI04"], ["ZOI04", "CFD02"], ["ZOI04"]))
+        with self.assertRaises(ValueError):
+            receiver_sets({"receivers_2d": ["ZOI04"]}, ["ZOI04"], [])
+        with self.assertRaises(ValueError):
+            receiver_sets({"receivers_3d": ["ZOI99"]}, ["ZOI04"], [])
 
 
 if __name__ == "__main__":

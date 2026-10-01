@@ -299,6 +299,51 @@ def deng(db, tag, receivers, out, figures):
     return pos
 
 
+def deng_2d(db, tag, receivers, out, figures, fixed_z):
+    """2D positions (fish Z fixed) from every receiver set of three; see position.Deng2D."""
+    pos = jsats3d.position(tag, receivers, str(db), str(out), str(figures))
+    if pos.tag_data.empty:
+        print("WARNING: tag %s has no filtered detections at the 2D receivers; no 2D positions" % tag)
+        return None
+    pos.Deng2D(fixed_z)
+    return pos
+
+
+def load_2d_positions(db, folder, fixed_z):
+    """Load <tag>_2D_solutionA/B.csv into tblPositions_Deng2D (kept apart from the 3D table)."""
+    frames = []
+    for path in sorted(Path(folder).glob("*_2D_solution?.csv")):
+        frame = pd.read_csv(path, index_col=0)
+        frame["solution"] = path.stem[-1]
+        frame["Tag_ID"] = path.name.split("_2D_")[0]
+        frame["fixed_z"] = fixed_z
+        frames.append(frame)
+    if not frames:
+        return 0
+    connection = sqlite3.connect(db)
+    try:
+        pd.concat(frames, ignore_index=True).to_sql("tblPositions_Deng2D", connection, if_exists="replace", index=False)
+        connection.commit()
+        return int(connection.execute("select count(*) from tblPositions_Deng2D where comment = 'solution found'").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def receiver_sets(legacy, surface, deep):
+    """3D and 2D receiver lists. Defaults keep the 2019 behaviour: 3D uses every receiver, no 2D."""
+    everyone = surface + deep
+    receivers_3d = list(legacy.get("receivers_3d") or everyone)
+    receivers_2d = list(legacy.get("receivers_2d") or [])
+    for name, subset in (("receivers_3d", receivers_3d), ("receivers_2d", receivers_2d)):
+        unknown = sorted(set(subset) - set(everyone))
+        if unknown:
+            raise ValueError("%s %s are not in surface_receivers or deep_receivers (no clock fix)" % (name, unknown))
+    if receivers_2d and blank(legacy.get("fixed_z_2d")):
+        raise ValueError("receivers_2d needs fixed_z_2d (fish Z in the tblReceiver Z frame)")
+    deep_reference = [r for r in receivers_3d if r not in deep]
+    return receivers_3d, receivers_2d, deep_reference
+
+
 def position_deep_receivers(db, surface, deep, work, method, solution):
     """coordinate_with_Deng.py: position each deep receiver's own beacon, write the median to X_t/Y_t/Z_t."""
     out = Path(fresh_folder(work / "deep_receivers"))
@@ -331,6 +376,7 @@ def process(run, paths):
     work = Path(legacy["work_dir"]) if not blank(legacy.get("work_dir")) else db.parent / ("%s_legacy" % db.stem)
     work = resolve_path(work)
     work.mkdir(parents=True, exist_ok=True)
+    receivers_3d, receivers_2d, deep_reference = receiver_sets(legacy, surface, deep)
     master_rec, master_tag = master(db)
     if master_rec not in surface:
         raise ValueError("master_receiver %s must be one of surface_receivers (legacy needs its position known)" % master_rec)
@@ -341,19 +387,22 @@ def process(run, paths):
         execute(db, "drop table tblReceiver", "create table tblReceiver as select * from tblReceiver_initial")
     else:
         execute(db, "create table tblReceiver_initial as select * from tblReceiver")
-    execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES + ["tblPositions_Deng"]])
+    execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D"]])
 
     print("Phase 1: surface receivers %s, master %s (beacon %s)" % (surface, master_rec, master_tag))
     metronome(db, master_tag, work, method)
     clock_fix(db, surface, work)
     if deep:
-        position_deep_receivers(db, surface, deep, work, method, solution)
+        # Deep receivers are positioned from the 3D set only (e.g. 2025: ZOI, not the CFD floats).
+        position_deep_receivers(db, deep_reference, deep, work, method, solution)
         print("Phase 2: all receivers")
         execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES])
         metronome(db, master_tag, work, method)
         clock_fix(db, surface + deep, work)
 
-    receivers = surface + deep
+    print("3D receivers: %s" % receivers_3d)
+    if receivers_2d:
+        print("2D receivers: %s (fish Z fixed at %s)" % (receivers_2d, legacy["fixed_z_2d"]))
     tags = list(legacy.get("study_tags") or [])
     if not tags:
         tags = query(db, "select Tag_ID from tblTag where TagType = 'study' and pulseRate is not null").Tag_ID.tolist()
@@ -362,10 +411,13 @@ def process(run, paths):
         print("WARNING: study tags without pulseRate skipped (legacy epoch rule needs it): %s" % missing_rate)
         tags = [t for t in tags if t not in missing_rate]
     positions = Path(fresh_folder(work / "positions"))
+    positions_2d = Path(fresh_folder(work / "positions_2d"))
     for tag in tags:
         print("Study tag %s" % tag)
         if tag_multipath(db, tag, work, method):
-            deng(db, tag, receivers, positions, work / "figures")
+            deng(db, tag, receivers_3d, positions, work / "figures")
+            if receivers_2d:
+                deng_2d(db, tag, receivers_2d, positions_2d, work / "figures", float(legacy["fixed_z_2d"]))
     if any(positions.iterdir()):
         # positions_data_management adds solution and Tag_ID to every file
         widen_table(db, "tblPositions_Deng", positions, extra=("solution", "Tag_ID"))
@@ -373,6 +425,8 @@ def process(run, paths):
     count = query(db, "select count(*) as n from sqlite_master where name = 'tblPositions_Deng'").n.iloc[0]
     solved = query(db, "select count(*) as n from tblPositions_Deng where comment = 'solution found'").n.iloc[0] if count else 0
     print("Done. tblPositions_Deng: %s solutions found. Work folder: %s" % (solved, work))
+    if receivers_2d:
+        print("tblPositions_Deng2D: %s solutions found" % load_2d_positions(db, positions_2d, float(legacy["fixed_z_2d"])))
 
 
 def main(argv=None):

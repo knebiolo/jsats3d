@@ -1,251 +1,275 @@
-CLAUDE CODE HANDOFF — JSATS 3D 2019 + 2025
-============================================
+LLM HANDOFF: JSATS 3D, 2019 + 2025
+==================================
+Last updated 2026-10-01. Branch ENM_jsat3d_edits. Replaces all earlier content of this file
+(earlier versions are in git history). Detailed history: .ai_journal/session/, newest file
+2026-10-01_owner_decisions_2d_positioning.md.
 
-Purpose
--------
-Maintain one modernized jsats3d software path. Preserve the published 2019
-scientific behavior and reproduce the 2019 results. Run 2025 ATS data through
-the same legacy table contracts and core positioning functions after receiver-
-aware ingestion and approved preprocessing.
+Read this whole file before doing anything. Then read the newest journal file.
 
-The most important rule: performance improvements and API modernization are
-welcome, but they must not silently change 2019 scientific results. Validate
-against the canonical 2019 database before accepting an optimization.
 
-Non-negotiable data safety
---------------------------
-- K: source data is strictly read-only. Never write, delete, rename, reformat,
-  or create scratch files anywhere under K:\Jobs\.
-- All generated databases, CSVs, plots, logs, and scratch files belong under
-  C:\Dev\jsat3d\jsats3d\output or a temporary local C: directory.
-- Before any run, verify output paths are outside every input tree.
-- Never use overwrite against K:. A local output database may be replaced only
-  when explicitly requested.
+########################################################################
+0. ABSOLUTE RULES (read twice)
+########################################################################
 
-Workspace and environment
--------------------------
-- Repository: C:\Dev\jsat3d\jsats3d
-- Python environment: conda environment jsat_3d
-- Interpreter: C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe
-- Current active runtime: Python 3.11, pandas 3.x, NumPy 2.x, SciPy 1.x,
-  scikit-learn 1.x.
-- Use the existing legacy core. Do not create a parallel 2025 solver.
-- NASA-style coding: keep new/touched functions <=60 lines where practical,
-  use explicit resource cleanup, fail loudly, add focused tests, and journal
-  every meaningful change and parameter decision.
+DATA IS READ ONLY. NEVER DELETE, MOVE, RENAME, EDIT, RESAVE, REFORMAT OR OVERWRITE ANY DATA.
+- Data roots (both strictly read only):
+    2019: K:\Jobs\3870\014\Calcs\Data
+    2025: K:\Jobs\5662\001\Data\DataTrans\2025_Data
+- Never create, write or delete any file or folder anywhere under K:\.
+- Never open data files in Excel or any app that can autosave, lock or convert them.
+  Read with Python only: pandas.read_csv, pandas.read_excel / openpyxl (read_only=True).
+- SQLite databases on K: open only as: sqlite3.connect("file:<path>?mode=ro", uri=True).
+- Never run anything with overwrite against K:. Never add indexes to a K: database.
+- Every output (databases, CSVs, plots, logs, scratch scripts) goes under
+  C:\Dev\jsat3d\jsats3d\output or a temporary local C: folder. Delete scratch scripts after use.
+- Before any run, confirm every output path is on C: and outside every input folder.
+- The local derived databases (output\jsats3d_2025_v3.db, output\cowlitz_2019_synch_1_recreated.db)
+  are expensive to rebuild. Do not replace them unless the user asks.
 
-Active software path
---------------------
-- jsats3d/jsats3d.py: authoritative legacy mathematics and positioning core.
-- scripts/run_data.py: shared run-file orchestrator for 2019 and 2025.
-- scripts/legacy_pipeline.py: preserved 2019 workflow driver and importer.
-- scripts/parse_ats_raw_to_legacy.py: receiver-aware ATS raw parser.
-- scripts/adapt_2025_to_legacy.py: ATS metadata/table adapter.
-- scripts/beacon_pairwise_dbscan.py: approved 2025 beacon clock/multipath
-  diagnostic using fixed study-wide parameters.
-- scripts/cfd_gps_diagnostics.py: GPS diagnostics and piecewise interpolation checks.
-- scripts/clock_fix_serial.py, metronome.py, mulitpath.py,
-  coordinate_with_Deng.py, tag_drag_RMSE.py: preserved Kevin workflow drivers.
-- tests/test_2025_contracts.py and tests/test_smoke.py: contract/regression tests.
+CODE AND PROCESS RULES
+- Work only on branch ENM_jsat3d_edits. Never touch main (Kevin Nebiolo's).
+- Ask before committing. Author is Ethan Muhlestein. No AI co-author trailers.
+- Do not invent physical values (depths, pulse rates, elevations, offsets). Mark them BLOCKED
+  and write the exact owner question.
+- Parameters are fixed study wide. Never auto tune per receiver or per group.
+- Modernizing jsats3d.py is allowed, but it must not change 2019 scientific results.
+  Validate against the canonical 2019 database before accepting a change.
+- Keep functions short, fail loudly, add focused tests, journal every meaningful change,
+  run and decision in .ai_journal/session/ (one dated file per session).
 
-Do not resurrect deleted setup scripts or compatibility environments. Old setup,
-experimental, meeting-only sweep/coverage scripts, and the deprecated environment
-file were removed. Their behavior is either in the shared runner,
-legacy_pipeline.py, or preserved in the journal/history.
 
-2019 Teknologic study
----------------------
-Source data, read-only:
-- Root: K:\Jobs\3870\014\Calcs\Data
-- Raw receiver folders: K:\Jobs\3870\014\Calcs\Data\Synch_1\R01 through R09
-- Raw format: Teknologic receiver .DET files, parsed by the legacy importer.
-- Tags: K:\Jobs\3870\014\Calcs\Data\tblTag.csv
-  Columns include Tag_ID, TagType, and pulseRate.
-- Receiver geometry: K:\Jobs\3870\014\Calcs\Data\tblReceiver_Initial.csv
-  Contains Rec_ID, receiver type, beacon Tag_ID, reference elevation, X/Y/Z,
-  and initial/target coordinates.
-- Water level: K:\Jobs\3870\014\Calcs\Data\tblWSEL.csv
-  Provides timestamped WSEL used by the legacy solver.
-- Temperature: K:\Jobs\3870\014\Calcs\Data\tblTemp.csv
-  Contains meas_dt, location, depth_ft, and temp_celcius. The importer accepts
-  this Celsius schema and builds tblInterpolatedTemp.
-- Canonical reference database: K:\Jobs\3870\014\Calcs\Data\cowlitz_2019_synch_1.db
-  Open read-only for comparison only.
+########################################################################
+1. PROJECT IN ONE PARAGRAPH
+########################################################################
 
-2019 local run file:
-- config/run_data_2019.toml
-- master receiver: R05, beacon FF75.
-- synchronization window: 2018-06-07 13:17:08 through 2019-05-24 12:25:00.
-- surface receivers: R04, R05, R06, R07, R08, R09.
-- deep receivers: R01, R02, R03.
-- deep Deng solution: B.
-- method: KNN, legacy published workflow.
-- local output: output/cowlitz_2019_synch_1_recreated.db.
+jsats3d (Kevin Nebiolo, Kleinschmidt) positions acoustic tagged fish in 3D from receiver arrival
+time differences (TDoA), using Deng's exact solver. It reproduces Nebiolo & Meyer (2021),
+"High precision 3-D coordinates for JSATS tagged fish in an acoustically noisy environment",
+Animal Biotelemetry, Cowlitz Falls Dam, 2018/2019 Teknologic receivers. The goal of this branch:
+one shared code path that (a) reproduces the 2019 results from the 2019 raw data and (b) runs the
+2025 Tacoma Public Utilities Cowlitz Falls ATS data (SR3017 receivers) through the same legacy
+steps, changing only what the 2025 hardware forces (no SNR/NBW, clock jumps).
 
-Expected 2019 import baseline:
-- 9 receivers.
-- 28,582,645 tblDetectionRaw rows.
-- Detection seconds must be Unix seconds around 1.55e9, not microsecond-scale
-  values around 1.55e6. Current pandas requires explicit nanosecond conversion.
-- Local composite indexes are allowed and result-preserving.
 
-2019 full positioning sequence
-------------------------------
-1. Import tblTag, tblReceiver, tblWSEL, tblTemp, tblInterpolatedTemp, and
-   tblDetectionRaw from the read-only source files.
-2. Apply local-only SQLite indexes.
-3. Master beacon epoch enumeration.
-4. Beacon first-arrival/multipath processing and legacy KNN classification.
-5. Surface receiver clock fixing from metronome TDOA.
-6. Deep receiver beacon multipath and Deng positioning.
-7. Repeat metronome and clock fixing with all resolved receivers.
-8. Study-tag multipath filtering.
-9. Deng positioning for study tags.
-10. Load positions into tblPositions_Deng and produce accuracy/precision
-    comparisons against the canonical database and published results.
+########################################################################
+2. ENVIRONMENT AND ENTRY POINTS
+########################################################################
 
-Do not call a 2019 run complete until all derived tables and final products
-exist, row counts are reconciled, and canonical result comparisons are written.
+- Repo: C:\Dev\jsat3d\jsats3d
+- Python: conda env jsat_3d
+  C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe
+  (Python 3.11, pandas 3, NumPy 2, scikit learn 1.x). The old separate legacy env was removed.
+- Tests: <python> -m unittest discover -s tests -q      (35 tests, all pass as of 2026-10-01)
 
-Current 2019 checkpoint (2026-09-29 evening):
-- Local database was rebuilt from all nine read-only source folders and verified
-  at 28,582,645 detections.
-- Surface metronome/KNN and clock fixing completed. Known local checkpoint:
-  approximately 11.2M clock-fixed rows and 955,672 R01/FF76 secondary rows.
-- The current run is in deep receiver R01 Deng positioning. `tblPositions_Deng`
-  does not yet exist; final 2019 products and canonical comparisons are pending.
-- A parent run may report exit code 1 while an orphan worker remains active.
-  Check processes before starting another local run; stop stale workers before
-  any retry to prevent concurrent C: database writes.
-- Do not rebuild from K: merely to retry Deng. Reuse the complete local database
-  after the local code fix is validated.
+Main files
+- jsats3d/jsats3d.py            legacy core (Kevin's math), modernized in place
+- scripts/run_data.py           one run file in, builds the DB, optionally runs the workflow
+- scripts/legacy_pipeline.py    Kevin's workflow order: import-2019, process, clock-fix-check
+- scripts/parse_ats_raw_to_legacy.py   2025 ATS raw files -> legacy tables
+- scripts/adapt_2025_to_legacy.py      2025 metadata, temperature, receivers, GPS
+- scripts/beacon_pairwise_dbscan.py    2025 beacon clock/multipath DBSCAN (approved parameters)
+- scripts/cfd_gps_diagnostics.py       float GPS diagnostics
+- scripts/clock_fix_serial.py, metronome.py, mulitpath.py, coordinate_with_Deng.py,
+  tag_drag_RMSE.py                     Kevin's original drivers (reference only; hardcoded paths)
+- config/run_data.toml          2025 run file
+- config/run_data_2019.toml     2019 run file
+- tests/test_2025_contracts.py, tests/test_smoke.py
 
-Current 2019 status (2026-10-01):
-- The local 2019 database was previously rebuilt and verified with 28,582,645 detections.
-- The last recorded full test-suite validation passed 32 tests; those tests include 2025 contract coverage and do not prove the 2019 end-to-end workflow passes.
-- The 2019 end-to-end workflow is NOT complete. No active run is confirmed; do not describe deep Deng positioning as in progress.
-- Recent runs failed during surface processing with varying errors: DBSCAN rejected NaN input during clock fixing, and some attempts reported missing `tblMetronomeFiltered` or `tblMetronomeSecondFiltered` tables.
-- The root cause is not established. Do not claim the missing tables were fixed, or that their absence alone makes completion impossible.
+Commands
+- 2025 check:   <python> scripts/run_data.py --dry-run
+- 2025 reuse:   <python> scripts/run_data.py --skip-build
+- 2019 import:  <python> scripts/legacy_pipeline.py import-2019 config/run_data_2019.toml
+- 2019 reuse:   <python> scripts/run_data.py config/run_data_2019.toml --skip-build
+- Check for orphan python workers before any run; two runs on one DB corrupt each other.
 
-2025 ATS study
---------------
-Source data, read-only:
-- Raw receivers: K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data
-- Configuration: ...\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx
-- GPS: ...\4_gps_datasets\master_df_gps.csv
-- Covariates/WSEL: ...\Master Covariate Table\2025 Master Covariate Table_20251212.csv
-- Temperature: ...\Temperature\2025_Temp_String_Data_5min_interpolated.csv
-- Tag-drag HOBO: ...\Tag Drag Period\DD_N
-- PTAGIS releases: ...\3_PTAGIS_datasets\released_v0.csv
 
-2025 raw format and mapping:
-- ATS File Format 2.0 receiver CSVs; mixed SR3017/SR3001 must remain
-  receiver-type aware.
-- dateTime -> legacy timeStamp/seconds.
-- tagCode -> Tag_ID.
-- receiverName -> Rec_ID.
-- amp/sigStr -> Amplitude/SigStr.
-- diagCode -> Internal clock/status fields.
-- pressure, tilt, battery, bitPeriod, threshold, receiver type, firmware,
-  source file, and source row remain additive ATS fields.
-- Missing SNR, NBW, and FreqOff stay NULL. Never fabricate them.
-- Additive tblReceiverGPS stores available GPS fixes in local receiver X/Y
-  coordinates. Legacy static coordinates remain the fallback.
+########################################################################
+3. THE LEGACY WORKFLOW AND WHERE EACH DATA SET STANDS
+########################################################################
 
-2025 current products/status:
-- Canonical local database: output/jsats3d_2025_v3.db.
-- v3 build: 303 files, 20 receivers, 60,410,185 detections.
-- v3 run manifest/log: output/jsats3d_2025_v3.run.json and
-  output/jsats3d_2025_v3_build.log.
-- Beacon DBSCAN output: output/dbscan_jsats3d_2025_v3/.
-- Metronome candidate: ZOI02 beacon 7D2D; reference clock remains an owner
-  decision because ZOI02 has clock-jump concerns and is unsurveyed.
-- Fixed beacon DBSCAN settings: 0.5 ms timing budget, 2.5-period window,
-  min_samples=3, fixed study-wide regime. Do not auto-tune per group.
-- Full 2025 legacy positioning is not accepted yet. Open items include
-  reference clock, receiver geometry/WSEL provenance, CFD05/CFD09 swap timing,
-  clock-jump correction, sound-speed approval, and Gate 3/4 validation.
-- Current 2025 GPS source contains CFD02-CFD09 only; requested ZOI GPS rows
-  are absent. Do not fabricate them.
+Legacy order (paper Fig. 3, jsats3d.py functions):
+| # | Step | Function(s) | Same code 2019/2025? | 2019 | 2025 |
+| 1 | Import detections + study tables | teknologic_import / ATS parser | No (same tables) | done, 28,582,645 rows | done, v3, 60,410,185 rows |
+| 2 | Temperature, sound speed | temp_interpolator, sos | Yes (method) | done | done (DD_N mean) |
+| 3 | Metronome epochs | beacon_epoch / pairwise DBSCAN | No | done in earlier runs | provisional, 30 days |
+| 4 | Metronome multipath | multipath_2 + KNN / DBSCAN | No | done in earlier runs | provisional |
+| 5 | Surface clock fix | clock_fix | Yes | FAILING recently | ZOI08, ZOI09, ZOI11, CFD02 only |
+| 6 | Deep receivers via Deng | position.Deng | Yes | reached R01 once | not started |
+| 7 | Steps 3 to 5 with all receivers | as above | Yes | not reached | not started |
+| 8 | Study tag multipath | multipath_data_object + KNN | No (2025 not built) | not reached | NOT BUILT |
+| 9 | Fish positions | position.Deng (+ Deng2D for 2025) | Yes | not reached | not started |
+| 10 | Load and accuracy | positions_data_management | Yes | not reached | not started |
+NEITHER DATA SET HAS FISH POSITIONS YET.
 
-Current 2025 status (2026-10-01):
-- All 2025 tests pass (32/32)
-- The database has been successfully built with 60,410,185 detections across 20 receivers
-- DBSCAN processing completed successfully with beacon 7D2D (ZOI02) and ZOI09 as anchor
-- 42,276 paired epochs processed with various receiver performance metrics
-- The legacy pipeline has been partially executed (Phase 1: surface receivers completed)
-- Database locking issues were encountered but resolved by terminating hanging processes
-- All tests continue to pass after cleanup operations
+2019 run settings (config/run_data_2019.toml): master R05 (beacon FF75); sync window
+2018-06-07 13:17:08 to 2019-05-24 12:25:00; surface R04-R09; deep R01-R03; KNN; BM_Elev 262.585 m.
+Canonical reference DB (read only): K:\Jobs\3870\014\Calcs\Data\cowlitz_2019_synch_1.db
 
-2025 positioning sequence
--------------------------
-1. Parse ATS raw files into legacy-compatible tables.
-2. Reconcile source files and row counts.
-3. Verify receiver geometry, WSEL, temperature, and GPS provenance.
-4. Enumerate beacon epochs.
-5. Run fixed-parameter beacon DBSCAN and preserve original rows plus flags.
-6. Verify clocks per receiver; report offsets, drift, residuals, and warnings.
-7. Apply approved clock-jump correction.
-8. Position receivers at depth with Deng where required.
-9. Run study-tag multipath filtering using only approved available features.
-10. Run the shared Deng solver, retain physically impossible solutions, and label
-    convex-hull extrapolations.
-11. Produce RMSE, precision, yield, rejection accounting, and drag-track overlays.
 
-Speed and modernization policy
--------------------------------
-- Optimize inside existing legacy modules; do not add a parallel algorithm path.
-- Safe improvements already used: modern pandas APIs, explicit timestamp units,
-  SQLite composite indexes, vectorized metronome epoch assignment, vectorized
-  child-window matching, and parallel neighbor search.
-- Numerical safety fixes already used: explicit nanosecond timestamp conversion,
-  SQLite-bound timestamp serialization, scalar/current scikit-learn DBSCAN eps,
-  empty-chunk guards, and Deng discriminant validation before `sqrt`.
-- The Deng discriminant guard records traceable no-solution rows for negative or
-  invalid quadratic discriminants. It must not clamp negative values to zero or
-  fabricate coordinates.
-- Any optimization must be checked against the canonical 2019 row counts,
-  intermediate-table counts, clock residuals, and final positions.
-- Legacy KNN currently uses unseeded random chunk assignment; exact metric
-  reproducibility requires a deliberate seed decision before changing that behavior.
-- Never change pulse rates, timing windows, sound speed, DBSCAN eps, min_samples,
-  receiver geometry, or rejection criteria solely for speed.
+########################################################################
+4. WHAT CHANGED ON 2026-10-01 (this session, uncommitted until the user commits)
+########################################################################
 
-Recent fixes and improvements (2026-10-01):
-- Fixed timestamp resolution issues with pandas datetime scaling
-- Resolved DBSCAN parameter compatibility issues
-- Implemented vectorized processing for performance improvements
-- Added numerical stability checks for discriminant handling
-- Fixed scalar assignment errors in jsats3d.py
-- Added proper handling of negative discriminant warnings
-- Resolved database locking issues by terminating hanging processes
-- Addressed compatibility issues with modern Python/pandas versions
+Owner decisions (project lead):
+1. Beacon DBSCAN parameters APPROVED, fixed study wide: 0.5 ms timing budget, 2.5 period window,
+   min_samples 3, anchor side >= 50% of >= 4 receivers, 250 ms steady reflection cap.
+2. BM_Elev = 861.5 ft (2019 benchmark, same site). Decided, no longer provisional.
+3. CFD receivers: clock fixed, used for 2D positioning ONLY.
+4. 3D (deep receivers and fish): ZOI01-ZOI10 only (ZOI11 excluded by PM).
+5. 2D: fixed fish depth, Deng's equations reduced to 2D. 2D receivers: ZOI01-ZOI10 + CFD02-CFD09.
 
-Validation commands
--------------------
-Use the configured jsat_3d interpreter explicitly:
+Code:
+- jsats3d.py: new position.deng_2d_roots and position.Deng2D(fixed_z). Same equations as Deng()
+  with fish Z fixed; reference plus two receivers; roots A and B; every receiver set of three;
+  first arrival per receiver; GPS float positions; plan view hull flag. Deng() unchanged.
+  Output <tag>_2D_solutionA/B.csv, loaded into tblPositions_Deng2D (separate from tblPositions_Deng).
+- legacy_pipeline.py: receiver_sets() reads [legacy] receivers_3d, receivers_2d, fixed_z_2d.
+  Defaults keep 2019 behaviour (3D = all receivers, no 2D). Deep receivers positioned from the
+  non deep 3D receivers. New deng_2d() and load_2d_positions().
+- run_data.toml: decisions recorded; receivers_3d, receivers_2d, fixed_z_2d = '' (owner value).
+- tests: 2D exact recovery test, receiver set test, OS neutral path test. 35 pass.
+- Synthetic end to end check (not real data): 3D never used the 2D only receiver; 2D did.
+  Median XY error per ping: 3D 0.43 m, 2D 1.05 m with fixed depth.
 
-    C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe -m unittest discover -s tests -q
 
-2019 local import/reuse:
+########################################################################
+5. MISSING INFORMATION (owner / PM / data)
+########################################################################
 
-    ...python.exe scripts/legacy_pipeline.py import-2019 config/run_data_2019.toml
-    ...python.exe scripts/run_data.py config/run_data_2019.toml --skip-build
+Blocks 2025 positions:
+- Reference clock / master. Config: ZOI08 (7DB7). Journals: metronome ZOI02 (7D2D). Kevin decides.
+- fixed_z_2d (fish depth for 2D, tblReceiver Z frame, metres, negative below surface). Owner.
+- Exact programmed pulse rates (PRI) for the Chinook study tags (537 codes). The 5 test tags
+  (FFD3 3.33, FC36 3.038, 0B0A 3.024, 0AC6 3.204, 493F 3.155 s) are provisional measured values.
+- Receiver position source and accuracy (config lat/long have no survey method or accuracy).
+- Confirm ZOI01-ZOI03 static on the bottom.
+- Confirm UTC_Conv = -7.
+- CFD05/CFD09 serial swap time during tag drag (SR19026 sat at CFD05 until about 06-11 12:40).
+Useful, not blocking:
+- Sound speed table source (code cites Wikipedia; paper cites Seafloor Systems).
+- Float GPS antenna to hydrophone offset; 15 min mean vs median.
+- Forebay WSE (NSC.CZD_WTR_EL.F_CV) for 06-05 to 06-16 and deployment days.
+- Text re-export of PTAGIS released_v0 (Excel damaged 28 acoustic codes).
+- Seed decision for legacy KNN (unseeded; ~0.1% run to run variation).
+- "P4 file" / "holding tank data" named in release_QC_tracker_cowlitz_2025.xlsx: NOT FOUND so far.
 
-2025 dry run/reuse:
 
-    ...python.exe scripts/run_data.py --dry-run
-    ...python.exe scripts/run_data.py --skip-build
+########################################################################
+6. BREAKING OR RISKY CODE
+########################################################################
 
-Before every run, verify output paths are local C: paths and confirm no process
-will write to K:. Record command, row counts, artifacts, failures, and decisions
-in .ai_journal/session/. Every code fix, warning fix, optimization, failed run,
-and cleanup action requires a journal entry with rationale and validation.
+Stops a run or gives empty output:
+1. 2019 run fails in step 5 (DBSCAN rejects NaN in clock_fix; some runs report missing
+   tblMetronomeFiltered / tblMetronomeSecondFiltered). Cause NOT established. Unverified leads:
+   (a) orphan worker from an earlier run dropping derived tables mid run (driver drops them at start);
+   (b) duplicate `seconds` in tblMetronomeSecondFiltered making clock_fix's interp1d return NaN.
+2. 2025 full [legacy] run: process() still runs the legacy KNN metronome. SNR is NULL by decision,
+   so multipath_classifier (dat[dat.SNR > 0]) drops every row and clock_fix gets nothing.
+   process() must use the staged DBSCAN metronome tables for ATS data.
+3. 2025 study tag multipath not built: legacy classifier drops all ATS rows; legacy epoch rule
+   round((t - first)/pulseRate) needs exact PRIs. Needs cross receiver epochs + DBSCAN.
+4. Chinook tags have no pulseRate, so legacy skips them.
+5. 2025 whole second clock jumps not corrected; legacy interpolation smears each jump over a ping.
+Runs, but wrong or slow:
+6. KNN path drops the master receiver from tblDetectionClockFixed (classifier removes the host),
+   so the master is never used for positions (2019 too). 2025 DBSCAN path has a host passthrough.
+7. position.receiver_position_at: a GPS gap raises ValueError that Deng's bare except labels
+   "singular matrix"; uses raw 1 min fixes (3-6 m noise); filters the full GPS table per call (slow).
+8. Core modernization may change 2019 results: adjacent_receiver_enumeration now assigns the
+   NEAREST host epoch (original: LAST matching window wins); Deng discriminant guard writes new
+   no-solution rows to both A and B (original: SolutionA only). Positions found are unchanged.
+9. Kevin's bugs kept as is: solution B hull test uses A's Y and Z; kernels imports commented out;
+   stray `fuck` line crashes Deng only when print_output=True.
+10. Parser: CFD05/CFD09 swap not handled; worker warnings not captured in the log.
+11. Deng2D speed: C(18,3) = 816 receiver sets per transmission.
 
-Current system status (2026-10-01):
-- All 32 tests pass (32/32)
-- Database successfully built with 60,410,185 detections across 20 receivers
-- DBSCAN processing completed successfully with beacon 7D2D (ZOI02) and ZOI09 as anchor
-- Legacy pipeline partially executed (Phase 1: surface receivers completed)
-- Database locking issues resolved by terminating hanging processes (PIDs 38928, 46452, 53404, 57112, 85636)
-- All tests continue to pass after cleanup operations
+
+########################################################################
+7. TASK A: FULL DATA INVENTORY (READ ONLY)  <- do this first
+########################################################################
+
+Goal: look at ALL the data in ALL the folders under both roots and report what exists, what it
+contains, and what it can answer. Many owner questions in Section 5 may already be answered by
+files nobody has opened yet.
+
+How (read only, see Section 0):
+1. Walk every folder and subfolder recursively under:
+     K:\Jobs\3870\014\Calcs\Data
+     K:\Jobs\5662\001\Data\DataTrans\2025_Data
+   Include hidden folders, zip/kmz/kml, pdf, docx, txt, xlsx/xls/csv, db/sqlite, images.
+   Do not extract archives onto K:; list their contents in memory or extract to local C: temp only.
+2. For EVERY file record: full path, size, modified date, extension.
+3. For every table-like file (csv, txt, xlsx, xls): every sheet name, header row, row count
+   (stream large files in chunks), first 3 rows, and value ranges for time and numeric columns.
+   For raw receiver files (raw_data, Synch_1): sample per folder, do not dump all of them.
+4. For every SQLite DB (mode=ro): table names, row counts, column names.
+   For the canonical 2019 DB also: tblPositions_Deng counts by Tag_ID/solution/comment,
+   tblReceiver X_t/Y_t/Z_t, tblStudyParameters, and counts of every derived table.
+5. For documents (pdf/docx/txt/kmz): title and a short summary of anything about positions,
+   surveys, elevations, datums, tag programming, pulse rates, clocks, GPS, temperature, WSE.
+6. Search specifically for (by name AND by column content):
+   - surveyed receiver or hydrophone positions, elevations, datums, benchmarks
+   - tag programming sheets / pulse rates / PRI for study tags; tagging or surgery logs;
+     "P4" file; holding tank data; acoustic code to PIT or species links
+   - forebay WSE (NSC.CZD_WTR_EL.F_CV) before 2025-06-17; deployment day water levels
+   - float GPS antenna offsets, mooring notes, receiver service/relocation notes
+   - CFD05/CFD09 swap notes; receiver time zone notes; firmware notes
+   - sound speed references; temperature profiles
+   - test/drag/static hold ground truth (5_array_testing) and anything usable for accuracy
+   - 2019: anything matching the paper (tblReceiver_Initial, positions, tag drag, RMSE inputs)
+7. Mark each file: USED by the pipeline (name the function), NOT USED, or UNKNOWN.
+
+Output (local C: only):
+- output\data_inventory\inventory_<date>.csv   one row per file
+- output\data_inventory\tables_<date>.csv       one row per table/sheet with headers and counts
+- output\data_inventory\findings_<date>.md      answers to each Section 5 question with the file
+  path and evidence, or NOT FOUND; plus anything surprising
+- A journal entry summarising the results.
+
+
+########################################################################
+8. TASK B onward (after Task A, in this order unless the user says otherwise)
+########################################################################
+
+B. Fix the 2019 step 5 failure. Check processes first; then check duplicate seconds and NaN
+   sources in tblMetronomeSecondFiltered for the failing receiver. Reuse the local 2019 DB.
+C. Finish 2019 to tblPositions_Deng and compare with the canonical DB (read only): derived table
+   counts, receiver medians (R01-R03 X_t/Y_t/Z_t), position statistics. Write the comparison.
+D. Decide with the user on Section 6 items 7 and 8 (GPS interpolation, core behaviour changes).
+E. 2025: make process() use the DBSCAN metronome tables for ATS data; extend the clock fix to every
+   surface receiver; add jump handling; produce Gate 2 residual report (per receiver offset, drift,
+   residuals, flags over 0.5 ms).
+F. 2025: build study tag multipath (cross receiver epoch grouping without exact PRI, DBSCAN on
+   approved features) and write tblDetectionFilterSecondary.
+G. 2025: deep receivers (ZOI01-ZOI03), then fish 3D (ZOI01-ZOI10) and 2D (all, fixed_z_2d),
+   then accuracy vs static holds and tag drag tracks.
+
+
+########################################################################
+9. KEY DATA LOCATIONS ALREADY KNOWN (read only)
+########################################################################
+
+2019 (K:\Jobs\3870\014\Calcs\Data)
+- Synch_1\R01..R09            Teknologic raw receiver files
+- tblTag.csv, tblReceiver_Initial.csv, tblWSEL.csv, tblTemp.csv (meas_dt, location, depth_ft, temp_celcius)
+- cowlitz_2019_synch_1.db     canonical reference database
+
+2025 (K:\Jobs\5662\001\Data\DataTrans\2025_Data)
+- raw_data\<download>\SR<serial>*.csv      ATS File Format 2.0 raw files (authoritative detections)
+- CowlitzAT2025_Data_Deliverables\
+    1_array_metadata\cowlitz_2025_AT_config.xlsx   receivers, serials, beacons, depths, lat/long
+    2_AT_detection_datasets\master_df_{beacon,study,test,unknown}.csv  (cross check only)
+    3_PTAGIS_datasets\released_v0.csv (Acoustic Tag Value + Species), collected_v0.csv (PIT, PST)
+    4_gps_datasets\master_df_gps.csv              CFD02-CFD09 float GPS
+    5_array_testing\                              drag GPS, static holds, testing sheets
+    6_quality_control\                            processing tracker, gaps, release QC tracker
+    data_catalog_cowlitz_falls_AT_2025.xlsx
+- Master Covariate Table\2025 Master Covariate Table_20251212.csv   forebay WSE, surface temps
+- Temperature\2025_Temp_String_Data_5min_interpolated.csv          DD_N 4 depths (PDT)
+- Tag Drag Period\DD_N, DD_S (HOBO), TagDrag_WSE.xlsx
+Time basis: study time is PDT (UTC-7). ZOI05 and one ZOI04 file logged UTC (shifted by parser).
+ATS GPS rows are UTC. PTAGIS collected Obs Time is PST.
+
+Local products (C:\Dev\jsat3d\jsats3d\output)
+- jsats3d_2025_v3.db (+ .run.json, _build.log), dbscan_jsats3d_2025_v3\, dbscan_7DB7_30d_20250620_20250720\
+- cowlitz_2019_synch_1_recreated.db
