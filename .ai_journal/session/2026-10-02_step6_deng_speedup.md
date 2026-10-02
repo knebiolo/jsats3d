@@ -64,3 +64,27 @@
 - Modified: `jsats3d/jsats3d.py`, `LONG_TERM_CONTEXT.md` (standing decisions 2026-10-02), `.ai_journal/session/2026-10-01_parallel_rerun_2019_2025.md`.
 - New: this journal.
 - Generated (gitignored): `output/run_2025_step6_ZOI0*.log`, `output/run_2019_step6_R0*.log`, `deep_receivers_*` work folders; Temp folder `jsats3d_old\jsats3d_old.py` (copy of committed code for comparisons).
+
+## Follow-up: LLM_Prompts.txt Refresh and Equivalence Test Protocol
+
+- Author: Ethan Muhlestein / Claude
+- Date: 2026-10-02, after commit `0a4d92c`.
+- Tags: #handoff #testing #equivalence #modernization
+
+### What changed
+- `LLM_Prompts.txt` rewritten to the current state: 12 step status table for both years, decisions
+  log, a table of every change to Kevin's `jsats3d.py` (7e3b90e) classed as compatibility, speed,
+  behaviour or new, missing information, risky code, task order and data locations.
+- New Section 8, test protocol for speed and modernization: tiers T0 (unit), T1 (golden master
+  fixtures), T2 (old vs new A/B with fixed seed), T3 (Kevin original oracle in a test only env,
+  needs user approval), T4 (canonical 2019 parity report), T5 (synthetic truth), T6 (performance);
+  required tiers per change class; tests needed now E1 to E9.
+
+### Findings recorded
+- The duplicate timestamps (R04/FF75: 104,200 rows, 52,174 distinct seconds) were reproduced by the
+  fresh rebuild, so the pipeline creates them; the clock_fix knot fix hides the symptom. Test E1 is
+  first priority.
+- Task A inventory output was lost when output/ was cleared; redo and keep findings in docs/.
+
+### Validation
+- Documentation only. No code, data or database touched. 39 tests pass.
