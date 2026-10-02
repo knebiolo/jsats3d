@@ -320,6 +320,52 @@ def plot_interactive_before_after(res, path, title, max_points=50000):
     figure.write_html(path, include_plotlyjs=True)
 
 
+def filter_deep_beacon(database, tag):
+    """Paper step 5 second stage for a bottom-receiver beacon, after the surface clock fix and first-arrival ranking.
+
+    The beacon is stationary, so after the clock fix the arrival-time difference to an anchor is a constant level;
+    its position is not needed (it is what step 6 solves). Same fixed DBSCAN parameters as the metronome stage.
+    Writes this tag's rows to tblDetectionFilterSecondary (multipath_prediction 1 = rejected), the table position.Deng reads.
+    """
+    con = sqlite3.connect(database)
+    try:
+        primary = pd.read_sql("select * from tblDetectionFilterPrimary where Tag_ID = ?", con, params=[tag])
+        rate = pd.read_sql("select pulseRate from tblTag where Tag_ID = ?", con, params=[tag]).pulseRate
+        if primary.empty:
+            raise ValueError("No tblDetectionFilterPrimary rows for %s; run the first-arrival stage first" % tag)
+        if rate.empty or pd.isna(rate.iloc[0]):
+            raise ValueError("No pulseRate for %s; refusing to guess" % tag)
+        period = float(rate.iloc[0])
+        first = primary[(primary.multipath == 0) & primary.transNo.notna()]
+        first = first.sort_values("seconds_fix").drop_duplicates(["Rec_ID", "transNo"])
+        # Anchor = the receiver with the most first arrivals of this beacon (coverage rule, not tuned per tag).
+        anchor = first.groupby("Rec_ID").size().idxmax()
+        a = first[first.Rec_ID == anchor][["transNo", "seconds_fix"]].rename(columns={"seconds_fix": "t_anchor"})
+        paired = first[first.Rec_ID != anchor].merge(a, on="transNo")
+        paired["delta_s"] = paired.seconds_fix - paired.t_anchor
+        res, suspects = classify(paired[["Rec_ID", "transNo", "t_anchor", "delta_s"]], period)
+        a = a.assign(Rec_ID=anchor, delta_s=0.0,
+                     dbscan_class=np.where(a.t_anchor.isin(suspects), "anchor_suspect", "anchor"))
+        labels = pd.concat([res[["Rec_ID", "transNo", "delta_s", "dbscan_class"]],
+                            a[["Rec_ID", "transNo", "delta_s", "dbscan_class"]]], ignore_index=True)
+        out = primary[primary.transNo.notna()].merge(labels, on=["Rec_ID", "transNo"], how="left")
+        later = out.multipath == 1
+        out.loc[later, "dbscan_class"] = "later_arrival"
+        out.loc[later, "delta_s"] = np.nan
+        # First arrivals with no anchor detection in their epoch cannot be judged; kept and labelled, not dropped.
+        out["dbscan_class"] = out.dbscan_class.fillna("unpaired")
+        out["multipath_prediction"] = np.where(later | ~out.dbscan_class.isin(["clean", "anchor", "unpaired"]), 1, 0)
+        tables = pd.read_sql("select name from sqlite_master where type = 'table'", con).name.tolist()
+        if "tblDetectionFilterSecondary" in tables:
+            con.execute("delete from tblDetectionFilterSecondary where Tag_ID = ?", (tag,))
+        out.to_sql("tblDetectionFilterSecondary", con, if_exists="append", index=False, chunksize=1000)
+        con.commit()
+    finally:
+        con.close()
+    summary = out.groupby(["Rec_ID", "dbscan_class"]).size().unstack(fill_value=0)
+    return anchor, summary, len(primary) - len(out), len(suspects)
+
+
 def main():
     args = parse_args()
     rec, tag, period, det = load(args)

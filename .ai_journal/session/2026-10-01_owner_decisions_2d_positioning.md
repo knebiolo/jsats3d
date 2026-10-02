@@ -349,3 +349,113 @@ meaningful, reproducible difference, not noise.
    sign-off before being treated as accepted.
 2. If approved, consider a full-season version of this same comparison before
    committing to a full-array clock fix.
+
+## Follow-up — Full-Season, All-Receiver DBSCAN Correction (user flagged short-window scope)
+
+- Author: GitHub Copilot
+- Date: 2026-10-01, afternoon (step 5).
+- Tags: #2025 #full-season #all-receivers #dbscan #scope-correction
+- Scope: user corrected that 2025 work must cover the full season
+  (2025-06-04 to 2025-09-17) and all 20 receivers, not the short 2-day test
+  window used in steps 3-4. Read-only diagnostic; no detections modified.
+
+### What ran
+`beacon_pairwise_dbscan.py` with the currently configured beacon (ZOI02/7D2D)
+and anchor (ZOI09), fixed approved parameters unchanged, over the full
+2025-06-04..2025-09-17 window. Command exited with PowerShell reporting exit
+code 1, but the script printed its full results table and final "Outputs:"
+line with no traceback — the same stderr-via-`2>&1` artifact seen on the
+confirmed-successful 2-day run. Verified by confirming the summary CSV
+(`ZOI02_7D2D_anchor_ZOI09_summary.csv`) exists in the output directory.
+
+### Result (full season vs the earlier 2-day test, same beacon/anchor)
+- Beacon detections: 4,152,282 (vs 82,215 for 2 days — in line with ~50x more
+  calendar time).
+- Paired epochs: 1,851,918; anchor epochs 123,060; anchor-side (suspect)
+  epochs 23,922 (~19.4% of anchor epochs) — proportionally much higher than
+  the 2-day test's 86/2,675 (~3.2%). Noise accumulates over the season in a
+  way the short window did not reveal (consistent with known periodic
+  whole-second clock jumps, not a one-time anomaly).
+- CFD05 now appears (4,412 detections, far sparser than other receivers,
+  consistent with its known hydrophone issue) — it was simply absent from
+  the 2-day window before, not excluded by any code/config problem. All 20
+  receivers are now represented (18 non-anchor/non-beacon rows + anchor +
+  beacon host).
+- CFD receivers remain consistently noisier than ZOI receivers at full-season
+  scale too (e.g. CFD04 1,974 clean-epoch budget violations vs ZOI08's 218),
+  matching prior findings.
+
+### Interpretation and limits
+- This is still only the anchor=ZOI09 configuration at full season. The
+  reference-clock comparison (ZOI08 vs ZOI09) from the prior follow-up has
+  NOT yet been repeated at full-season scale — only the 2-day comparison
+  exists so far. Do not treat the full-season anchor_suspect rate here as
+  settling the reference-clock question; it only shows ZOI09's own full-season
+  behavior, not a comparison.
+- No parameter, geometry, or clock value changed. No source detections
+  modified. Gate 2 report/sign-off still not produced.
+
+### Next Steps
+1. If directed: rerun with anchor=ZOI08 over the same full season to extend
+   the reference-clock comparison properly (not yet done).
+2. Continue 2019 monitoring in parallel (unaffected by this work; separate
+   local database).
+
+## Follow-up — Reference-Clock Screen Across ALL 19 Candidate Receivers
+
+- Author: GitHub Copilot
+- Date: 2026-10-01, afternoon (step 6).
+- Tags: #2025 #reference-clock #dbscan #screen #not-a-final-decision
+- Scope: user asked to find the best reference clock "out of ALL of them",
+  not just the ZOI08/ZOI09 pair tested earlier. Read-only diagnostic; no
+  source detections modified; no config/parameter changed.
+
+### Method
+Running the full approved `beacon_pairwise_dbscan.py` (same fixed parameters,
+same beacon ZOI02/7D2D) once per candidate anchor at full-season scale would
+take an estimated ~19 x 18 min (~5.7 hours), competing with the concurrently
+running 2019 Deng job. Instead, screened all candidates on the cheap 2-day
+test window (2025-06-20..06-22, same window as the earlier ZOI08/ZOI09
+comparison) first: ~18-35 s per candidate, ~8 minutes total for all 19. This
+is the literal, unmodified production script run per candidate (not an
+approximation/reconstruction), just on the shorter window for speed.
+Candidates: all 20 receivers except the beacon host (ZOI02). Outputs in
+`output/dbscan_screen_<ANCHOR>/`; full comparison table in
+`output/reference_clock_screen_2day.csv` and
+`output/run_2025_reference_clock_screen.log`.
+
+### Result (ranked by anchor-side/suspect epochs, best first)
+| Rank | Anchor | Anchor-side epochs | Mean noise fraction | Mean clean RMS (ms) |
+|---|---|---|---|---|
+| 1 | **ZOI08** | **11** | 0.0856 | 0.1147 |
+| 2 | ZOI06 | 33 | 0.1083 | 0.0873 |
+| 3 | ZOI10 | 60 | 0.0907 | 0.1122 |
+| 4 | ZOI07 | 73 | 0.0904 | 0.1069 |
+| 5 | ZOI09 (currently configured masterReceiver) | 86 | 0.0919 | 0.1072 |
+| ... | (13 more candidates, 91-545 anchor-side epochs) | | | |
+| last | CFD02 | 545 | 0.1515 | 0.2068 |
+| FAILED | CFD05 | n/a — too few beacon epochs in this window (known sparse/hydrophone-issue receiver) | | |
+
+ZOI08 is the clear best candidate by a wide margin: less than a third of the
+anchor-side epochs of the next-best (ZOI06, 33), and roughly 2-50x fewer than
+most other candidates. This confirms and strengthens the earlier 2-candidate
+(ZOI08 vs ZOI09) comparison using the full field of options, not just two.
+CFD receivers are uniformly worse candidates than ZOI receivers, consistent
+with all prior CFD clock-noise findings.
+
+### Interpretation and limits
+- Still only the 2-day test window; the full-season anchor=ZOI08 run has NOT
+  been done (only full-season anchor=ZOI09 exists so far, from the prior
+  follow-up). A full-season confirmation of ZOI08 is the natural next check
+  before treating this as final.
+- CFD05 cannot serve as an anchor at all on this window (insufficient beacon
+  epochs); this is a data-sparsity fact about CFD05, not a code defect.
+- This is comprehensive read-only diagnostic evidence across every receiver,
+  not a decision. Per project rules, the reference-clock choice is still
+  Kevin's to approve. No `masterReceiver` or other config value was changed.
+
+### Next Steps
+1. Recommend to Kevin: ZOI08 as reference clock, backed by this all-receiver
+   comparison.
+2. If directed: confirm ZOI08 at full-season scale (the one remaining full
+   validation step) before treating this as settled.

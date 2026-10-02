@@ -368,6 +368,33 @@ class multipath_data_object():
 
                         # find where rows associated with this transmission and write the transmission number to those rows
                         self.data.loc[(self.data.seconds_fix >= dl) & (self.data.seconds_fix <= ul),'transNo'] = i
+
+                    # host stopped hearing the beacon: re-host detections outside its time span on the best-covered remaining receiver
+                    sf = self.data.seconds_fix.to_numpy()
+                    rec = self.data.Rec_ID.to_numpy()
+                    tn = self.data.transNo.to_numpy(dtype = float).copy()
+                    tol = 0.5 * self.pulseRate
+                    host_t = sf[rec == host_rec]
+                    todo = np.isnan(tn) & ((sf > host_t.max() + tol) | (sf < host_t.min() - tol))
+                    next_no = np.nanmax(tn) + 1
+                    while todo.any():
+                        names, counts = np.unique(rec[todo], return_counts = True)
+                        alt_t = np.sort(sf[todo & (rec == names[counts.argmax()])])
+                        epoch_t = alt_t[np.r_[True, np.diff(alt_t) >= tol]]
+                        x = sf[todo]
+                        pos = np.searchsorted(epoch_t, x)
+                        left = np.clip(pos - 1, 0, len(epoch_t) - 1)
+                        right = np.clip(pos, 0, len(epoch_t) - 1)
+                        use_right = np.abs(epoch_t[right] - x) < np.abs(x - epoch_t[left])
+                        nearest = np.where(use_right, right, left)
+                        hit = np.abs(epoch_t[nearest] - x) <= tol
+                        if not hit.any():
+                            break
+                        todo_idx = np.flatnonzero(todo)
+                        tn[todo_idx[hit]] = next_no + nearest[hit]
+                        next_no += len(epoch_t)
+                        todo &= np.isnan(tn)
+                    self.data['transNo'] = tn
                         
 
             
@@ -1160,17 +1187,31 @@ class position():
         c.close()
         conn.close()
 
-    def receiver_position_at(self, rec_id, timestamp, z_value):
-        """Return receiver X/Y from GPS at time, retaining legacy Z handling."""
+    def _receiver_track(self, rec_id):
         static = self.ephemeris[self.ephemeris.Rec_ID == rec_id].iloc[0]
         dynamic = self.dynamic_positions[self.dynamic_positions.Rec_ID == rec_id]
         if dynamic.empty:
-            return np.array([static.X_t, static.Y_t, z_value])
+            return static.X_t, static.Y_t, None
         dynamic = dynamic.sort_values('seconds').drop_duplicates('seconds', keep='last')
-        if timestamp < dynamic.seconds.min() or timestamp > dynamic.seconds.max():
+        seconds = dynamic.seconds.to_numpy()
+        return static.X_t, static.Y_t, (seconds, dynamic.X.to_numpy(), dynamic.Y.to_numpy(), dynamic.seconds.min(), dynamic.seconds.max())
+
+    def receiver_position_at(self, rec_id, timestamp, z_value, tracks=None):
+        """Return receiver X/Y from GPS at time, retaining legacy Z handling. tracks: optional dict reused across calls."""
+        if tracks is None:
+            track = self._receiver_track(rec_id)
+        else:
+            track = tracks.get(rec_id)
+            if track is None:
+                track = tracks[rec_id] = self._receiver_track(rec_id)
+        static_x, static_y, gps = track
+        if gps is None:
+            return np.array([static_x, static_y, z_value])
+        seconds, gps_x, gps_y, first, last = gps
+        if timestamp < first or timestamp > last:
             raise ValueError("No GPS position for %s at %.6f; refusing extrapolation" % (rec_id, timestamp))
-        x = np.interp(timestamp, dynamic.seconds, dynamic.X)
-        y = np.interp(timestamp, dynamic.seconds, dynamic.Y)
+        x = np.interp(timestamp, seconds, gps_x)
+        y = np.interp(timestamp, seconds, gps_y)
         return np.array([x, y, z_value])
     
     def Deng(self,print_output = False):
@@ -1186,10 +1227,29 @@ class position():
         
         SolutionA = pd.DataFrame(columns = Solution_Cols)
         SolutionB = pd.DataFrame(columns = Solution_Cols)
+        # rows are gathered and turned into a frame in chunks; appending to a growing frame per solution is quadratic
+        pending = {'A': [], 'B': []}
+        chunks = {'A': [], 'B': []}
+        def add_row(which, row):
+            pending[which].append(row.to_numpy()[0])
+            if len(pending[which]) >= 50000:
+                chunks[which].append(pd.DataFrame(np.array(pending[which], dtype = str), columns = Solution_Cols))
+                pending[which] = []
+        def collect_rows(which):
+            if pending[which]:
+                chunks[which].append(pd.DataFrame(np.array(pending[which], dtype = str), columns = Solution_Cols))
+                pending[which] = []
+            return pd.concat([pd.DataFrame(columns = Solution_Cols)] + chunks[which], ignore_index = True)
+        tracks = {}
+        z_by_rec = {}
+        for rec_id, z_val in zip(self.ephemeris.Rec_ID, self.ephemeris.Z_t):
+            z_by_rec.setdefault(rec_id, z_val)
         self.tag_data.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
+        by_trans = {k: g for k, g in self.tag_data.groupby('transNo', sort = False)}
+        no_rows = self.tag_data.iloc[0:0]
         tSteps = self.tag_data.transNo.unique()                                       # identify the unique transmissions
         for j in sorted(tSteps):
-            tDat = self.tag_data[self.tag_data.transNo == j]                   # get data associated with this transmission
+            tDat = by_trans.get(j, no_rows)                   # get data associated with this transmission
             tDat['timeStampFix'] = pd.to_datetime(tDat.seconds_fix, unit = 's')
             tDat['timeStampOriginal'] = pd.to_datetime(tDat.seconds, unit = 's')
             if len(tDat) >= 4: # in a perfect world, we have enogh receivers with enough observations to calculate a solution, we need at least 4
@@ -1240,25 +1300,19 @@ class position():
                         t3 = sub_dat.seconds_fix.iloc[3]                               # time of arrival 4
                         # get positional data of receivers
                         def z_at_t(t,Rec_ID):
-                            elev_ref = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Ref_Elev.values[0]
-                            if elev_ref == 'BM':
-                                return self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
-                            else:
-                                Zt = self.ephemeris[self.ephemeris.Rec_ID ==Rec_ID].Z_t.values[0]
-                                #t_Z = self.benchmark_elev - Zt
-                                return Zt
+                            return z_by_rec[Rec_ID]
                                 
-                        r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref))
+                        r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref), tracks)
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(ref,r0Pos))
                         self.z_translation = r0Pos[2]
-                        r1Pos = self.receiver_position_at(r1, t1, z_at_t(t1, r1))
+                        r1Pos = self.receiver_position_at(r1, t1, z_at_t(t1, r1), tracks)
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r1,r1Pos))      
-                        r2Pos = self.receiver_position_at(r2, t2, z_at_t(t2, r2))
+                        r2Pos = self.receiver_position_at(r2, t2, z_at_t(t2, r2), tracks)
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r2,r2Pos))                            
-                        r3Pos = self.receiver_position_at(r3, t3, z_at_t(t3, r3))
+                        r3Pos = self.receiver_position_at(r3, t3, z_at_t(t3, r3), tracks)
                         if print_output == True:
                             print ("The position of receiver %s is %s"%(r3,r3Pos))
                                                   
@@ -1303,8 +1357,8 @@ class position():
                                 row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,
                                                               'negative quadratic discriminant - no solution','']]),
                                                    columns=Solution_Cols)
-                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
-                                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
+                                add_row('A', row)
+                                add_row('B', row)
                                 sol_no = sol_no + 1
                                 tested.append(recs)
                                 continue
@@ -1324,7 +1378,7 @@ class position():
                                                             r0Pos[2] + S1a.item(2),
                                                             T_0a.item(0),
                                                             tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
-                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                                add_row('A', row)
                                 del row  
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
@@ -1334,7 +1388,7 @@ class position():
                                 if print_output == True:
                                     print ("No solution A found time step %s"%(j))
                                 row = pd.DataFrame(np.array([[j,sol_no, ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                                add_row('A', row)
                                 
                             if np.sign(T_0b) > 0:
                                 S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
@@ -1346,7 +1400,7 @@ class position():
                                                             r0Pos[2] + S1b.item(2),
                                                             T_0b.item(0),
                                                             tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
-                                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
+                                add_row('B', row)
                                 del row
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
@@ -1355,14 +1409,14 @@ class position():
                                 if print_output == True:
                                     print ("No solution B found time step %s"%(j))
                                 row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                                add_row('A', row)
 
                         except:
                             if print_output == True:
                                 fuck
                                 print ("Singular matrix encountered, no solution at transmission %s"%(j))
                             row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
-                            SolutionA = pd.concat([SolutionA, row], ignore_index=True)
+                            add_row('A', row)
 
                         #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
                         # increase solution counter for this timestep by 1
@@ -1375,9 +1429,12 @@ class position():
                 if print_output == True:
                     print ("Not enough receivers for a solution at time step %s"%(j))
                 row = pd.DataFrame(np.array([[j,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,9999.,'not enough receivers for solution','']]), columns = Solution_Cols)
-                SolutionA = pd.concat([SolutionA, row], ignore_index=True)
-                SolutionB = pd.concat([SolutionB, row], ignore_index=True)
-            
+                add_row('A', row)
+                add_row('B', row)
+
+        SolutionA = collect_rows('A')
+        SolutionB = collect_rows('B')
+
         def distF(row):
             pos1 = np.asarray(row['pos'])
             pos2 = np.asarray(row['nextPos'])

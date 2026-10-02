@@ -28,7 +28,7 @@ from scripts.parse_ats_raw_to_legacy import (
     resolve_time_shift,
 )
 from scripts.extract_dbscan_features import extract_features
-from scripts.beacon_pairwise_dbscan import classify, cluster
+from scripts.beacon_pairwise_dbscan import classify, cluster, filter_deep_beacon
 from scripts.legacy_pipeline import clock_fix_check, import_2019, receiver_sets, widen_table
 from scripts.cfd_gps_diagnostics import interpolate_positions
 from jsats3d import position, sos
@@ -191,6 +191,33 @@ class Test2025Adapter(unittest.TestCase):
         self.assertEqual(suspects, {t.iloc[12]})
         self.assertTrue((result[result.t_anchor == t.iloc[12]].dbscan_class == "anchor_suspect").all())
         self.assertEqual(int((result.dbscan_class == "noise").sum()), 0)
+
+    def test_deep_beacon_filter_rejects_late_first_arrival_and_later_arrivals(self):
+        n, base = 60, 1.75e9
+        rows = []
+        for k in range(n):
+            for j, rec in enumerate("ABCD"):
+                t = base + 62.7 * k + 0.010 * j + (0.020 if (rec == "B" and k == 30) else 0.0)
+                rows.append(dict(Rec_ID=rec, Tag_ID="T1", seconds=t, seconds_fix=t, transNo=float(k), det_rank=1.0, multipath=0))
+        later = dict(Rec_ID="C", Tag_ID="T1", seconds=base + 5.03, seconds_fix=base + 5.03, transNo=0.0, det_rank=2.0, multipath=1)
+        orphan = dict(Rec_ID="B", Tag_ID="T1", seconds=base + 1.0, seconds_fix=base + 1.0, transNo=np.nan, det_rank=1.0, multipath=0)
+        with tempfile.TemporaryDirectory() as folder:
+            db = str(Path(folder) / "t.db")
+            con = sqlite3.connect(db)
+            pd.DataFrame(rows + [later, orphan]).to_sql("tblDetectionFilterPrimary", con, index=False)
+            pd.DataFrame({"Tag_ID": ["T1"], "pulseRate": [60.0]}).to_sql("tblTag", con, index=False)
+            con.close()
+            anchor, summary, dropped, _ = filter_deep_beacon(db, "T1")
+            filter_deep_beacon(db, "T1")  # rerun replaces the tag's rows
+            con = sqlite3.connect(db)
+            out = pd.read_sql("select * from tblDetectionFilterSecondary", con)
+            con.close()
+        self.assertEqual(anchor, "A")
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(out), n * 4 + 1)
+        rejected = out[out.multipath_prediction == 1]
+        self.assertEqual(sorted(zip(rejected.Rec_ID, rejected.transNo)), [("B", 30.0), ("C", 0.0)])
+        self.assertEqual(rejected[rejected.Rec_ID == "C"].dbscan_class.iloc[0], "later_arrival")
 
     def test_raw_parser_time_zone_offsets(self):
         self.assertEqual(parse_utc_offset("-07z"), -7.0)

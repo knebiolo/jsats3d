@@ -88,7 +88,7 @@ work_dir          = ''              # blank = output/<db name>_legacy
 # Parameters APPROVED 2026-10-01 (project lead), fixed study wide in beacon_pairwise_dbscan.py:
 # 0.5 ms timing budget, 2.5 period window, min_samples 3, anchor side >= 50% of >= 4 receivers,
 # steady reflection cap 250 ms.
-run             = true
+run             = false
 beacon_receiver = 'ZOI02'
 anchor          = 'ZOI09'
 # Blank = use the [selection] start/end.
