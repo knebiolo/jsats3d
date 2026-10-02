@@ -1157,7 +1157,9 @@ class position():
         self.dynamic_positions = pd.DataFrame(columns=['Rec_ID', 'seconds', 'X', 'Y'])
         tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type = 'table'", con=conn).name.tolist()
         if 'tblReceiverGPS' in tables:
-            self.dynamic_positions = pd.read_sql('SELECT * FROM tblReceiverGPS', con=conn)
+            self.dynamic_positions = pd.read_sql(
+                'SELECT * FROM tblReceiverGPS WHERE Rec_ID IN (%s)' % ','.join('?' * len(self.resolved_clocks)),
+                con=conn, params=list(self.resolved_clocks))
             self.dynamic_positions['seconds'] = (
                 pd.DatetimeIndex(self.dynamic_positions.dateTime).as_unit('ns').astype(np.int64) / 1.0e9
             )
@@ -1245,11 +1247,11 @@ class position():
         for rec_id, z_val in zip(self.ephemeris.Rec_ID, self.ephemeris.Z_t):
             z_by_rec.setdefault(rec_id, z_val)
         self.tag_data.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
-        by_trans = {k: g for k, g in self.tag_data.groupby('transNo', sort = False)}
+        by_trans = self.tag_data.groupby('transNo', sort = False).indices
         no_rows = self.tag_data.iloc[0:0]
         tSteps = self.tag_data.transNo.unique()                                       # identify the unique transmissions
         for j in sorted(tSteps):
-            tDat = by_trans.get(j, no_rows)                   # get data associated with this transmission
+            tDat = self.tag_data.iloc[by_trans[j]] if j in by_trans else no_rows                   # get data associated with this transmission
             tDat['timeStampFix'] = pd.to_datetime(tDat.seconds_fix, unit = 's')
             tDat['timeStampOriginal'] = pd.to_datetime(tDat.seconds, unit = 's')
             if len(tDat) >= 4: # in a perfect world, we have enogh receivers with enough observations to calculate a solution, we need at least 4
