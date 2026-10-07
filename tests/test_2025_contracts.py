@@ -115,12 +115,14 @@ class Test2025Adapter(unittest.TestCase):
             root = Path(directory)
             original = root / "SR18078_250606.csv"
             cleaned = root / "SR18078_250606_cleaned.csv"
-            false_match = root / "SR18078250610_121101_recovery.csv"
+            recovery = root / "SR18078250610_121101_recovery.csv"
+            other_serial = root / "SR19078250610_121101_recovery.csv"
+            longer_serial = root / "SR180789_250610.csv"
             daily = root / "SR18078D250619_000101_cleaned.csv"
-            for path in (original, cleaned, false_match, daily):
+            for path in (original, cleaned, recovery, other_serial, longer_serial, daily):
                 path.write_text("", encoding="utf-8")
             result = discover_target_files(root, {"18078"})
-            self.assertEqual(result, sorted([cleaned, daily]))
+            self.assertEqual(result, sorted([cleaned, recovery, daily]))
 
     def test_raw_parser_decodes_internal_groups(self):
         timestamp = pd.Timestamp("2025-06-06 08:54:07.952711")
@@ -402,6 +404,15 @@ class TestRunData(unittest.TestCase):
         self.assertEqual(solver.receiver_position_at("ZOI01", 150.0, -4.0).tolist(), [50.0, 60.0, -4.0])
         with self.assertRaises(ValueError):
             solver.receiver_position_at("CFD04", 250.0, -3.0)
+
+    def test_receiver_z_follows_water_level_only_for_flagged_receivers(self):
+        solver = position.__new__(position)
+        self.assertEqual(solver.receiver_z_at("ZOI07", 100.0, -2.3), -2.3)   # objects without the attribute: constant
+        solver.wsel_followers = {"ZOI07": 262.0}                                # reference surface, metres
+        solver.WSELfun = lambda t: 262.0 + 0.5 * (t - 100.0) / 100.0            # surface rises 0.5 m per 100 s
+        self.assertAlmostEqual(solver.receiver_z_at("ZOI07", 100.0, -2.3), -2.3)
+        self.assertAlmostEqual(solver.receiver_z_at("ZOI07", 200.0, -2.3), -1.8)
+        self.assertEqual(solver.receiver_z_at("ZOI01", 200.0, -11.0), -11.0)    # fixed elevation receivers do not move
 
     def test_acoustic_codes_are_upper_cased_and_excel_damage_reversed_only_when_unique(self):
         self.assertEqual(normalize_acoustic_code("27a0"), ("27A0", None))

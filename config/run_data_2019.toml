@@ -8,11 +8,11 @@ overwrite = false
 
 [paths]
 # One subfolder per receiver named by Rec_ID (R01, R02, ...), holding the Teknologic CSV files.
-raw_root      = 'K:\Jobs\3870\014\Calcs\Data\Synch_1'
-tag_csv       = 'K:\Jobs\3870\014\Calcs\Data\tblTag.csv'                  # Tag_ID, pulseRate, TagType
-receiver_csv  = 'K:\Jobs\3870\014\Calcs\Data\tblReceiver_Initial.csv'    # legacy receiver metadata
-wsel_csv      = 'K:\Jobs\3870\014\Calcs\Data\tblWSEL.csv'                 # timeStamp, WSEL
-temp_csv      = 'K:\Jobs\3870\014\Calcs\Data\tblTemp.csv'                 # meas_dt, location, depth_ft, temp_celcius
+raw_root      = 'data\2019\Synch_1'
+tag_csv       = 'data\2019\tblTag.csv'                                    # Tag_ID, pulseRate, TagType
+receiver_csv  = 'data\2019\tblReceiver_Initial.csv'                       # legacy receiver metadata
+wsel_csv      = 'data\2019\tblWSEL.csv'                                   # timeStamp, WSEL
+temp_csv      = 'data\2019\tblTemp.csv'                                   # meas_dt, location, depth_ft, temp_celcius
 output_db     = 'output\cowlitz_2019_synch_1_recreated.db'
 
 [selection]
@@ -29,7 +29,7 @@ bm_elev          = 262.585     # 861.5 ft / 3.28084
 bm_elev_units    = 'meters'
 output_units     = 'meters'
 master_receiver  = 'R05'
-synch_time_start = '2018-06-07 13:17:08'   # canonical Synch_1 synchronization start
+synch_time_start = '2019-04-19 14:05:22'   # matches legacy tblStudyParameters.synch_time in cowlitz_2019_synch_1.db
 synch_time_end   = '2019-05-24 12:25:00'
 
 [legacy]

@@ -26,3 +26,7 @@ output/*
 !output/positioning/
 output/positioning/*
 !output/positioning/.gitkeep
+
+# Local copies of raw input data (large, read from K:); keep only the README
+data/*
+!data/README.md

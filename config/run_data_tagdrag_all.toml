@@ -1,0 +1,65 @@
+# Run file for the 2025 TAG DRAG database with ALL six drag/test tags, whole test week (created 2026-10-05).
+# Tags from cowlitz_AT_2025_testing_sheets.xlsx: FC36 and FFD3 (forebay, upstream, ENT, debris barrier),
+# CC74, 10D3, 5CC5, 7FA2 (CFNSC float drags and holds). Window 2025-06-05 00:00 to 06-12 00:00 (database clock = PDT).
+# Anchor ZOI03, master ZOI08 (project lead, 2026-10-05). K: is read only; everything is written to C:.
+# Run from the repo folder:  python scripts/run_data.py config/run_data_tagdrag_all.toml   (add --dry-run to check)
+# A blank value ('' or []) means "not used" / "no filter".
+
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\jsats3d_2025_tagdrag_all_20250605_zoi02fix.db'
+
+[selection]
+species   = []
+# The drag/test tags from the testing sheets; beacons are always added when tags are filtered.
+tags      = ['FFD3', 'FC36', 'CC74', '10D3', '5CC5', '7FA2']
+start     = '2025-06-05 00:00:00'
+end       = '2025-06-12 00:00:00'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+# Master ZOI08 and the 3D receivers exist only from 2025-06-10 08:12 (ZOI07-09), so steps 2-7 use this window.
+synch_time_start = '2025-06-10 08:00:00'
+synch_time_end   = '2025-06-12 00:00:00'
+pulse_rates      = {}
+
+[legacy]
+# Steps run one group at a time from inline Python; the full process() run stays off.
+run               = false
+env               = 'jsat_legacy'
+method            = 'KNN'
+# Reference sets for the week; receivers not yet installed on a day simply have no detections that day.
+# CFD09 excluded (SR19026 was at the CFD05 location until about 06-11 12:40), ZOI11 and CFD01 excluded.
+surface_receivers = ['ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+fixed_z_2d        = ''
+deep_solution     = 'B'
+study_tags        = []
+signal_proxies    = false
+work_dir          = ''
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-10 08:00:00'
+end             = '2025-06-12 00:00:00'
+output_dir      = ''

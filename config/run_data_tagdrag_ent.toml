@@ -1,0 +1,62 @@
+# Run file for the 2025 TAG DRAG database for lines ENT-01 and ENT-05 (created 2026-10-07).
+# Same window and decisions as config/run_data_tagdrag.toml: window 2025-06-10 09:00-13:00 (database clock = PDT),
+# master ZOI08, pairwise DBSCAN anchor ZOI03 (project lead 2026-10-04). Drag tags FC36 and FFD3 only
+# (0B0A, 0AC6, 493F are released fish, not drag tags). ENT-01 10:24-10:26 and ENT-05 10:50-10:54 lie inside the window.
+# K: is read only; everything is written to C:.
+# Run from the repo folder:  python scripts/run_data.py config/run_data_tagdrag_ent.toml   (add --dry-run to check)
+# A blank value ('' or []) means "not used" / "no filter".
+
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\jsats3d_2025_tagdrag_ent_anchorZOI03.db'
+
+[selection]
+species   = []
+tags      = ['FFD3', 'FC36']
+start     = '2025-06-10 09:00:00'
+end       = '2025-06-10 13:00:00'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-10 09:00:00'
+synch_time_end   = '2025-06-10 13:00:00'
+pulse_rates      = {}
+
+[legacy]
+# Steps run one group at a time from inline Python; the full process() run stays off.
+run               = false
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+fixed_z_2d        = ''
+deep_solution     = 'B'
+study_tags        = []
+signal_proxies    = false
+work_dir          = ''
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-10 09:00:00'
+end             = '2025-06-10 13:00:00'
+output_dir      = ''

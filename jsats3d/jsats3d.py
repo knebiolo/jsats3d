@@ -1154,6 +1154,16 @@ class position():
         self.ephemeris = pd.read_sql(recSQL, con = conn)
         self.ephemeris.set_index('Rec_ID',drop = False,inplace = True)
         self.convex_hull = ConvexHull(np.array(self.ephemeris[['X_t','Y_t','Z_t']]))
+        # receivers that float with the water surface keep a constant depth below it (tblReceiver.FollowsWSEL = 1);
+        # ZRefWSEL_ft is the water surface elevation (ft) their Z_t depth was taken at
+        self.wsel_followers = {}
+        if 'FollowsWSEL' in self.ephemeris.columns:
+            flagged = self.ephemeris[self.ephemeris.FollowsWSEL.fillna(0).astype(int) == 1]
+            for rec_id in flagged.Rec_ID:
+                ref_ft = flagged.loc[rec_id, 'ZRefWSEL_ft'] if 'ZRefWSEL_ft' in flagged.columns else np.nan
+                if pd.isna(ref_ft):
+                    raise ValueError('%s follows WSEL but tblReceiver.ZRefWSEL_ft is empty' % rec_id)
+                self.wsel_followers[rec_id] = float(ref_ft) / 3.28084
         self.dynamic_positions = pd.DataFrame(columns=['Rec_ID', 'seconds', 'X', 'Y'])
         tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type = 'table'", con=conn).name.tolist()
         if 'tblReceiverGPS' in tables:
@@ -1216,7 +1226,17 @@ class position():
         y = np.interp(timestamp, seconds, gps_y)
         return np.array([x, y, z_value])
     
-    def Deng(self,print_output = False):
+    def receiver_z_at(self, rec_id, timestamp, z_value):
+        """Receiver Z at time: constant, except receivers that float with the water surface, which move
+        with WSEL(t) relative to the reference surface their Z_t depth was taken at (no extrapolation of WSEL)."""
+        ref = getattr(self, 'wsel_followers', {}).get(rec_id)
+        if ref is None:
+            return z_value
+        return z_value + float(self.WSELfun(timestamp)) - ref
+    
+    def Deng(self,print_output = False, water_column = False):
+        # water_column: flag solutions above the water surface (WSEL at the transmission) or more than 4 m below
+        # the lowest receiver as 'outside water column - rejected'; off by default to keep legacy output unchanged
         def point_in_hull(point,hull):
             tolerance = 1e-12
             return all(
@@ -1302,7 +1322,7 @@ class position():
                         t3 = sub_dat.seconds_fix.iloc[3]                               # time of arrival 4
                         # get positional data of receivers
                         def z_at_t(t,Rec_ID):
-                            return z_by_rec[Rec_ID]
+                            return self.receiver_z_at(Rec_ID, t, z_by_rec[Rec_ID])
                                 
                         r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref), tracks)
                         if print_output == True:
@@ -1394,7 +1414,7 @@ class position():
                                 
                             if np.sign(T_0b) > 0:
                                 S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
-                                point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
+                                point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1b.item(1),r0Pos[2] + S1b.item(2)])
                                 in_hull = point_in_hull(point,self.convex_hull)
                                 row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
                                                               r0Pos[0] + S1b.item(0),
@@ -1411,14 +1431,14 @@ class position():
                                 if print_output == True:
                                     print ("No solution B found time step %s"%(j))
                                 row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                add_row('A', row)
+                                add_row('B', row)
 
                         except:
                             if print_output == True:
-                                fuck
                                 print ("Singular matrix encountered, no solution at transmission %s"%(j))
                             row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
                             add_row('A', row)
+                            add_row('B', row)
 
                         #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
                         # increase solution counter for this timestep by 1
@@ -1452,6 +1472,15 @@ class position():
         SolutionB['Y'] = pd.to_numeric(SolutionB['Y'])
         SolutionB['Z'] = pd.to_numeric(SolutionB['Z'])
         SolutionB['ToA'] = pd.to_numeric(SolutionB['ToA'])
+
+        if water_column:
+            valid = self.WSELfun.y > 0                                         # tblWSEL can hold zero placeholders
+            surf_t, surf_z = self.WSELfun.x[valid], self.WSELfun.y[valid]
+            z_floor = float(self.ephemeris.Z_t.min()) - 4.0
+            for sol in (SolutionA, SolutionB):
+                found = sol.comment == 'solution found'
+                outside = (sol.Z > np.interp(sol.ToA, surf_t, surf_z)) | (sol.Z < z_floor)
+                sol.loc[found & outside, 'comment'] = 'outside water column - rejected'
 
         self.DengSolutionA_unfiltered = SolutionA
         self.DengSolutionB_unfiltered = SolutionB 
@@ -1507,7 +1536,7 @@ class position():
                 sub = tDat.iloc[list(combo)]
                 recs = sub.Rec_ID.tolist()
                 times = sub.seconds_fix.to_numpy()
-                pos = [self.receiver_position_at(r, t, self.ephemeris.loc[r, 'Z_t']) for r, t in zip(recs, times)]
+                pos = [self.receiver_position_at(r, t, self.receiver_z_at(r, t, self.ephemeris.loc[r, 'Z_t'])) for r, t in zip(recs, times)]
                 SoS = float(sos(self.interpolator(times[0])))
                 try:
                     roots = self.deng_2d_roots(pos[0], pos[1], pos[2], round(times[1] - times[0], 6),

@@ -45,6 +45,11 @@ ATS_EXTENSION_COLUMNS = [
 
 # Median single-receiver burst spacing from the 2026-09-24 audit; provisional pending PM approval.
 PROVISIONAL_STUDY_PULSE_RATES = {"FC36": 3.038, "0B0A": 3.024, "0AC6": 3.204, "493F": 3.155}
+# Receivers on the floating debris barrier keep a constant depth below the water surface (Drew, 2026-10-05); all
+# other receivers keep a fixed elevation. ZRefWSEL_ft is the water surface the configured depths are relative to:
+# first available forebay level of the deployment week (2025-06-05 11:15, TagDrag_WSE + 0.8905 ft). Assumption.
+WSEL_FOLLOWING_RECEIVERS = ("ZOI07", "ZOI08", "ZOI09")
+Z_REFERENCE_WSEL_FT = 862.46
 DD_N_STRING_COLUMNS = ["DD_N_0p5", "DD_N_1p5", "DD_N_9", "DD_N_18"]
 RECEIVER_METADATA_COLUMNS = {
     "Receiver Time Zone Offset": "UTCOffset",
@@ -124,6 +129,8 @@ def load_receiver_table(gps_path, config_path):
     receivers["Z_t"] = receivers["Z"]
     # Z is depth below the surface at deployment, not a benchmark elevation; BM_Elev and mount class are unresolved.
     receivers["ZReference"] = "depth_below_surface_at_deployment"
+    receivers["FollowsWSEL"] = receivers["Rec_ID"].isin(WSEL_FOLLOWING_RECEIVERS).astype(int)
+    receivers["ZRefWSEL_ft"] = np.where(receivers["FollowsWSEL"] == 1, Z_REFERENCE_WSEL_FT, np.nan)
     origin_x = receivers["easting"].min()
     origin_y = receivers["northing"].min()
     receivers["X"] = receivers["easting"] - origin_x
@@ -136,6 +143,7 @@ def load_receiver_table(gps_path, config_path):
             receivers[target] = receivers[source] if source in receivers else pd.NA
     # easting/northing (the coordinate origin X/Y are offset from) are kept for load_receiver_gps.
     receivers = receivers[["Rec_ID", "Tag_ID", "Ref_Elev", "X", "Y", "Z", "X_t", "Y_t", "Z_t", "ZReference",
+                           "FollowsWSEL", "ZRefWSEL_ft",
                            "easting", "northing", *RECEIVER_METADATA_COLUMNS.values()]]
     return receivers
 

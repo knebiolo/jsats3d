@@ -53,8 +53,9 @@ RAW_COLUMNS = [
 INTERNAL_PATTERN = re.compile(
     r"^(\S{6}) (\S{4}) (\S{2}) (\S)(\S{3}) (\S{3}) (\S)$"
 )
-# Serial ends at "_" or "."; ATS daily files instead put "D<yymmdd>" right after it (SR20026D250619_000101).
-SERIAL_PATTERN = re.compile(r"^SR(\d+)(?=[_.]|D\d{6}_)", re.IGNORECASE)
+# Serial ends at "_" or "."; ATS daily files put "D<yymmdd>" right after it (SR20026D250619_000101), and one
+# recovery file has the date glued on (SR18078250610_121101_recovery, ZOI02 06-10 to 06-18).
+SERIAL_PATTERN = re.compile(r"^SR(\d+?)(?=[_.]|D\d{6}_|\d{6}_)", re.IGNORECASE)
 CORRECTED_SUFFIXES = ("_cleaned", "_recovered", "_recovery")
 STATUS_MARKERS = {
     "GPS111", "RTC222", "001111", "006600", "007700", "0000SL",

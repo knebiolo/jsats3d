@@ -290,12 +290,12 @@ def tag_multipath(db, tag, work, method):
     return True
 
 
-def deng(db, tag, receivers, out, figures):
+def deng(db, tag, receivers, out, figures, water_column=False):
     pos = jsats3d.position(tag, receivers, str(db), str(out), str(figures))
     if pos.tag_data.empty:
         print("WARNING: tag %s has no filtered detections at these receivers; no positions" % tag)
         return None
-    pos.Deng()
+    pos.Deng(water_column=water_column)
     return pos
 
 
