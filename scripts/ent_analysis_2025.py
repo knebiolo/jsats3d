@@ -139,7 +139,7 @@ def legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2):
 
 
 
-def item12(d, db):
+def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
     """Legacy Deng root-B centroid XYZ, scored against holdout drag GPS and depths."""
     import matplotlib.pyplot as plt
 
@@ -185,7 +185,7 @@ def item12(d, db):
 
     print("\n=== ITEM 12: Legacy Deng pipeline XYZ vs holdout drag GPS and recorded depths (PNGs in %s) ===" % OUT)
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
-    p3 = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, T01, ToA, in_hull from tblPositions_Deng where comment = 'solution found'", con)
+    p3 = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, T01, ToA, in_hull from %s where comment = 'solution found'" % table, con)
     con.close()
     p3["t0"] = pd.to_numeric(p3.ToA) - pd.to_numeric(p3.T01)
     legacy_b = p3[(p3.solution == "B") & np.isfinite(p3[["X", "Y", "Z", "t0"]]).all(axis=1)].copy()
@@ -238,7 +238,7 @@ def item12(d, db):
             y_max = max(float(tr.y.max()), float(d.xyz.Y_t.max())) + 15.0
             z_min, z_max = min(float(d.xyz.Z_t.min()), zt) - 5.0, 2.0
             for name, _, file_token in variants:
-                if name not in scored:
+                if name not in scored or (plot_tokens and file_token not in plot_tokens):
                     continue
                 blue_track = scored[name]
                 fig = plt.figure(figsize=(9, 7))
@@ -280,14 +280,19 @@ def main():
     ap.add_argument("--gps", default=str(GPS_FILE), help="holdout GPS file; never used to solve positions")
     ap.add_argument("--only", nargs="+", type=int, choices=[12], default=[12])
     ap.add_argument("--out", default="analysis", help="folder name under output/2025_review for the CSVs")
+    ap.add_argument("--table", default="tblPositions_Deng", choices=["tblPositions_Deng", "tblPositions_DengDBSCAN"])
+    ap.add_argument("--plots", nargs="+", default=None, help="plot file tokens to draw, e.g. 3D_legacy_B (default all)")
+    ap.add_argument("--lines", nargs="+", default=["ENT-01", "ENT-05"], help="drag lines to score and plot (default ENT-01 ENT-05)")
     args = ap.parse_args()
     global OUT
     OUT = REPO / "output" / "2025_review" / args.out
     OUT.mkdir(parents=True, exist_ok=True)
+    global LINES
+    LINES = tuple(args.lines)
     d = Data(args.db, args.gps)
     print("database %s | tags %s | lines %s | transmissions in the line windows: %s" % (args.db, list(TAGZ), LINES, {k: len(v) for k, v in d.tx.items()}))
     if 12 in args.only:
-        item12(d, args.db)
+        item12(d, args.db, args.table, args.plots)
 
 
 if __name__ == "__main__":

@@ -142,13 +142,13 @@ def clock_surface_run(c):
 
 
 def deep_beacons_done(c):
-    return all(count(c.db, "tblDetectionFilterSecondary", "where Tag_ID = ?", (t,)) > 0 for t in c.deep_tags.values())
+    return all(count(c.db, "tblDetectionFilterSecondary", "where Tag_ID = ?", (t,)) > 0 for t in c.deng_tags.values())
 
 
 def deep_beacons_run(c):
     """Step 5: first-arrival ranking of each deep receiver's beacon, then the stationary-beacon DBSCAN filter."""
     notes = {}
-    for rec, tag in c.deep_tags.items():
+    for rec, tag in c.deng_tags.items():
         primary = lp.fresh_folder(c.work / "multipath_primary")
         data = jsats3d.multipath_data_object(tag, str(c.db), primary)
         if data.empty:
@@ -172,25 +172,29 @@ def deep_positions_done(c):
         return False
     root = c.run["legacy"].get("deep_solution", "B")
     return all(count(c.db, "tblDeepReceiver_step6_solution", "where Rec_ID = ? and solution_root = ?",
-                     (receiver, root)) == 1 for receiver in c.deep)
+                     (receiver, root)) == 1 for receiver in c.deng)
 
 
 def deep_positions_run(c):
-    """Step 6: legacy Deng configured-root median for each deep receiver beacon."""
+    """Step 6: legacy Deng configured-root median for each Deng receiver beacon (deep, then static surface)."""
     rec = lp.query(c.db, "select Rec_ID, Tag_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
     root = c.run["legacy"].get("deep_solution", "B")
     if root not in ("A", "B"):
         raise ValueError("deep_solution must be A or B")
     out = Path(lp.fresh_folder(c.work / "deep_receivers"))
     rows, notes = [], {}
-    for r in c.deep:
-        pos = lp.deng(c.db, rec.at[r, "Tag_ID"], c.reference, out, c.work / "figures")
-        if pos is None:
-            raise RuntimeError("check failed: no filtered detections for the beacon of %s" % r)
-        sols = getattr(pos, "DengSolution%s_unfiltered" % root)
+    for r in c.deng:
+        refs = [x for x in (c.reference if r in c.deep else c.reference_2d) if x != r]
+        pos = lp.deng(c.db, rec.at[r, "Tag_ID"], refs, out, c.work / "figures")
+        sols = getattr(pos, "DengSolution%s_unfiltered" % root) if pos is not None else pd.DataFrame({"comment": []})
         sols = sols[sols.comment == "solution found"]
-        if sols.empty:
+        if sols.empty and r in c.deep:
             raise RuntimeError("no legacy root-%s solutions for deep receiver %s" % (root, r))
+        if sols.empty:
+            # surface beacon not positionable from its references: configured position kept
+            rows.append((r, rec.at[r, "Tag_ID"], float(rec.at[r, "X_t"]), float(rec.at[r, "Y_t"]), float(rec.at[r, "Z_t"]), 0, 0, root))
+            notes[r] = {"found": 0, "references": len(refs), "skipped": "configured position kept"}
+            continue
         med = sols[["X", "Y", "Z"]].median()
         rows.append((r, rec.at[r, "Tag_ID"], float(med.X), float(med.Y), float(med.Z), int(len(sols)), int(sols.transNo.nunique()), root))
         notes[r] = {"found": int(len(sols)), "solution_root": root,
@@ -211,8 +215,9 @@ def adopt_deep_done(c):
         return False
     sol = lp.query(c.db, "select Rec_ID, X, Y, Z from tblDeepReceiver_step6_solution").set_index("Rec_ID")
     rec = lp.query(c.db, "select Rec_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
-    return all(r in sol.index and np.allclose(rec.loc[r, ["X_t", "Y_t", "Z_t"]].astype(float).values,
-                                              sol.loc[r, ["X", "Y", "Z"]].astype(float).values, atol=1e-6) for r in c.deep)
+    solved = {r: [sol.at[r, "X"], sol.at[r, "Y"], sol.at[r, "Z"] if r in c.deep else rec.at[r, "Z_t"]] for r in sol.index}
+    return all(r in solved and np.allclose(rec.loc[r, ["X_t", "Y_t", "Z_t"]].astype(float).values, solved[r], atol=1e-6)
+                                              for r in c.deng)
 
 
 def adopt_deep_run(c):
@@ -221,8 +226,10 @@ def adopt_deep_run(c):
     sol = lp.query(c.db, "select Rec_ID, X, Y, Z from tblDeepReceiver_step6_solution").set_index("Rec_ID")
     cfg = lp.query(c.db, "select Rec_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
     notes = {}
-    for r in c.deep:
-        x, y, z = (float(sol.at[r, k]) for k in ("X", "Y", "Z"))
+    for r in c.deng:
+        x, y = (float(sol.at[r, k]) for k in ("X", "Y"))
+        # surface Z stays configured; Deng XY only
+        z = float(sol.at[r, "Z"]) if r in c.deep else float(cfg.at[r, "Z_t"])
         notes[r] = {"X": round(x, 2), "Y": round(y, 2), "Z": round(z, 2),
                     "shift_m": round(float(np.hypot(x - cfg.at[r, "X_t"], y - cfg.at[r, "Y_t"])), 2)}
         lp.execute(c.db, "update tblReceiver set X_t = %r, Y_t = %r, Z_t = %r where Rec_ID = '%s'" % (x, y, z, r))
@@ -231,7 +238,7 @@ def adopt_deep_run(c):
     if lp.PROGRESS_TABLE in tables:
         con.execute("delete from %s where Tag_ID in ('__ats_phase2__', '__ats_fish_two_stage__')" % lp.PROGRESS_TABLE)
     if "tblDetectionClockFixed" in tables:
-        con.execute("delete from tblDetectionClockFixed where Rec_ID in (%s)" % ",".join("'%s'" % r for r in c.deep))
+        con.execute("delete from tblDetectionClockFixed where Rec_ID in (%s)" % ",".join("'%s'" % r for r in c.deng))
     inl = ",".join("'%s'" % t for t in c.tags)
     for t in ("tblDetectionFilterPrimary", "tblDetectionFilterSecondary"):
         if t in tables:
@@ -491,6 +498,60 @@ def plot_drag_run(c):
             "gps_and_tag_depth_used_for_solving": False}
 
 
+def positions_dbscan_enabled(c):
+    return bool(c.run["legacy"].get("positions_dbscan", False))
+
+
+def positions_dbscan_done(c):
+    return not positions_dbscan_enabled(c) or "tblPositions_DengDBSCAN" in table_names(c.db)
+
+
+def positions_dbscan_run(c):
+    """Optional screen: DBSCAN on each tag's root-B XY per transmission; keeps every root row of transmissions in clusters."""
+    if not positions_dbscan_enabled(c):
+        return {"skipped": "positions_dbscan = false (legacy steps unchanged)"}
+    from sklearn.cluster import DBSCAN
+    eps = float(c.run["legacy"].get("dbscan_eps_m", 5.0))
+    min_samples = int(c.run["legacy"].get("dbscan_min_samples", 5))
+    pos = lp.query(c.db, "select * from tblPositions_Deng where comment = 'solution found'")
+    root = pos[pos.solution == "B"]
+    kept, notes = [], {}
+    for tag, rows in root.groupby("Tag_ID"):
+        xy = rows.groupby("transNo")[["X", "Y"]].mean()
+        labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(xy.to_numpy(dtype=float))
+        kept_trans = set(xy.index[labels != -1])
+        notes[tag] = {"transmissions": int(len(xy)), "kept": int(len(kept_trans)), "eps_m": eps, "min_samples": min_samples}
+        kept.append(pos[(pos.Tag_ID == tag) & pos.transNo.isin(kept_trans)])
+    con = sqlite3.connect(c.db)
+    pd.concat(kept).to_sql("tblPositions_DengDBSCAN", con, if_exists="replace", index=False)
+    con.commit()
+    con.close()
+    return notes
+
+
+def plot_dbscan_folder(c):
+    return lp.REPO / "output" / "2025_review" / (c.db.stem + "_dbscan")
+
+
+def plot_drag_dbscan_done(c):
+    return not positions_dbscan_enabled(c) or (plot_dbscan_folder(c) / "item12_pipeline_summary.csv").exists()
+
+
+def plot_drag_dbscan_run(c):
+    """Optional: step-12 plots and scores from the DBSCAN-screened positions table."""
+    if not positions_dbscan_enabled(c):
+        return {"skipped": "positions_dbscan = false"}
+    if not {"FC36", "FFD3"} <= set(c.tags):
+        return {"skipped": "ENT truth is available only for FC36 and FFD3"}
+    gps_file = Path(c.paths["config_xlsx"]).parents[1] / "5_array_testing" / "array_testing_drag_GPS.csv"
+    cmd = [sys.executable, str(HERE / "ent_analysis_2025.py"), "--db", str(c.db), "--out", c.db.stem + "_dbscan",
+           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_DengDBSCAN", "--plots", "3D_legacy_B"]
+    result = subprocess.run(cmd, cwd=lp.REPO)
+    if result.returncode != 0 or not plot_drag_dbscan_done(c):
+        raise RuntimeError("DBSCAN plot step did not write its summary")
+    return {"folder": str(plot_dbscan_folder(c)), "pngs": sorted(p.name for p in plot_dbscan_folder(c).glob("item12_pipeline3d_*.png"))}
+
+
 STEPS = [("prepare", "1b", prepare_done, prepare_run), ("metronome", "2-3", metronome_done, metronome_run),
          ("clock_surface", "4", clock_surface_done, clock_surface_run),
          ("deep_beacons", "5", deep_beacons_done, deep_beacons_run),
@@ -501,7 +562,9 @@ STEPS = [("prepare", "1b", prepare_done, prepare_run), ("metronome", "2-3", metr
          ("speed_of_sound", "9", speed_of_sound_done, speed_of_sound_run),
          ("positions", "11", positions_done, positions_run), ("export", "10", export_done, export_run),
          ("positions_2d", "11b", positions_2d_done, positions_2d_run),
-         ("plot_drag", "12", plot_drag_done, plot_drag_run)]
+         ("plot_drag", "12", plot_drag_done, plot_drag_run),
+         ("positions_dbscan", "11c", positions_dbscan_done, positions_dbscan_run),
+         ("plot_drag_dbscan", "12b", plot_drag_dbscan_done, plot_drag_dbscan_run)]
 
 
 # ----------------------------------------------------------------------------------------------- driver
@@ -523,11 +586,12 @@ def build_context(args):
         raise SystemExit("no study tags with a pulse rate in %s" % db)
     work = lp.resolve_path(db.parent / ("%s_legacy" % db.stem))
     work.mkdir(parents=True, exist_ok=True)
-    deep_tags = {r: lp.query(db, "select Tag_ID from tblReceiver where Rec_ID = ?", (r,)).Tag_ID.iloc[0] for r in deep}
+    deng = deep + ([r for r in receivers_3d if r in surface and r != master_rec] if legacy.get("deng_surface", False) else [])  # static only; CFD floats never targets
+    deng_tags = {r: lp.query(db, "select Tag_ID from tblReceiver where Rec_ID = ?", (r,)).Tag_ID.iloc[0] for r in deng}
     return SimpleNamespace(run=run, paths=paths, db=db, work=work, surface=surface, deep=deep, receivers_3d=receivers_3d,
                            receivers_2d=list(legacy.get("receivers_2d") or []), fixed_z_2d=dict(legacy.get("fixed_z_2d_by_tag") or {}),
                            review=lp.REPO / "output" / "2025_review" / db.stem,
-                           reference=[r for r in receivers_3d if r not in deep], tags=tags, deep_tags=deep_tags,
+                           reference=[r for r in receivers_3d if r not in deep], reference_2d=[r for r in (legacy.get("receivers_2d") or receivers_3d) if r not in deep], tags=tags, deng=deng, deng_tags=deng_tags,
                            window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]))
 
 

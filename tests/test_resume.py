@@ -77,7 +77,7 @@ class TestResume(unittest.TestCase):
                                    "Z": [-8.0, -10.0, -12.0]})
             result = SimpleNamespace(DengSolutionB_unfiltered=root_b,
                                      DengSolutionA_unfiltered=root_b.assign(X=1000.0))
-            context = SimpleNamespace(db=db, work=Path(folder), deep=["D1"], reference=["S1"],
+            context = SimpleNamespace(db=db, work=Path(folder), deep=["D1"], deng=["D1"], reference=["S1"],
                                       run={"legacy": {"deep_solution": "B"}})
             with patch.object(lp, "deng", return_value=result):
                 pipeline.deep_positions_run(context)
@@ -107,6 +107,24 @@ class TestResume(unittest.TestCase):
             marker = con.execute("select Tag_ID from tblProcessProgress").fetchall()
             con.close()
             self.assertIn(("__ats_phase2__",), marker)
+
+    def test_positions_dbscan_drops_isolated_solutions(self):
+        import tagdrag_2025_pipeline as pipeline
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "db.db"
+            rows = [{"Tag_ID": "T1", "transNo": float(t), "solution": "B", "comment": "solution found",
+                     "X": 10.0 + 0.1 * t, "Y": 20.0, "Z": -2.0, "ToA": 1.0} for t in range(10)]
+            rows.append({"Tag_ID": "T1", "transNo": 99.0, "solution": "B", "comment": "solution found",
+                         "X": 500.0, "Y": 500.0, "Z": -2.0, "ToA": 2.0})
+            con = sqlite3.connect(db)
+            pd.DataFrame(rows).to_sql("tblPositions_Deng", con, index=False)
+            con.close()
+            context = SimpleNamespace(db=db, run={"legacy": {"positions_dbscan": True, "dbscan_eps_m": 5.0, "dbscan_min_samples": 5}})
+            pipeline.positions_dbscan_run(context)
+            kept = lp.query(db, "select transNo from tblPositions_DengDBSCAN")
+            self.assertEqual(sorted(kept.transNo.tolist()), [float(t) for t in range(10)])
+            self.assertTrue(pipeline.positions_dbscan_done(context))
 
     def test_phases_incomplete_without_all_receivers(self):
         with tempfile.TemporaryDirectory() as folder:

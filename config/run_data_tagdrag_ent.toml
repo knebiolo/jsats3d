@@ -50,6 +50,10 @@ receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI0
 fixed_z_2d        = ''
 fixed_z_2d_by_tag = { FC36 = -1.524, FFD3 = -4.572 }   # drag depths 5 ft / 15 ft below the surface (tblReceiver Z frame); depth reference to be confirmed
 deep_solution     = 'B'
+deng_surface      = false   # true: also Deng static surface receivers; 2026-10-08 test made GPS worse, keep false
+positions_dbscan   = false   # true: DBSCAN screen on root-B XY; plots from the screened table (owner sign-off pending)
+dbscan_eps_m       = 5.0
+dbscan_min_samples = 5
 study_tags        = []
 signal_proxies    = false
 work_dir          = ''

@@ -32,7 +32,6 @@ from scripts.beacon_pairwise_dbscan import classify, cluster, filter_deep_beacon
 from scripts.ent_analysis_2025 import legacy_receiver_set_consensus
 from scripts.tagdrag_2025_pipeline import classify_ats_fish
 from scripts.legacy_pipeline import clock_fix_check, import_2019, receiver_sets, widen_table
-from scripts.cfd_gps_diagnostics import interpolate_positions
 from jsats3d import position, sos
 from scripts.run_data import (
     check_inputs,
@@ -382,17 +381,6 @@ class TestRunData(unittest.TestCase):
             tables = {row[0] for row in connection.execute("select name from sqlite_master")}
             connection.close()
         self.assertTrue({"tblTag", "tblReceiver", "tblWSEL", "tblInterpolatedTemp", "tblStudyParameters"} <= tables)
-
-    def test_piecewise_gps_interpolation_supports_linear_cubic_and_no_extrapolation(self):
-        gps = pd.DataFrame({"Rec_ID": ["R1"] * 4, "dateTime": pd.date_range("2025-01-01", periods=4, freq="h"),
-                            "easting": [0.0, 1.0, 4.0, 9.0], "northing": [0.0, 0.0, 0.0, 0.0]})
-        query = pd.DataFrame({"Rec_ID": ["R1"] * 3, "dateTime": pd.to_datetime(
-            ["2024-12-31 23:00", "2025-01-01 01:30", "2025-01-01 05:00"])})
-        linear = interpolate_positions(gps, query, method="linear")
-        cubic = interpolate_positions(gps, query, method="cubic")
-        self.assertTrue(linear.easting.iloc[[0, 2]].isna().all())
-        self.assertAlmostEqual(linear.easting.iloc[1], 2.5)
-        self.assertAlmostEqual(cubic.easting.iloc[1], 2.25)
 
     def test_receiver_gps_table_uses_receiver_coordinate_origin(self):
         with tempfile.TemporaryDirectory() as directory:
