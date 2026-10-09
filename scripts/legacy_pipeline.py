@@ -310,13 +310,13 @@ def deng_2d(db, tag, receivers, out, figures, fixed_z):
 
 
 def load_2d_positions(db, folder, fixed_z):
-    """Load <tag>_2D_solutionA/B.csv into tblPositions_Deng2D (kept apart from the 3D table)."""
+    """Load <tag>_2D_solutionA/B.csv into tblPositions_Deng2D (kept apart from the 3D table); fixed_z may be {tag: z}."""
     frames = []
     for path in sorted(Path(folder).glob("*_2D_solution?.csv")):
         frame = pd.read_csv(path, index_col=0)
         frame["solution"] = path.stem[-1]
         frame["Tag_ID"] = path.name.split("_2D_")[0]
-        frame["fixed_z"] = fixed_z
+        frame["fixed_z"] = fixed_z[frame["Tag_ID"].iloc[0]] if isinstance(fixed_z, dict) else fixed_z
         frames.append(frame)
     if not frames:
         return 0
@@ -366,7 +366,94 @@ def position_deep_receivers(db, surface, deep, work, method, solution):
               % (rec, len(sols), solution, x, y, z))
 
 
-def process(run, paths):
+PROGRESS_TABLE = "tblProcessProgress"
+
+
+def ensure_progress(db):
+    execute(db, "create table if not exists %s (Tag_ID TEXT PRIMARY KEY, finished TEXT)" % PROGRESS_TABLE)
+
+
+def mark_done(db, key):
+    """Record a finished tag (or '__phases__' / '__export__') so a restart can skip it."""
+    ensure_progress(db)
+    connection = sqlite3.connect(db)
+    connection.execute("insert or replace into %s values (?, datetime('now'))" % PROGRESS_TABLE, (key,))
+    connection.commit()
+    connection.close()
+
+
+def phases_complete(db, surface, deep, master_rec):
+    """Phases 1-2 are finished: marker present, or every non-master receiver is clock-fixed and the tag loop already began."""
+    tables = set(query(db, "select name from sqlite_master where type = 'table'").name)
+    if "tblDetectionClockFixed" not in tables:
+        return False
+    have = set(query(db, "select distinct Rec_ID from tblDetectionClockFixed").Rec_ID)
+    if not {r for r in surface + deep if r != master_rec} <= have:
+        return False
+    ensure_progress(db)
+    if query(db, "select count(*) n from %s where Tag_ID = '__phases__'" % PROGRESS_TABLE).n.iloc[0]:
+        return True
+    # Database from before progress tracking: the tag loop only starts after the phases, so its rows prove they finished.
+    if "tblDetectionFilterSecondary" in tables and query(db, "select count(*) n from tblDetectionFilterSecondary").n.iloc[0]:
+        mark_done(db, "__phases__")
+        return True
+    return False
+
+
+def prepare_resume(db, tags, positions, positions_2d):
+    """Finished tags from the progress table; clean and redo everything else.
+
+    A database from before progress tracking counts as done up to the last tag that has filtered rows. That last tag is
+    redone because a kill can leave it half written (rows in one multipath table, no position files).
+    """
+    ensure_progress(db)
+    done = set(query(db, "select Tag_ID from %s" % PROGRESS_TABLE).Tag_ID) - {"__phases__", "__export__"}
+    if not done:
+        tables = set(query(db, "select name from sqlite_master where type = 'table'").name)
+        started = set(query(db, "select distinct Tag_ID from tblDetectionFilterSecondary").Tag_ID) \
+            if "tblDetectionFilterSecondary" in tables else set()
+        order = [i for i, tag in enumerate(tags) if tag in started]
+        done = set(tags[:order[-1]]) if order else set()
+        for tag in done:
+            mark_done(db, tag)
+        print("Resume: no progress table yet; %d tags before the last started tag count as finished" % len(done))
+    redo = [tag for tag in tags if tag not in done]
+    if redo:
+        connection = sqlite3.connect(db)
+        for table in ("tblDetectionFilterPrimary", "tblDetectionFilterSecondary"):
+            if connection.execute("select 1 from sqlite_master where name = ?", (table,)).fetchone():
+                connection.execute("delete from %s where Tag_ID in (%s)" % (table, ",".join("?" * len(redo))), redo)
+        connection.commit()
+        connection.close()
+        for folder in (positions, positions_2d):
+            for tag in redo:
+                for stale in folder.glob("%s_solution*.csv" % tag):
+                    stale.unlink()
+    print("Resume: %d tags finished, %d still to do" % (len(done), len(redo)))
+    return done
+
+
+def export_positions(db, positions, work):
+    """Load the position CSVs into tblPositions_Deng from a temporary copy (the legacy loader deletes its input), once."""
+    ensure_progress(db)
+    if query(db, "select count(*) n from %s where Tag_ID = '__export__'" % PROGRESS_TABLE).n.iloc[0]:
+        print("Export already done, skipped")
+        return
+    files = sorted(positions.glob("*.csv"))
+    if not files:
+        return
+    execute(db, "drop table if exists tblPositions_Deng")
+    staging = Path(fresh_folder(work / "positions_export"))
+    for source in files:
+        shutil.copy2(source, staging)
+    # positions_data_management adds solution and Tag_ID to every file
+    widen_table(db, "tblPositions_Deng", staging, extra=("solution", "Tag_ID"))
+    jsats3d.positions_data_management("Deng", str(staging), str(db))
+    shutil.rmtree(staging, ignore_errors=True)
+    mark_done(db, "__export__")
+
+
+def process(run, paths, resume=False):
     legacy = run.get("legacy", {})
     db = paths["output_db"]
     method = legacy.get("method", "KNN")
@@ -381,24 +468,33 @@ def process(run, paths):
     if master_rec not in surface:
         raise ValueError("master_receiver %s must be one of surface_receivers (legacy needs its position known)" % master_rec)
 
-    # Rerun safety: start every run from the imported receiver table and no derived tables.
-    tables = set(query(db, "select name from sqlite_master where type = 'table'").name)
-    if "tblReceiver_initial" in tables:
-        execute(db, "drop table tblReceiver", "create table tblReceiver as select * from tblReceiver_initial")
+    wanted_resume = resume
+    resume = resume and phases_complete(db, surface, deep, master_rec)
+    if resume:
+        print("Resume: phases 1-2 are complete; keeping the receiver table, derived tables and finished tags")
     else:
-        execute(db, "create table tblReceiver_initial as select * from tblReceiver")
-    execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D"]])
+        if wanted_resume:
+            print("Resume not possible (phases 1-2 incomplete); starting clean")
+        # Rerun safety: start every run from the imported receiver table and no derived tables.
+        tables = set(query(db, "select name from sqlite_master where type = 'table'").name)
+        if "tblReceiver_initial" in tables:
+            execute(db, "drop table tblReceiver", "create table tblReceiver as select * from tblReceiver_initial")
+        else:
+            execute(db, "create table tblReceiver_initial as select * from tblReceiver")
+        execute(db, *["drop table if exists %s" % t
+                      for t in DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D", PROGRESS_TABLE]])
 
-    print("Phase 1: surface receivers %s, master %s (beacon %s)" % (surface, master_rec, master_tag))
-    metronome(db, master_tag, work, method)
-    clock_fix(db, surface, work)
-    if deep:
-        # Deep receivers are positioned from the 3D set only (e.g. 2025: ZOI, not the CFD floats).
-        position_deep_receivers(db, deep_reference, deep, work, method, solution)
-        print("Phase 2: all receivers")
-        execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES])
+        print("Phase 1: surface receivers %s, master %s (beacon %s)" % (surface, master_rec, master_tag))
         metronome(db, master_tag, work, method)
-        clock_fix(db, surface + deep, work)
+        clock_fix(db, surface, work)
+        if deep:
+            # Deep receivers are positioned from the 3D set only (e.g. 2025: ZOI, not the CFD floats).
+            position_deep_receivers(db, deep_reference, deep, work, method, solution)
+            print("Phase 2: all receivers")
+            execute(db, *["drop table if exists %s" % t for t in DERIVED_TABLES])
+            metronome(db, master_tag, work, method)
+            clock_fix(db, surface + deep, work)
+        mark_done(db, "__phases__")
 
     print("3D receivers: %s" % receivers_3d)
     if receivers_2d:
@@ -410,18 +506,26 @@ def process(run, paths):
     if missing_rate:
         print("WARNING: study tags without pulseRate skipped (legacy epoch rule needs it): %s" % missing_rate)
         tags = [t for t in tags if t not in missing_rate]
-    positions = Path(fresh_folder(work / "positions"))
-    positions_2d = Path(fresh_folder(work / "positions_2d"))
+    positions, positions_2d = work / "positions", work / "positions_2d"
+    if resume:
+        positions.mkdir(parents=True, exist_ok=True)
+        positions_2d.mkdir(parents=True, exist_ok=True)
+        done = prepare_resume(db, tags, positions, positions_2d)
+    else:
+        positions, positions_2d = Path(fresh_folder(positions)), Path(fresh_folder(positions_2d))
+        ensure_progress(db)
+        done = set()
     for tag in tags:
+        if tag in done:
+            print("Study tag %s: finished earlier, skipped" % tag)
+            continue
         print("Study tag %s" % tag)
         if tag_multipath(db, tag, work, method):
             deng(db, tag, receivers_3d, positions, work / "figures")
             if receivers_2d:
                 deng_2d(db, tag, receivers_2d, positions_2d, work / "figures", float(legacy["fixed_z_2d"]))
-    if any(positions.iterdir()):
-        # positions_data_management adds solution and Tag_ID to every file
-        widen_table(db, "tblPositions_Deng", positions, extra=("solution", "Tag_ID"))
-        jsats3d.positions_data_management("Deng", str(positions), str(db))
+        mark_done(db, tag)
+    export_positions(db, positions, work)
     count = query(db, "select count(*) as n from sqlite_master where name = 'tblPositions_Deng'").n.iloc[0]
     solved = query(db, "select count(*) as n from tblPositions_Deng where comment = 'solution found'").n.iloc[0] if count else 0
     print("Done. tblPositions_Deng: %s solutions found. Work folder: %s" % (solved, work))
@@ -434,6 +538,7 @@ def main(argv=None):
     parser.add_argument("command", choices=["import-2019", "process", "clock-fix-check"])
     parser.add_argument("run_file")
     parser.add_argument("receivers", nargs="*", help="Receivers for clock-fix-check")
+    parser.add_argument("--resume", action="store_true", help="process: continue after an interruption (finished tags are skipped)")
     args = parser.parse_args(argv)
     run, paths = read_run_file(args.run_file)
     if args.command == "import-2019":
@@ -443,7 +548,7 @@ def main(argv=None):
             parser.error("clock-fix-check requires at least one receiver")
         clock_fix_check(paths["output_db"], args.receivers)
     else:
-        process(run, paths)
+        process(run, paths, resume=args.resume)
     return 0
 
 

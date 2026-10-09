@@ -29,6 +29,8 @@ from scripts.parse_ats_raw_to_legacy import (
 )
 from scripts.extract_dbscan_features import extract_features
 from scripts.beacon_pairwise_dbscan import classify, cluster, filter_deep_beacon
+from scripts.ent_analysis_2025 import legacy_receiver_set_consensus
+from scripts.tagdrag_2025_pipeline import classify_ats_fish
 from scripts.legacy_pipeline import clock_fix_check, import_2019, receiver_sets, widen_table
 from scripts.cfd_gps_diagnostics import interpolate_positions
 from jsats3d import position, sos
@@ -46,6 +48,34 @@ from jsats3d.jsats3d import _clock_fix_interpolation_knots
 
 
 class Test2025Adapter(unittest.TestCase):
+    def test_legacy_plot_consensus_requires_two_nearby_receiver_sets(self):
+       positions = pd.DataFrame([
+          dict(transNo=1, r0="A", r1="B", r2="C", r3="D", X=0.0, Y=0.0, Z=-3.0,
+              t0=100.0, in_hull=1),
+          dict(transNo=1, r0="A", r1="B", r2="C", r3="E", X=1.0, Y=1.0, Z=-3.2,
+              t0=100.0, in_hull=1),
+          dict(transNo=1, r0="F", r1="G", r2="H", r3="I", X=80.0, Y=80.0, Z=-3.0,
+              t0=100.0, in_hull=1),
+          dict(transNo=2, r0="A", r1="B", r2="C", r3="D", X=5.0, Y=5.0, Z=-3.0,
+              t0=103.0, in_hull=1),
+       ])
+       result = legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2)
+       self.assertEqual(result.transNo.tolist(), [1])
+       self.assertEqual(result.receiver_sets.tolist(), [2])
+       self.assertAlmostEqual(result.x.iloc[0], 0.5)
+
+    def test_ats_secondary_rejects_late_first_arrival_without_changing_primary(self):
+        primary = pd.DataFrame({"Rec_ID": ["R1"] * 21, "Tag_ID": ["T1"] * 21,
+                                "transNo": np.arange(21), "seconds_fix": 1.75e9 + np.arange(21) * 3.0,
+                                "det_rank": [1.0] * 21, "multipath": [0] * 21})
+        primary.loc[10, "seconds_fix"] += 0.02
+        original = primary.copy(deep=True)
+        secondary = classify_ats_fish(primary, 3.0)
+        pd.testing.assert_frame_equal(primary, original)
+        self.assertEqual(secondary.index[secondary.multipath_prediction == 1].tolist(), [10])
+        self.assertEqual(secondary.loc[10, "multipath"], 0)
+        self.assertEqual(secondary.loc[10, "dbscan_class"], "suspect_reflection")
+
     def test_adapter_sets_provisional_ffd3_rate_and_registry_rates(self):
         tags = pd.DataFrame({"Tag_ID": ["FFD3", "B1"], "TagTypeSource": ["study", "beacon"]})
         registry = pd.DataFrame({"Tag_ID": ["B1"], "pulseRate": [60.0]})
@@ -299,6 +329,8 @@ class Test2025Adapter(unittest.TestCase):
         self.assertEqual(result.TempSource.tolist(), ["DD_N_HOBO", "DD_N_string"])
 
 
+
+
 class TestRunData(unittest.TestCase):
     def test_clock_fix_interpolation_knots_deduplicate_identical_values(self):
         data = pd.DataFrame({"seconds": [1.0, 1.0, 2.0], "DDoA": [0.1, 0.1, 0.2]})
@@ -372,6 +404,18 @@ class TestRunData(unittest.TestCase):
             result = load_receiver_gps(str(path), receivers)
         self.assertEqual(result.Rec_ID.tolist(), ["CFD04", "CFD04"])
         self.assertEqual(result.X.tolist(), [10.0, 20.0])
+
+    def test_receiver_gps_filtered_table_preserves_config_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gps.csv"
+            pd.DataFrame({"receiverName": ["CFD04", "CFD04"],
+                          "dateTime": ["2025-01-01 00:00", "2025-01-01 01:00"],
+                          "easting": [1500.0, 1510.0], "northing": [4000.0, 4010.0]}).to_csv(path, index=False)
+            receivers = pd.DataFrame({"Rec_ID": ["CFD04"], "easting": [1505.0], "northing": [4005.0],
+                                      "X": [515.0], "Y": [15.0]})
+            result = load_receiver_gps(str(path), receivers)
+        self.assertEqual(result.X.tolist(), [510.0, 520.0])
+        self.assertEqual(result.Y.tolist(), [10.0, 20.0])
 
     def test_load_receiver_table_output_feeds_load_receiver_gps_without_error(self):
         # Regression: load_receiver_table() must keep easting/northing so load_receiver_gps()

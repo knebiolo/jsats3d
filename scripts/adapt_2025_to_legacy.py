@@ -50,6 +50,10 @@ PROVISIONAL_STUDY_PULSE_RATES = {"FC36": 3.038, "0B0A": 3.024, "0AC6": 3.204, "4
 # first available forebay level of the deployment week (2025-06-05 11:15, TagDrag_WSE + 0.8905 ft). Assumption.
 WSEL_FOLLOWING_RECEIVERS = ("ZOI07", "ZOI08", "ZOI09")
 Z_REFERENCE_WSEL_FT = 862.46
+# Hydrophone positions confirmed exchanged in the config (project lead, 2026-10-08): the config row of one holds the
+# coordinates of the other. Evidence: beacon deviations, deep beacon solutions and drag accuracy (journal 2026-10-07).
+CONFIRMED_POSITION_SWAPS = (("ZOI05", "ZOI06"),)
+POSITION_COLUMNS = ["X", "Y", "Z", "X_t", "Y_t", "Z_t", "easting", "northing"]
 DD_N_STRING_COLUMNS = ["DD_N_0p5", "DD_N_1p5", "DD_N_9", "DD_N_18"]
 RECEIVER_METADATA_COLUMNS = {
     "Receiver Time Zone Offset": "UTCOffset",
@@ -145,6 +149,18 @@ def load_receiver_table(gps_path, config_path):
     receivers = receivers[["Rec_ID", "Tag_ID", "Ref_Elev", "X", "Y", "Z", "X_t", "Y_t", "Z_t", "ZReference",
                            "FollowsWSEL", "ZRefWSEL_ft",
                            "easting", "northing", *RECEIVER_METADATA_COLUMNS.values()]]
+    return swap_positions(receivers, CONFIRMED_POSITION_SWAPS)
+
+
+def swap_positions(receivers, swaps):
+    """Exchange the position columns of each receiver pair; clock, beacon tag and mount metadata stay with the receiver."""
+    receivers = receivers.copy()
+    for a, b in swaps:
+        rows_a, rows_b = receivers["Rec_ID"] == a, receivers["Rec_ID"] == b
+        if rows_a.any() and rows_b.any():
+            held = receivers.loc[rows_a, POSITION_COLUMNS].iloc[0].copy()
+            receivers.loc[rows_a, POSITION_COLUMNS] = receivers.loc[rows_b, POSITION_COLUMNS].iloc[0].to_numpy()
+            receivers.loc[rows_b, POSITION_COLUMNS] = held.to_numpy()
     return receivers
 
 
@@ -159,8 +175,12 @@ def load_receiver_gps(gps_path, receiver_table):
     gps = gps[gps.Rec_ID.isin(receiver_table.Rec_ID)]
     if gps.empty:
         return pd.DataFrame(columns=columns)
-    origin_x = receiver_table.easting.min()
-    origin_y = receiver_table.northing.min()
+    if {"X", "Y"} <= set(receiver_table.columns):
+        origin_x = float((receiver_table.easting - receiver_table.X).median())
+        origin_y = float((receiver_table.northing - receiver_table.Y).median())
+    else:
+        origin_x = receiver_table.easting.min()
+        origin_y = receiver_table.northing.min()
     gps["X"] = gps.easting - origin_x
     gps["Y"] = gps.northing - origin_y
     return gps[columns].sort_values(["Rec_ID", "dateTime"])

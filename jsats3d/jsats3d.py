@@ -403,6 +403,7 @@ class multipath_data_object():
         else:
             self.empty = True
         c.close()
+        conn.close()
         
 def multipath_2(multipath_object):
     '''A hopefully more efficient multipath, rather than iterating over rows...
@@ -487,7 +488,8 @@ def multipath_data_management(inputWS,projectDB,primary = True, metronome = Fals
         #c.execute('''CREATE INDEX idx_combined_second_filter ON tblDetectionFilterSecondary (Rec_ID, Tag_ID, seconds_fix, transNo)''')
 
     conn.commit()              
-    c.close()               
+    c.close()
+    conn.close()
 
 def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = None):
     # get data 
@@ -1526,6 +1528,7 @@ class position():
         cols = ['transNo','solNo','r0','r1','r2','X','Y','Z','T01','ToA','comment','in_hull']
         plan = Delaunay(np.array(self.ephemeris[['X_t','Y_t']], dtype = float))
         rows = {'A': [], 'B': []}
+        tracks = {}
         data = self.tag_data.sort_values('seconds_fix').drop_duplicates(['transNo','Rec_ID'], keep = 'first')
         for j, tDat in data.groupby('transNo', sort = True):
             if len(tDat) < 3:
@@ -1536,7 +1539,7 @@ class position():
                 sub = tDat.iloc[list(combo)]
                 recs = sub.Rec_ID.tolist()
                 times = sub.seconds_fix.to_numpy()
-                pos = [self.receiver_position_at(r, t, self.receiver_z_at(r, t, self.ephemeris.loc[r, 'Z_t'])) for r, t in zip(recs, times)]
+                pos = [self.receiver_position_at(r, t, self.receiver_z_at(r, t, self.ephemeris.loc[r, 'Z_t']), tracks) for r, t in zip(recs, times)]
                 SoS = float(sos(self.interpolator(times[0])))
                 try:
                     roots = self.deng_2d_roots(pos[0], pos[1], pos[2], round(times[1] - times[0], 6),

@@ -48,6 +48,7 @@ receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI0
 receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
                      'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
 fixed_z_2d        = ''
+fixed_z_2d_by_tag = { FC36 = -1.524, FFD3 = -4.572 }   # drag depths 5 ft / 15 ft below the surface (tblReceiver Z frame); depth reference to be confirmed
 deep_solution     = 'B'
 study_tags        = []
 signal_proxies    = false
