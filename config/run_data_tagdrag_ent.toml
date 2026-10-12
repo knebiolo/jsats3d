@@ -1,4 +1,4 @@
-# Run file for the 2025 TAG DRAG database for lines ENT-01 and ENT-05 (created 2026-10-07).
+# Run file for the 2025 TAG DRAG database for lines ENT-01 to ENT-05 (created 2026-10-07).
 # Same window and decisions as config/run_data_tagdrag.toml: window 2025-06-10 09:00-13:00 (database clock = PDT),
 # master ZOI08, pairwise DBSCAN anchor ZOI03 (project lead 2026-10-04). Drag tags FC36 and FFD3 only
 # (0B0A, 0AC6, 493F are released fish, not drag tags). ENT-01 10:24-10:26 and ENT-05 10:50-10:54 lie inside the window.
@@ -50,8 +50,10 @@ receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI0
 fixed_z_2d        = ''
 fixed_z_2d_by_tag = { FC36 = -1.524, FFD3 = -4.572 }   # drag depths 5 ft / 15 ft below the surface (tblReceiver Z frame); depth reference to be confirmed
 deep_solution     = 'B'
+adopt_deep_z      = 'solved'  # 'solved' = legacy (adopt Deng median Z); 'config' = keep measured hydrophone depth (ZOI02 solved Z was 4.3 m off measured)
+known_depth_diagnostics = false  # 2D retired for ENT drags 2026-10-09: CFD float sets gave 2-4x worse XY error than 3D
 deng_surface      = false   # true: also Deng static surface receivers; 2026-10-08 test made GPS worse, keep false
-positions_dbscan   = false   # true: DBSCAN screen on root-B XY; plots from the screened table (owner sign-off pending)
+positions_dbscan   = true    # DBSCAN screen on root-B XY; separate table/plots, legacy tables unchanged (owner sign-off pending for production)
 dbscan_eps_m       = 5.0
 dbscan_min_samples = 5
 study_tags        = []

@@ -8,6 +8,7 @@
 Run order and names (paper step in brackets):
     prepare (1b)  metronome (2-3)  clock_surface (4)  deep_beacons (5)  deep_positions (6)  adopt_deep (6b)  deep_clocks (7)
     fish_multipath (8)  speed_of_sound (9)  positions (11)  export (10)  positions_2d (optional)  plot_drag (12)
+    plot_drag_2d (12c, optional)
 A step whose output tables already exist is skipped, so a rerun resumes. Each step checks its own result and a status
 record is written to output/<database stem>.pipeline_status.json. K: is only read (water level file); everything is written
 to C:. Deep coordinates use the configured legacy Deng root median (default B), then phase 2 reruns metronome and every
@@ -51,7 +52,7 @@ SUSPECT_LATE_S = 0.003
 
 
 # Drag truth is used only after Deng has solved XYZ.
-DRAG_LINES = ("ENT-01", "ENT-05")
+DRAG_LINES = ("ENT-01", "ENT-02", "ENT-03", "ENT-04", "ENT-05")
 
 
 def table_names(db):
@@ -210,26 +211,34 @@ def deep_positions_run(c):
     return notes
 
 
+def adopt_deep_z_mode(c):
+    return str(c.run["legacy"].get("adopt_deep_z", "solved")).lower()
+
+
 def adopt_deep_done(c):
     if "tblDeepReceiver_step6_solution" not in table_names(c.db):
         return False
     sol = lp.query(c.db, "select Rec_ID, X, Y, Z from tblDeepReceiver_step6_solution").set_index("Rec_ID")
     rec = lp.query(c.db, "select Rec_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
-    solved = {r: [sol.at[r, "X"], sol.at[r, "Y"], sol.at[r, "Z"] if r in c.deep else rec.at[r, "Z_t"]] for r in sol.index}
+    z_solved = adopt_deep_z_mode(c) == "solved"
+    solved = {r: [sol.at[r, "X"], sol.at[r, "Y"], sol.at[r, "Z"] if (r in c.deep and z_solved) else rec.at[r, "Z_t"]]
+              for r in sol.index}
     return all(r in solved and np.allclose(rec.loc[r, ["X_t", "Y_t", "Z_t"]].astype(float).values, solved[r], atol=1e-6)
-                                              for r in c.deng)
+               for r in c.deng)
 
 
 def adopt_deep_run(c):
     """Step 6b (legacy phase 2): write the solved deep positions into tblReceiver, then invalidate every output that
-    was computed with the config positions (deep clocks, fish multipath, positions, export, plots)."""
+    was computed with the config positions (deep clocks, fish multipath, positions, export, plots).
+    [legacy] adopt_deep_z: 'solved' adopts the Deng median Z of deep receivers (legacy); 'config' keeps measured depth."""
     sol = lp.query(c.db, "select Rec_ID, X, Y, Z from tblDeepReceiver_step6_solution").set_index("Rec_ID")
     cfg = lp.query(c.db, "select Rec_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
+    z_solved = adopt_deep_z_mode(c) == "solved"
     notes = {}
     for r in c.deng:
         x, y = (float(sol.at[r, k]) for k in ("X", "Y"))
         # surface Z stays configured; Deng XY only
-        z = float(sol.at[r, "Z"]) if r in c.deep else float(cfg.at[r, "Z_t"])
+        z = float(sol.at[r, "Z"]) if (r in c.deep and z_solved) else float(cfg.at[r, "Z_t"])
         notes[r] = {"X": round(x, 2), "Y": round(y, 2), "Z": round(z, 2),
                     "shift_m": round(float(np.hypot(x - cfg.at[r, "X_t"], y - cfg.at[r, "Y_t"])), 2)}
         lp.execute(c.db, "update tblReceiver set X_t = %r, Y_t = %r, Z_t = %r where Rec_ID = '%s'" % (x, y, z, r))
@@ -243,7 +252,7 @@ def adopt_deep_run(c):
     for t in ("tblDetectionFilterPrimary", "tblDetectionFilterSecondary"):
         if t in tables:
             con.execute("delete from %s where Tag_ID in (%s)" % (t, inl))
-    for t in ("tblPositions_Deng", "tblPositions_Deng2D", "tblPositions_Deng3DConsensus",
+    for t in ("tblPositions_Deng", "tblPositions_Deng2D", "tblPositions_DengDBSCAN", "tblPositions_Deng3DConsensus",
               "tblPositions_Deng2DJoint", "tblPositions_Deng2DJointQuality",
               "tblPositions_Deng3DJoint", "tblPositions_Deng3DJointQuality"):
         con.execute("drop table if exists %s" % t)
@@ -257,7 +266,7 @@ def adopt_deep_run(c):
             png.unlink()
         for tag in ("FC36", "FFD3"):
             for suffix in ("", "_full_range"):
-                (c.review / ("item12_pipeline3d_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
+                (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
     return notes
 
 
@@ -275,14 +284,15 @@ def deep_clocks_run(c):
     lp.execute(c.db, "delete from %s where Tag_ID = '__ats_phase2__'" % lp.PROGRESS_TABLE,
                "delete from %s where Tag_ID = '__ats_fish_two_stage__'" % lp.PROGRESS_TABLE,
                *["drop table if exists %s" % table for table in lp.DERIVED_TABLES],
-               "drop table if exists tblPositions_Deng", "drop table if exists tblPositions_Deng2D")
+               "drop table if exists tblPositions_Deng", "drop table if exists tblPositions_Deng2D",
+               "drop table if exists tblPositions_DengDBSCAN")
     for folder in ("positions", "positions_2d"):
         shutil.rmtree(c.work / folder, ignore_errors=True)
     for line in DRAG_LINES:
         (c.review / ("%s_positions.png" % line.replace("-", ""))).unlink(missing_ok=True)
         for tag in ("FC36", "FFD3"):
             for suffix in ("", "_full_range"):
-                (c.review / ("item12_pipeline3d_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
+                (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
     metronome_run(c)
     receivers = list(dict.fromkeys(c.surface + c.deep))
     lp.clock_fix(c.db, receivers, c.work)
@@ -480,7 +490,7 @@ def positions_2d_run(c):
 def plot_drag_done(c):
     if not {"FC36", "FFD3"} <= set(c.tags):
         return True
-    return all((c.review / ("item12_pipeline3d_%s_%s.png" % (line, tag))).exists()
+    return all((c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s.png" % (line, tag))).exists()
                for line in DRAG_LINES for tag in ("FC36", "FFD3"))
 
 
@@ -490,12 +500,36 @@ def plot_drag_run(c):
         return {"skipped": "ENT truth is available only for FC36 and FFD3"}
     gps_file = Path(c.paths["config_xlsx"]).parents[1] / "5_array_testing" / "array_testing_drag_GPS.csv"
     cmd = [sys.executable, str(HERE / "ent_analysis_2025.py"), "--db", str(c.db),
-           "--out", c.db.stem, "--only", "12", "--gps", str(gps_file)]
+           "--out", c.db.stem, "--only", "12", "--gps", str(gps_file), "--lines", *DRAG_LINES]
     result = subprocess.run(cmd, cwd=lp.REPO)
     if result.returncode != 0 or not plot_drag_done(c):
         raise RuntimeError("step 12 failed to generate the four legacy Deng comparison plots")
     return {"folder": str(c.review), "blue_source": "tblPositions_Deng root B mean XYZ",
             "gps_and_tag_depth_used_for_solving": False}
+
+
+def plot_drag_2d_folder(c):
+    return lp.REPO / "output" / "2025_review" / (c.db.stem + "_2d")
+
+
+def plot_drag_2d_done(c):
+    return not c.run["legacy"].get("known_depth_diagnostics", False) or (plot_drag_2d_folder(c) / "item12_pipeline_summary.csv").exists()
+
+
+def plot_drag_2d_run(c):
+    """Optional: scores and plots Deng2D (fish Z fixed) root-B centroids against the drag GPS."""
+    if not c.run["legacy"].get("known_depth_diagnostics", False):
+        return {"skipped": "known_depth_diagnostics = false"}
+    if not {"FC36", "FFD3"} <= set(c.tags):
+        return {"skipped": "ENT truth is available only for FC36 and FFD3"}
+    gps_file = Path(c.paths["config_xlsx"]).parents[1] / "5_array_testing" / "array_testing_drag_GPS.csv"
+    cmd = [sys.executable, str(HERE / "ent_analysis_2025.py"), "--db", str(c.db), "--out", c.db.stem + "_2d",
+           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_Deng2D", "--plots", "3D_legacy_B",
+           "--lines", *DRAG_LINES]
+    result = subprocess.run(cmd, cwd=lp.REPO)
+    if result.returncode != 0 or not plot_drag_2d_done(c):
+        raise RuntimeError("2D plot step did not write its summary")
+    return {"folder": str(plot_drag_2d_folder(c)), "pngs": sorted(p.name for p in plot_drag_2d_folder(c).glob("item12_pipeline3d_*.png"))}
 
 
 def positions_dbscan_enabled(c):
@@ -545,7 +579,8 @@ def plot_drag_dbscan_run(c):
         return {"skipped": "ENT truth is available only for FC36 and FFD3"}
     gps_file = Path(c.paths["config_xlsx"]).parents[1] / "5_array_testing" / "array_testing_drag_GPS.csv"
     cmd = [sys.executable, str(HERE / "ent_analysis_2025.py"), "--db", str(c.db), "--out", c.db.stem + "_dbscan",
-           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_DengDBSCAN", "--plots", "3D_legacy_B"]
+           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_DengDBSCAN", "--plots", "3D_legacy_B",
+           "--lines", *DRAG_LINES]
     result = subprocess.run(cmd, cwd=lp.REPO)
     if result.returncode != 0 or not plot_drag_dbscan_done(c):
         raise RuntimeError("DBSCAN plot step did not write its summary")
@@ -563,6 +598,7 @@ STEPS = [("prepare", "1b", prepare_done, prepare_run), ("metronome", "2-3", metr
          ("positions", "11", positions_done, positions_run), ("export", "10", export_done, export_run),
          ("positions_2d", "11b", positions_2d_done, positions_2d_run),
          ("plot_drag", "12", plot_drag_done, plot_drag_run),
+         ("plot_drag_2d", "12c", plot_drag_2d_done, plot_drag_2d_run),
          ("positions_dbscan", "11c", positions_dbscan_done, positions_dbscan_run),
          ("plot_drag_dbscan", "12b", plot_drag_dbscan_done, plot_drag_dbscan_run)]
 
@@ -604,7 +640,8 @@ def init_whatif(source, target, swaps):
         raise SystemExit("%s exists; --init-from only creates a new database" % target)
     shutil.copy2(source, target)
     con = sqlite3.connect(target)
-    for table in lp.DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D", "tblPositions_Deng3DConsensus",
+    for table in lp.DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D", "tblPositions_DengDBSCAN",
+                                     "tblPositions_Deng3DConsensus",
                                      "tblPositions_Deng2DJoint", "tblPositions_Deng2DJointQuality",
                                      "tblPositions_Deng3DJoint", "tblPositions_Deng3DJointQuality",
                                      "tblDeepReceiver_step6_solution", lp.PROGRESS_TABLE]:

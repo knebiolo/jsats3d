@@ -185,8 +185,10 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
 
     print("\n=== ITEM 12: Legacy Deng pipeline XYZ vs holdout drag GPS and recorded depths (PNGs in %s) ===" % OUT)
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
-    p3 = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, T01, ToA, in_hull from %s where comment = 'solution found'" % table, con)
+    p3 = pd.read_sql("select * from %s where comment = 'solution found'" % table, con)
     con.close()
+    if "r3" not in p3:  # Deng2D uses sets of three
+        p3["r3"] = ""
     p3["t0"] = pd.to_numeric(p3.ToA) - pd.to_numeric(p3.T01)
     legacy_b = p3[(p3.solution == "B") & np.isfinite(p3[["X", "Y", "Z", "t0"]]).all(axis=1)].copy()
 
@@ -203,8 +205,8 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
                 & np.isfinite(legacy_rows[["X", "Y", "Z"]]).all(axis=1)
                 & legacy_rows[["X", "Y", "Z"]].abs().lt(1000).all(axis=1)
             ].copy()
-            hull_rows["receiver_set"] = hull_rows[["r0", "r1", "r2", "r3"]].apply(
-                lambda row: "+".join(sorted(row.astype(str))), axis=1)
+            hull_rows["receiver_set"] = hull_rows[["r0", "r1", "r2", "r3"]].astype(str).apply(
+                lambda row: "+".join(sorted(row.values)), axis=1, result_type="reduce")
             g_hull = hull_rows.groupby("transNo").agg(
                 x=("X", "median"), y=("Y", "median"), z=("Z", "median"),
                 t0=("t0", "median"), n=("X", "size"),
@@ -280,9 +282,9 @@ def main():
     ap.add_argument("--gps", default=str(GPS_FILE), help="holdout GPS file; never used to solve positions")
     ap.add_argument("--only", nargs="+", type=int, choices=[12], default=[12])
     ap.add_argument("--out", default="analysis", help="folder name under output/2025_review for the CSVs")
-    ap.add_argument("--table", default="tblPositions_Deng", choices=["tblPositions_Deng", "tblPositions_DengDBSCAN"])
+    ap.add_argument("--table", default="tblPositions_Deng", choices=["tblPositions_Deng", "tblPositions_DengDBSCAN", "tblPositions_Deng2D"])
     ap.add_argument("--plots", nargs="+", default=None, help="plot file tokens to draw, e.g. 3D_legacy_B (default all)")
-    ap.add_argument("--lines", nargs="+", default=["ENT-01", "ENT-05"], help="drag lines to score and plot (default ENT-01 ENT-05)")
+    ap.add_argument("--lines", nargs="+", default=["ENT-01", "ENT-05"], help="drag lines to score and plot")
     args = ap.parse_args()
     global OUT
     OUT = REPO / "output" / "2025_review" / args.out
