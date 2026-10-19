@@ -70,15 +70,15 @@ class Data:
 
 
 def legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2):
-    """Diagnostic only: retain root-B in-hull positions backed by distinct nearby receiver sets."""
+    """Diagnostic only: retain positions backed by distinct nearby receiver sets."""
     if positions.empty:
         return positions.copy()
     required = {"transNo", "r0", "r1", "r2", "r3", "X", "Y", "Z", "t0", "in_hull"}
     missing = required - set(positions.columns)
     if missing:
         raise ValueError("Deng rows missing columns: %s" % sorted(missing))
-    valid = positions[positions.in_hull.astype(str).str.lower().isin(["1", "true"])].copy()
-    valid = valid[np.isfinite(valid[["X", "Y", "Z", "t0"]]).all(axis=1)]
+    # PM 2026-10-14: no hull filter, keep both roots A and B
+    valid = positions[np.isfinite(positions[["X", "Y", "Z", "t0"]]).all(axis=1)].copy()
     valid = valid[valid[["X", "Y", "Z"]].abs().lt(1000).all(axis=1)]
     valid["receiver_set"] = valid[["r0", "r1", "r2", "r3"]].apply(
         lambda row: "+".join(sorted(row.astype(str))), axis=1)
@@ -183,6 +183,84 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
                     smooth_window, center=True, min_periods=1).median().to_numpy()
         return track.drop(columns="segment"), rejected
 
+    def kalman_filter_track(track, process_noise=0.5, measurement_noise=2.0, z_noise=1.0, max_gap_s=12.0):
+        """Constant-velocity Kalman filter on consensus smoothed positions.
+
+        State: [x, y, z, vx, vy, vz] (6D).
+        Process noise controls how much the filter trusts the model vs measurements.
+        measurement_noise is XY uncertainty; z_noise is depth uncertainty.
+        Splits into segments when time gap exceeds max_gap_s.
+        """
+        if len(track) < 3:
+            return track.copy(), 0
+        track = track.sort_values("t0").reset_index(drop=True).copy()
+
+        # Split into segments by time gap
+        track["segment"] = (track.t0.diff().fillna(0) > max_gap_s).cumsum()
+
+        results = []
+        for seg_id, seg in track.groupby("segment", sort=False):
+            if len(seg) < 2:
+                results.append(seg)
+                continue
+            pos = seg[["x", "y", "z"]].values.astype(float)
+            dt = np.diff(seg.t0.values.astype(float))
+            dt = np.maximum(dt, 0.1)  # minimum 0.1s to avoid division issues
+
+            n = len(pos)
+            # State: [x, y, z, vx, vy, vz]
+            F = np.eye(6)
+            H = np.eye(3, 6)  # observe only position
+
+            # Process noise covariance (Q)
+            Q = np.eye(6)
+            Q[:3, :3] *= process_noise ** 2  # position uncertainty
+            Q[3:, 3:] *= process_noise ** 2  # velocity uncertainty
+
+            # Measurement noise covariance (R)
+            R = np.eye(3)
+            R[0, 0] = measurement_noise ** 2
+            R[1, 1] = measurement_noise ** 2
+            R[2, 2] = z_noise ** 2
+
+            # Initial state
+            x_est = np.array([pos[0, 0], pos[0, 1], pos[0, 2], 0.0, 0.0, 0.0])
+            P = np.diag([1.0, 1.0, 1.0, 10.0, 10.0, 10.0])  # initial covariance
+
+            smoothed = np.zeros((n, 3))
+            smoothed[0] = pos[0]
+
+            for i in range(1, n):
+                # Predict
+                F[0, 3] = dt[i - 1]
+                F[1, 4] = dt[i - 1]
+                F[2, 5] = dt[i - 1]
+                x_est = F @ x_est
+                P = F @ P @ F.T + Q
+
+                # Reset F for next iteration
+                F[0, 3] = 0
+                F[1, 4] = 0
+                F[2, 5] = 0
+
+                # Update
+                y_meas = pos[i] - H @ x_est
+                S = H @ P @ H.T + R
+                K = P @ H.T @ np.linalg.inv(S)
+                x_est = x_est + K @ y_meas
+                P = (np.eye(6) - K @ H) @ P
+
+                smoothed[i] = x_est[:3]
+
+            seg_out = seg[["t0", "transNo"]].copy()
+            seg_out["x"] = smoothed[:, 0]
+            seg_out["y"] = smoothed[:, 1]
+            seg_out["z"] = smoothed[:, 2]
+            results.append(seg_out)
+
+        result = pd.concat(results, ignore_index=True).sort_values("t0").reset_index(drop=True)
+        return result, 0
+
     print("\n=== ITEM 12: Legacy Deng pipeline XYZ vs holdout drag GPS and recorded depths (PNGs in %s) ===" % OUT)
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
     p3 = pd.read_sql("select * from %s where comment = 'solution found'" % table, con)
@@ -190,13 +268,17 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
     if "r3" not in p3:  # Deng2D uses sets of three
         p3["r3"] = ""
     p3["t0"] = pd.to_numeric(p3.ToA) - pd.to_numeric(p3.T01)
-    legacy_b = p3[(p3.solution == "B") & np.isfinite(p3[["X", "Y", "Z", "t0"]]).all(axis=1)].copy()
+    numeric_cols = ["X", "Y", "Z", "t0"]
+    for c in numeric_cols:
+        if c in p3.columns:
+            p3[c] = pd.to_numeric(p3[c], errors="coerce")
+    legacy_a = p3[(p3.solution == "A") & p3[numeric_cols].notna().all(axis=1)].copy()
 
     rows = []
     for line in LINES:
         for tag in TAGZ:
             ids, zt = d.tx[(line, tag)], TAGZ[tag]
-            legacy_rows = legacy_b[(legacy_b.Tag_ID == tag) & legacy_b.transNo.isin(ids)]
+            legacy_rows = legacy_a[(legacy_a.Tag_ID == tag) & legacy_a.transNo.isin(ids)]
             g_legacy = legacy_rows.groupby("transNo").agg(
                 x=("X", "mean"), y=("Y", "mean"), z=("Z", "mean"),
                 t0=("t0", "median"), n=("X", "size")).reset_index().sort_values("t0")
@@ -213,13 +295,15 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
                 receiver_sets=("receiver_set", "nunique")).reset_index().sort_values("t0")
             g_supported = legacy_receiver_set_consensus(legacy_rows)
             g_smooth, rejected = smooth_track(g_supported)
+            g_kalman, _ = kalman_filter_track(g_smooth, process_noise=0.5, measurement_noise=2.0, z_noise=1.0)
             if g_legacy.empty:
                 print("  %s %s: no pipeline solutions" % (line, tag))
                 continue
-            variants = (("3D legacy B centroid", g_legacy, "3D_legacy_B"),
+            variants = (("3D legacy A centroid", g_legacy, "3D_legacy_A"),
                         ("3D hull/sentinel screened median", g_hull, "3D_hull_screened"),
                         ("3D independent-set consensus", g_supported, "3D_set_consensus"),
-                        ("3D consensus/Hampel smoothed", g_smooth, "3D_consensus_smoothed"))
+                        ("3D consensus/Hampel smoothed", g_smooth, "3D_consensus_smoothed"),
+                        ("3D Kalman filtered", g_kalman, "3D_kalman"))
             scored = {}
             for name, g, file_token in variants:
                 if g.empty:
@@ -266,6 +350,28 @@ def item12(d, db, table="tblPositions_Deng", plot_tokens=None):
                 ax.set_box_aspect((x_max - x_min, y_max - y_min, z_max - z_min))
                 fig.savefig(zoom_png, dpi=150, bbox_inches="tight")
                 plt.close(fig)
+                # 2D top-down plot
+                fig2 = plt.figure(figsize=(9, 7))
+                ax2 = fig2.add_subplot(111)
+                ax2.plot(tr.x, tr.y, color="black", linestyle="-", linewidth=3.5,
+                         zorder=3, label="GPS truth")
+                ax2.plot(blue_track.x, blue_track.y, color="blue", linestyle="-", linewidth=2.5,
+                         zorder=2, label="Pipeline Deng XY estimate")
+                ax2.set_title("%s | %s (%s)\n%d/%d fixes; median XY error %.1f m" %
+                         (line, tag, name, summary["scored_transmissions"], len(ids),
+                          summary["horizontal_error_median_m"]), fontsize=11)
+                ax2.set_xlabel("X (m)")
+                ax2.set_ylabel("Y (m)")
+                ax2.set_aspect("equal")
+                ax2.grid(True)
+                ax2.legend(loc="upper left", fontsize=8, frameon=False)
+                ax2.set_xlim(x_min, x_max)
+                ax2.set_ylim(y_min, y_max)
+                full_2d = OUT / ("item12_pipeline2d_%s_%s_%s_full_range.png" % (file_token, line, tag))
+                zoom_2d = OUT / ("item12_pipeline2d_%s_%s_%s.png" % (file_token, line, tag))
+                fig2.savefig(full_2d, dpi=150, bbox_inches="tight")
+                fig2.savefig(zoom_2d, dpi=150, bbox_inches="tight")
+                plt.close(fig2)
             print("  %s %s: raw %d, hull-valid %d, Hampel removed %d" %
                   (line, tag, len(g_legacy), len(g_hull), rejected))
     tab = pd.DataFrame(rows)

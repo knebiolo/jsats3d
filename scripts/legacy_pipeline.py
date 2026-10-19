@@ -48,6 +48,15 @@ DERIVED_TABLES = [
     "tblMetronomeUnfiltered", "tblMetronomeFiltered", "tblMetronomeSecondFiltered",
     "tblDetectionClockFixed", "tblDetectionFilterPrimary", "tblDetectionFilterSecondary",
 ]
+
+# Receivers whose Z is fixed to tape-measured depth (from config Excel Hydrophone Depth ft -> meters).
+# X/Y are solved with Deng2D (fish Z fixed, receiver Z fixed).
+# PM 2026-10-14: Deng Z was off by 7 ft (ZOI01), 14 ft (ZOI02), 5 ft (ZOI03) vs tape.
+FIXED_Z_RECEIVERS = {
+    "ZOI01": -11.150,   # 36.583 ft
+    "ZOI02": -12.395,   # 40.667 ft
+    "ZOI03": -10.287,   # 33.750 ft
+}
 RECEIVER_DTYPES = {"Rec_ID": str, "Type": str, "Tag_ID": str, "Ref_Elev": str, "X": np.float64, "Y": np.float64,
                    "Z": np.float64, "X_t": np.float64, "Y_t": np.float64, "Z_t": np.float64}
 
@@ -345,25 +354,49 @@ def receiver_sets(legacy, surface, deep):
 
 
 def position_deep_receivers(db, surface, deep, work, method, solution):
-    """coordinate_with_Deng.py: position each deep receiver's own beacon, write the median to X_t/Y_t/Z_t."""
+    """Position each deep receiver's own beacon, write median to X_t/Y_t/Z_t.
+
+    If a receiver is in the fixed-Z list (see FIXED_Z_RECEIVERS), X/Y are solved
+    with Deng2D (fish Z fixed at the receiver's config depth) and Z is kept from
+    config. Otherwise the legacy Deng root-B median is used for all three axes.
+    """
+    fixed_z = FIXED_Z_RECEIVERS  # {rec: z_t} — tape-measured depths, solved via 2D
     out = Path(fresh_folder(work / "deep_receivers"))
     for rec in deep:
         tag = query(db, "select Tag_ID from tblReceiver where Rec_ID = ?", (rec,)).Tag_ID.iloc[0]
         print("Deep receiver %s: beacon %s" % (rec, tag))
         if not tag_multipath(db, tag, work, method):
             continue
-        pos = deng(db, tag, surface, out, work / "figures")
-        if pos is None:
-            continue
-        sols = pos.DengSolutionA_unfiltered if solution == "A" else pos.DengSolutionB_unfiltered
-        sols = sols[sols.comment == "solution found"]
-        if sols.empty:
-            print("WARNING: no Deng solutions for %s; X_t/Y_t/Z_t unchanged" % rec)
-            continue
-        x, y, z = (float(sols[c].median()) for c in ("X", "Y", "Z"))
-        execute(db, "update tblReceiver set X_t = %r, Y_t = %r, Z_t = %r where Rec_ID = '%s'" % (x, y, z, rec))
-        print("Deep receiver %s: median of %s solution-%s positions -> X_t %.3f, Y_t %.3f, Z_t %.3f"
-              % (rec, len(sols), solution, x, y, z))
+        if rec in fixed_z:
+            # 2D solve: X/Y from Deng2D, Z from config (tape-measured depth)
+            z_cfg = float(query(db, "select Z_t from tblReceiver where Rec_ID = ?", (rec,)).Z_t.iloc[0])
+            pos = deng_2d(db, tag, surface, out, work / "figures", fixed_z=z_cfg)
+            if pos is None:
+                print("WARNING: no Deng2D position for %s; X_t/Y_t/Z_t unchanged" % rec)
+                continue
+            sols = pos.Deng2DSolutionA if solution == "A" else pos.Deng2DSolutionB
+            sols = sols[sols.comment == "solution found"]
+            if sols.empty:
+                print("WARNING: no Deng2D solutions for %s; X_t/Y_t/Z_t unchanged" % rec)
+                continue
+            x, y = (float(sols[c].median()) for c in ("X", "Y"))
+            execute(db, "update tblReceiver set X_t = %r, Y_t = %r, Z_t = %r where Rec_ID = '%s'" % (x, y, z_cfg, rec))
+            print("Deep receiver %s: Deng2D median of %s solution-%s positions -> X_t %.3f, Y_t %.3f, Z_t %.3f (fixed)"
+                  % (rec, len(sols), solution, x, y, z_cfg))
+        else:
+            # Legacy 3D Deng
+            pos = deng(db, tag, surface, out, work / "figures")
+            if pos is None:
+                continue
+            sols = pos.DengSolutionA_unfiltered if solution == "A" else pos.DengSolutionB_unfiltered
+            sols = sols[sols.comment == "solution found"]
+            if sols.empty:
+                print("WARNING: no Deng solutions for %s; X_t/Y_t/Z_t unchanged" % rec)
+                continue
+            x, y, z = (float(sols[c].median()) for c in ("X", "Y", "Z"))
+            execute(db, "update tblReceiver set X_t = %r, Y_t = %r, Z_t = %r where Rec_ID = '%s'" % (x, y, z, rec))
+            print("Deep receiver %s: median of %s solution-%s positions -> X_t %.3f, Y_t %.3f, Z_t %.3f"
+                  % (rec, len(sols), solution, x, y, z))
 
 
 PROGRESS_TABLE = "tblProcessProgress"

@@ -306,8 +306,17 @@ class multipath_data_object():
         if metronome == True:
             datSQL = "SELECT * from tblMetronomeUnfiltered WHERE Tag_ID = '%s'"%(tag)
         else:
-            datSQL = "SELECT * from tblDetectionClockFixed WHERE Tag_ID = '%s'"%(tag)
-        self.data = pd.read_sql(datSQL, con = conn)
+            # For study tags (fish), use tblDetectionRaw since receivers are already clock-fixed via step 4.
+            # tblDetectionClockFixed only has master beacon data, not fish tag data.
+            if self.tagType == 'study':
+                datSQL = "SELECT * from tblDetectionRaw WHERE Tag_ID = '%s'"%(tag)
+                self.data = pd.read_sql(datSQL, con = conn)
+                # Rename 'seconds' to 'seconds_fix' to match downstream expectations
+                if 'seconds' in self.data.columns and 'seconds_fix' not in self.data.columns:
+                    self.data = self.data.rename(columns={'seconds': 'seconds_fix'})
+            else:
+                datSQL = "SELECT * from tblDetectionClockFixed WHERE Tag_ID = '%s'"%(tag)
+                self.data = pd.read_sql(datSQL, con = conn)
         
         self.scratchWS = scratchWS
         
@@ -418,6 +427,7 @@ def multipath_2(multipath_object):
                 recDat.sort_index(level = 'seconds_fix', inplace = True)
                 # group by transmission number and rank the epoch, then rename series det rank for detection rank
                 grouped = recDat.groupby(by = ['transNo'])['seconds_fix'].rank().rename('det_rank')
+                recDat = recDat.drop(columns=['det_rank'], errors='ignore')
                 recDat = recDat.join(grouped, how = 'left')                        # join i
                 # create a multilevel index on transmission number and epoch
                 transNo = recDat.transNo.values
@@ -476,7 +486,7 @@ def multipath_data_management(inputWS,projectDB,primary = True, metronome = Fals
     conn = sqlite3.connect(projectDB)
     c = conn.cursor()
     for f in files:
-        dat = pd.read_csv(os.path.join(inputWS,f))
+        dat = pd.read_csv(os.path.join(inputWS,f), dtype = {'Tag_ID': str})  # all-digit codes (5939) otherwise load as integers
         #dat.drop(['FreqOff','Valid'],axis = 1,inplace = True)
         dat.to_sql(tblName, con=conn, index=False, if_exists='append', chunksize=1000)
         os.remove(os.path.join(inputWS,f))
@@ -1031,22 +1041,107 @@ def clock_fix(clock_fix_object):
                 clock_fix_object.receiver_dat = receiver_dat 
                 receiver_dat.sort_values(by = 'seconds',inplace = True)
                 
-                # Fit picewise linear to error line:
+                # Fit piecewise linear to error line, accounting for clock jumps:
                 residual_curve = _clock_fix_interpolation_knots(receiver_dat, 'ToA_error')
-                residual = interp1d(residual_curve.seconds.values,residual_curve.ToA_error.values,kind = 'linear',bounds_error = False, fill_value = 9999)  # create a function for the residual at time of arrival
+                
+                # Read clock jump events from tblDetectionClockFixed
+                conn = sqlite3.connect(clock_fix_object.projectDB, timeout = 30.0)
+                c = conn.cursor()
+                has_table = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = 'tblDetectionClockFixed'"
+                ).fetchone()
+                if has_table:
+                    jump_events = pd.read_sql("""
+                        SELECT seconds, CounterRestart, OffsetChanged, OneSecondAdjustmentEvidence
+                        FROM tblDetectionClockFixed
+                        WHERE Rec_ID = '%s'
+                          AND (CounterRestart = 1 OR OffsetChanged = 1 OR OneSecondAdjustmentEvidence = 1)
+                        ORDER BY seconds
+                    """ % clock_fix_object.current_receiver, conn)
+                else:
+                    jump_events = pd.DataFrame()
+                c.close()
+                
+                # Copy receiver data for clock fix processing
+                curr_rec_dat = receiver_dat.copy()
+                
+                # Identify jump boundaries (5 min before/after each event)
+                jump_boundaries = []
+                if len(jump_events) > 0:
+                    t_min = residual_curve.seconds.min()
+                    t_max = residual_curve.seconds.max()
+                    window = 300  # 5 minutes in seconds
+                    
+                    for _, event in jump_events.iterrows():
+                        t_event = event['seconds']
+                        t_start = max(t_min, t_event - window)
+                        t_end = min(t_max, t_event + window)
+                        jump_boundaries.append((t_start, t_end, event))
+                    
+                    # Quantify jump magnitudes
+                    print("\nClock jump events detected for %s:" % clock_fix_object.current_receiver)
+                    for t_start, t_end, event in jump_boundaries:
+                        pre = residual_curve[(residual_curve.seconds >= t_start) & (residual_curve.seconds < event['seconds'])]
+                        post = residual_curve[(residual_curve.seconds > event['seconds']) & (residual_curve.seconds <= t_end)]
+                        if len(pre) > 0 and len(post) > 0:
+                            jump_mag = post['ToA_error'].mean() - pre['ToA_error'].mean()
+                            jump_type = []
+                            if event['CounterRestart']: jump_type.append('CounterRestart')
+                            if event['OffsetChanged']: jump_type.append('OffsetChanged')
+                            if event['OneSecondAdjustmentEvidence']: jump_type.append('OneSecondAdjustment')
+                            print("  t=%.0f  jump=%.3fs  type=%s  (pre=%.3f, post=%.3f)" % (
+                                event['seconds'], jump_mag, ','.join(jump_type),
+                                pre['ToA_error'].mean(), post['ToA_error'].mean()))
+                
+                # Build piecewise interpolator
+                if len(jump_boundaries) > 0:
+                    # Sort boundaries by event time
+                    jump_boundaries.sort(key=lambda x: x[2]['seconds'])
+                    
+                    # Create segments: everything before first jump, between jumps, after last jump
+                    segment_boundaries = [t_min]
+                    for t_start, t_end, event in jump_boundaries:
+                        segment_boundaries.append(t_start)
+                        segment_boundaries.append(t_end)
+                    segment_boundaries.append(t_max)
+                    segment_boundaries = sorted(set(segment_boundaries))
+                    
+                    # Build list of (t_start, t_end, interpolator) for each segment
+                    piecewise_interps = []
+                    for i in range(len(segment_boundaries) - 1):
+                        seg_start = segment_boundaries[i]
+                        seg_end = segment_boundaries[i + 1]
+                        seg_mask = (residual_curve.seconds >= seg_start) & (residual_curve.seconds <= seg_end)
+                        seg_data = residual_curve[seg_mask]
+                        if len(seg_data) >= 2:
+                            piecewise_interps.append((seg_start, seg_end, 
+                                interp1d(seg_data.seconds.values, seg_data.ToA_error.values, 
+                                        kind='linear', bounds_error=False, fill_value='extrapolate')))
+                    
+                    # Create piecewise interpolator function
+                    def piecewise_residual(t):
+                        t_arr = np.atleast_1d(np.asarray(t, dtype=float))
+                        result = np.full_like(t_arr, 9999.0)
+                        for seg_start, seg_end, interp in piecewise_interps:
+                            mask = (t_arr >= seg_start) & (t_arr <= seg_end)
+                            if np.any(mask):
+                                result[mask] = interp(t_arr[mask])
+                        return result if t_arr.ndim > 0 else result[0]
+                    
+                    residual = piecewise_residual
+                    print("  Piecewise interpolator: %d segments" % len(piecewise_interps))
+                else:
+                    # No jumps: use single interpolator (original behavior)
+                    residual = interp1d(residual_curve.seconds.values, residual_curve.ToA_error.values, 
+                                      kind='linear', bounds_error=False, fill_value=9999)
+                    print("  No clock jumps detected. Using single-piece interpolation.")
+                
                 receiver_dat['seconds_residual_predicted'] = residual(receiver_dat.seconds)   # predict the residual and visually confirm with plot            
                 receiver_dat['prev_seconds'] = receiver_dat.seconds.shift()
                 receiver_dat['prev_error'] = receiver_dat.ToA_error.shift()
                 receiver_dat['beta1'] = receiver_dat.prev_error
                 receiver_dat['beta2'] = (receiver_dat.ToA_error - receiver_dat.prev_error)/(receiver_dat.seconds - receiver_dat.prev_seconds)                      
-                            
-                conn = sqlite3.connect(clock_fix_object.projectDB, timeout = 30.0)
-                c = conn.cursor()
-                
-                # fix the time of arrival at receiver j
-                sql = "SELECT * FROM tblDetectionRaw WHERE Rec_ID = '%s'"%(clock_fix_object.current_receiver)
-                curr_rec_dat = pd.read_sql_query(sql,conn)
-                curr_rec_dat['timeDiff'] = np.zeros(len(curr_rec_dat))
+            
                 curr_rec_dat.sort_values(by = 'seconds',inplace = True)
                 curr_rec_dat['seconds_residual'] = residual(curr_rec_dat.seconds)
                 curr_rec_dat = curr_rec_dat[curr_rec_dat.seconds_residual != 9999]
@@ -1112,7 +1207,7 @@ def epoch_fix_data_management(inputWS,projectDB):
     conn = sqlite3.connect(projectDB)
     c = conn.cursor()
     for f in files:
-        dat = pd.read_csv(os.path.join(inputWS,f))#,dtype = {"detHist":str})
+        dat = pd.read_csv(os.path.join(inputWS,f), dtype = {'Tag_ID': str})
         dat.to_sql('tblDetectionClockFixed', con=conn, index=False, if_exists='append', chunksize=1000)
         os.remove(os.path.join(inputWS,f))
         del dat
@@ -1223,7 +1318,8 @@ class position():
             return np.array([static_x, static_y, z_value])
         seconds, gps_x, gps_y, first, last = gps
         if timestamp < first or timestamp > last:
-            raise ValueError("No GPS position for %s at %.6f; refusing extrapolation" % (rec_id, timestamp))
+            # GPS outside valid range — fall back to static position (fixed receivers)
+            return np.array([static_x, static_y, z_value])
         x = np.interp(timestamp, seconds, gps_x)
         y = np.interp(timestamp, seconds, gps_y)
         return np.array([x, y, z_value])
@@ -1720,11 +1816,13 @@ class kernels():
             if tag_ID != None:
                 sql = 'SELECT * FROM tblPositions_Deng WHERE Tag_ID == "%s"'%(tag_ID)
                 self.dat = pd.read_sql(sql, con = conn)
-                self.dat = self.dat[(self.dat.comment == 'solution found') & (self.dat.solution == 'B')] # just get positions
+                # PM 2026-10-14: keep both roots A and B, no hull filter (positions outside hull are valid, just less accurate)
+                self.dat = self.dat[self.dat.comment == 'solution found']
             else:
                 sql = 'SELECT * FROM tblPositions_Deng'
                 self.dat = pd.read_sql(sql, con = conn)
-                self.dat = self.dat[(self.dat.comment == 'solution found') & (self.dat.solution == 'B')] # just get positions
+                # PM 2026-10-14: keep both roots A and B, no hull filter
+                self.dat = self.dat[self.dat.comment == 'solution found']
                 self.dat = self.dat.iloc[::10, :]
             # create an epehmeris - we don't want densities outside of the convex hull of the receivers
             recSQL = 'SELECT * FROM tblReceiver'

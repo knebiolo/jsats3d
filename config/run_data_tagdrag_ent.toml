@@ -33,7 +33,7 @@ bm_elev_units    = 'feet'
 output_units     = 'meters'
 master_receiver  = 'ZOI08'
 synch_time_start = '2025-06-10 09:00:00'
-synch_time_end   = '2025-06-10 13:00:00'
+synch_time_end   = '2025-06-10 17:00:00'   # 8 h window (PM 2026-10-14: expanded from 4 h for larger sample)
 pulse_rates      = {}
 
 [legacy]
@@ -46,16 +46,20 @@ surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
 deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
 receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
 receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
-                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+                     'CFD01', 'CFD05', 'CFD09']  # CFD span forebay: entrance (01), mid (05), tailrace (09)
 fixed_z_2d        = ''
 fixed_z_2d_by_tag = { FC36 = -1.524, FFD3 = -4.572 }   # drag depths 5 ft / 15 ft below the surface (tblReceiver Z frame); depth reference to be confirmed
-deep_solution     = 'B'
+deep_solution     = 'A'
 adopt_deep_z      = 'solved'  # 'solved' = legacy (adopt Deng median Z); 'config' = keep measured hydrophone depth (ZOI02 solved Z was 4.3 m off measured)
-known_depth_diagnostics = false  # 2D retired for ENT drags 2026-10-09: CFD float sets gave 2-4x worse XY error than 3D
+known_depth_diagnostics = true  # 2D plots: GPS truth (black) vs Deng2D solved (blue)
 deng_surface      = false   # true: also Deng static surface receivers; 2026-10-08 test made GPS worse, keep false
-positions_dbscan   = true    # DBSCAN screen on root-B XY; separate table/plots, legacy tables unchanged (owner sign-off pending for production)
-dbscan_eps_m       = 5.0
+positions_dbscan   = true    # DBSCAN screen on root-B pings; separate table/plots, legacy tables unchanged (owner sign-off pending for production)
+dbscan_mode        = 'acceleration'  # 'distance' = XY only (earlier default); settings below tuned on ENT-01..05 GPS 2026-10-13 (70% kept, XY p90 8.5 m)
+dbscan_eps_m       = 8.0
 dbscan_min_samples = 5
+dbscan_accel_scale = 5.0   # metres of feature distance per m/s^2 of horizontal acceleration
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0  # no acceleration across gaps longer than this
 study_tags        = []
 signal_proxies    = false
 work_dir          = ''

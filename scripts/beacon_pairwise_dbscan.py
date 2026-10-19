@@ -246,7 +246,7 @@ def write_legacy_tables(path, det, res, anchor_epochs, tag, anchor, beacon_rec, 
     hm["delta_s"] = np.nan
     first_map = pd.concat([first_map, hm[["Rec_ID", "burst", "transNo", "dbscan_class", "delta_s"]]],
                           ignore_index=True)
-    rows = det.merge(first_map, on=["Rec_ID", "burst"], how="inner")
+    rows = det.merge(first_map, on=["Rec_ID", "burst"], how="inner", suffixes=("", "_first_map"))
     rows["Tag_ID"] = tag
     rows["timeStamp"] = pd.to_datetime(rows.seconds, unit="s").dt.strftime("%Y-%m-%d %H:%M:%S.%f")
     rows["multipath"] = (rows.det_rank > 1).astype(int)
@@ -337,18 +337,44 @@ def filter_deep_beacon(database, tag):
             raise ValueError("No pulseRate for %s; refusing to guess" % tag)
         period = float(rate.iloc[0])
         first = primary[(primary.multipath == 0) & primary.transNo.notna()]
-        first = first.sort_values("seconds_fix").drop_duplicates(["Rec_ID", "transNo"])
+        first = first.sort_values("seconds_fix").drop_duplicates(["Rec_ID", "seconds_fix"])
         # Anchor = the receiver with the most first arrivals of this beacon (coverage rule, not tuned per tag).
         anchor = first.groupby("Rec_ID").size().idxmax()
-        a = first[first.Rec_ID == anchor][["transNo", "seconds_fix"]].rename(columns={"seconds_fix": "t_anchor"})
-        paired = first[first.Rec_ID != anchor].merge(a, on="transNo")
+        non_anchor = first[first.Rec_ID != anchor].copy()
+        
+        if len(non_anchor) == 0:
+            # Only one receiver detected this beacon — skip DBSCAN, mark all as clean
+            print(f"  DEBUG: tag={tag} only anchor detected, skipping DBSCAN")
+            out = primary[primary.transNo.notna()].copy()
+            out["dbscan_class"] = "clean"
+            out["delta_s"] = 0.0
+            out["multipath_prediction"] = 0
+            tables = pd.read_sql("select name from sqlite_master where type = 'table'", con).name.tolist()
+            if "tblDetectionFilterSecondary" in tables:
+                con.execute("delete from tblDetectionFilterSecondary where Tag_ID = ?", (tag,))
+            out.to_sql("tblDetectionFilterSecondary", con, if_exists="append", index=False, chunksize=1000)
+            con.commit()
+            summary = pd.DataFrame({"clean": [len(out)]})
+            return anchor, summary, 0, 0
+        
+        print(f"  DEBUG: tag={tag} anchor={anchor} first rows={len(first)} receivers={first.Rec_ID.unique().tolist()}")
+        a = first[first.Rec_ID == anchor][["seconds_fix"]].rename(columns={"seconds_fix": "t_anchor"}).reset_index(drop=True)
+        # Join non-anchor receivers to anchor by nearest time (like metronome stage uses merge_asof)
+        paired = pd.merge_asof(
+            non_anchor.sort_values("seconds_fix"),
+            a.sort_values("t_anchor"),
+            left_on="seconds_fix", right_on="t_anchor",
+            direction="nearest", tolerance=period / 2
+        )
+        print(f"  DEBUG: paired after merge_asof rows={len(paired)}")
+        paired = paired[["Rec_ID", "transNo", "t_anchor", "seconds_fix"]].drop_duplicates("t_anchor")
         paired["delta_s"] = paired.seconds_fix - paired.t_anchor
         res, suspects = classify(paired[["Rec_ID", "transNo", "t_anchor", "delta_s"]], period)
         a = a.assign(Rec_ID=anchor, delta_s=0.0,
                      dbscan_class=np.where(a.t_anchor.isin(suspects), "anchor_suspect", "anchor"))
         labels = pd.concat([res[["Rec_ID", "transNo", "delta_s", "dbscan_class"]],
                             a[["Rec_ID", "transNo", "delta_s", "dbscan_class"]]], ignore_index=True)
-        out = primary[primary.transNo.notna()].merge(labels, on=["Rec_ID", "transNo"], how="left")
+        out = primary[primary.transNo.notna()].merge(labels, on=["Rec_ID", "transNo"], how="left", suffixes=("_primary", ""))
         later = out.multipath == 1
         out.loc[later, "dbscan_class"] = "later_arrival"
         out.loc[later, "delta_s"] = np.nan

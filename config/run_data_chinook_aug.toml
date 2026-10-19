@@ -1,0 +1,72 @@
+# Run file for five Chinook tags heard in the array 2025-08-06 17:00 to 2025-08-09 (created 2026-10-12).
+# Same decisions as config/run_data_tagdrag_ent.toml: master ZOI08, pairwise DBSCAN anchor ZOI03, ZOI05/06 swap built in.
+# Tags: 5939, B7D1, B400, 4CA5, 38B7 (released 08-05 and 08-12 groups, each heard by >= 4 ZOI incl. a deep one on thousands of pings).
+# Pulse periods are not in any deliverable: regression of ping times on pulse count over contiguous runs (+-0.004 s). Owner to confirm.
+# K: is read only; everything is written to C:.
+# Run from the repo folder:  python scripts/run_data.py config/run_data_chinook_aug.toml   (add --dry-run to check)
+# Then:  python scripts/tagdrag_2025_pipeline.py config/run_data_chinook_aug.toml   (steps 2-11; drag plots skip themselves)
+
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\jsats3d_2025_chinook_aug.db'
+
+[selection]
+species   = []
+tags      = ['5939', 'B7D1', 'B400', '4CA5', '38B7']
+start     = '2025-08-06 17:00:00'
+end       = '2025-08-09 00:00:00'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-08-06 17:00:00'
+synch_time_end   = '2025-08-09 00:00:00'
+pulse_rates      = { '5939' = 3.1396, 'B7D1' = 3.1099, 'B400' = 3.0103, '4CA5' = 3.0806, '38B7' = 3.1497 }
+
+[legacy]
+run               = false
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'B'
+adopt_deep_z      = 'config'  # 'solved' put ZOI01 at +22.9 m (above the water); surface beacons are coplanar so deep Z is unobservable
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'  # settings tuned on the ENT tag drag (see run_data_tagdrag_ent.toml)
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = false
+work_dir          = ''
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-08-06 17:00:00'
+end             = '2025-08-09 00:00:00'
+output_dir      = ''

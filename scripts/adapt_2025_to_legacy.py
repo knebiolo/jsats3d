@@ -53,6 +53,16 @@ Z_REFERENCE_WSEL_FT = 862.46
 # Hydrophone positions confirmed exchanged in the config (project lead, 2026-10-08): the config row of one holds the
 # coordinates of the other. Evidence: beacon deviations, deep beacon solutions and drag accuracy (journal 2026-10-07).
 CONFIRMED_POSITION_SWAPS = (("ZOI05", "ZOI06"),)
+# PM 2026-10-14: hydrophone offset from pole GPS location in X/Y plane (meters). GPS is pole base; hydrophone is offset perpendicular to surface.
+HYDROPHONE_OFFSETS = {
+    "ZOI04": (0.68, -0.68),
+    "ZOI05": (0.00, -0.94),
+    "ZOI06": (0.00, -0.94),
+    "ZOI07": (0.56, 1.06),
+    "ZOI08": (0.56, 1.06),
+    "ZOI09": (0.56, 1.06),
+    "ZOI10": (0.68, -0.68),
+}
 POSITION_COLUMNS = ["X", "Y", "Z", "X_t", "Y_t", "Z_t", "easting", "northing"]
 DD_N_STRING_COLUMNS = ["DD_N_0p5", "DD_N_1p5", "DD_N_9", "DD_N_18"]
 RECEIVER_METADATA_COLUMNS = {
@@ -139,6 +149,14 @@ def load_receiver_table(gps_path, config_path):
     origin_y = receivers["northing"].min()
     receivers["X"] = receivers["easting"] - origin_x
     receivers["Y"] = receivers["northing"] - origin_y
+    # PM 2026-10-14: apply hydrophone offset from pole GPS location in X/Y plane (meters)
+    # GPS = pole base; hydrophone is offset perpendicular to surface.
+    # NOTE: offsets are in meters (PM provided values). Existing databases are NOT affected —
+    # the adapter must be re-run to rebuild tblReceiver with corrected positions.
+    for rec_id, (dx, dy) in HYDROPHONE_OFFSETS.items():
+        mask = receivers["Rec_ID"] == rec_id
+        receivers.loc[mask, "X"] = receivers.loc[mask, "X"] + dx
+        receivers.loc[mask, "Y"] = receivers.loc[mask, "Y"] + dy
     receivers["X_t"] = receivers["X"]
     receivers["Y_t"] = receivers["Y"]
     receivers["HydrophoneDepth_ft"] = receivers["Depth_ft"]

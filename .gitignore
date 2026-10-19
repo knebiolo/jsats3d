@@ -30,3 +30,20 @@ output/positioning/*
 # Local copies of raw input data (large, read from K:); keep only the README
 data/*
 !data/README.md
+
+# Diagnostic / standalone scripts (not part of pipeline)
+scripts/check_hold_times.py
+scripts/debug_static_hold.py
+scripts/plot_fish_tracks.py
+scripts/score_static_holds.py
+
+# Legacy standalone scripts (replaced by legacy_pipeline.py, kept for reference)
+scripts/metronome.py
+scripts/mulitpath.py
+
+# Ad-hoc diagnostic / scratch scripts (root-level)
+_check_*.py
+check_*.py
+clear_*.py
+create_excel.py
+drop_*.py

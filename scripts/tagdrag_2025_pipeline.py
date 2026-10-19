@@ -190,7 +190,10 @@ def deep_positions_run(c):
         sols = getattr(pos, "DengSolution%s_unfiltered" % root) if pos is not None else pd.DataFrame({"comment": []})
         sols = sols[sols.comment == "solution found"]
         if sols.empty and r in c.deep:
-            raise RuntimeError("no legacy root-%s solutions for deep receiver %s" % (root, r))
+            # Not enough receivers to solve — keep configured position
+            notes[r] = {"found": 0, "references": len(refs), "skipped": "insufficient receivers, using configured position"}
+            rows.append((r, rec.at[r, "Tag_ID"], float(rec.at[r, "X_t"]), float(rec.at[r, "Y_t"]), float(rec.at[r, "Z_t"]), 0, 0, root))
+            continue
         if sols.empty:
             # surface beacon not positionable from its references: configured position kept
             rows.append((r, rec.at[r, "Tag_ID"], float(rec.at[r, "X_t"]), float(rec.at[r, "Y_t"]), float(rec.at[r, "Z_t"]), 0, 0, root))
@@ -266,7 +269,7 @@ def adopt_deep_run(c):
             png.unlink()
         for tag in ("FC36", "FFD3"):
             for suffix in ("", "_full_range"):
-                (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
+                (c.review / ("item12_pipeline3d_3D_legacy_A_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
     return notes
 
 
@@ -355,10 +358,11 @@ def fish_multipath_run(c):
         if data.empty:
             raise RuntimeError("no clock-fixed detections for study tag %s" % tag)
         jsats3d.multipath_2(data)
+        existing = table_names(c.db)  # read before the delete: a large delete locks other connections
         con = sqlite3.connect(c.db)
         try:
             for table in ("tblDetectionFilterPrimary", "tblDetectionFilterSecondary"):
-                if table in table_names(c.db):
+                if table in existing:
                     con.execute("delete from %s where Tag_ID = ?" % table, (tag,))
             con.commit()
         finally:
@@ -384,7 +388,8 @@ def fish_multipath_run(c):
 
 
 def speed_of_sound_done(c):
-    return False
+    """Check if speed-of-sound diagnostic has been computed."""
+    return count(c.db, "tblInterpolatedTemp") > 0
 
 
 def speed_of_sound_run(c):
@@ -402,7 +407,13 @@ def speed_of_sound_run(c):
 
 
 def positions_done(c):
-    return "tblPositions_Deng" in table_names(c.db) or any((c.work / "positions").glob("*.csv"))
+    if "tblPositions_Deng" not in table_names(c.db):
+        return False
+    if any((c.work / "positions").glob("*.csv")):
+        return True
+    # Table exists but may have zero solutions - check for actual Deng solutions
+    n = count(c.db, "tblPositions_Deng", "where comment = ?", ("solution found",))
+    return n > 0
 
 
 def positions_run(c):
@@ -490,7 +501,7 @@ def positions_2d_run(c):
 def plot_drag_done(c):
     if not {"FC36", "FFD3"} <= set(c.tags):
         return True
-    return all((c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s.png" % (line, tag))).exists()
+    return all((c.review / ("item12_pipeline3d_3D_legacy_A_%s_%s.png" % (line, tag))).exists()
                for line in DRAG_LINES for tag in ("FC36", "FFD3"))
 
 
@@ -504,7 +515,7 @@ def plot_drag_run(c):
     result = subprocess.run(cmd, cwd=lp.REPO)
     if result.returncode != 0 or not plot_drag_done(c):
         raise RuntimeError("step 12 failed to generate the four legacy Deng comparison plots")
-    return {"folder": str(c.review), "blue_source": "tblPositions_Deng root B mean XYZ",
+    return {"folder": str(c.review), "blue_source": "tblPositions_Deng root A mean XYZ",
             "gps_and_tag_depth_used_for_solving": False}
 
 
@@ -517,14 +528,17 @@ def plot_drag_2d_done(c):
 
 
 def plot_drag_2d_run(c):
-    """Optional: scores and plots Deng2D (fish Z fixed) root-B centroids against the drag GPS."""
+    """Optional: scores and plots Deng2D (fish Z fixed) root-A centroids against the drag GPS."""
     if not c.run["legacy"].get("known_depth_diagnostics", False):
         return {"skipped": "known_depth_diagnostics = false"}
     if not {"FC36", "FFD3"} <= set(c.tags):
         return {"skipped": "ENT truth is available only for FC36 and FFD3"}
+    # Use the same GPS source as plot_drag_run for consistency; fallback to local copy if K: unavailable
     gps_file = Path(c.paths["config_xlsx"]).parents[1] / "5_array_testing" / "array_testing_drag_GPS.csv"
+    if not gps_file.exists():
+        gps_file = lp.REPO / "data" / "drag_GPS_2025.csv"
     cmd = [sys.executable, str(HERE / "ent_analysis_2025.py"), "--db", str(c.db), "--out", c.db.stem + "_2d",
-           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_Deng2D", "--plots", "3D_legacy_B",
+           "--only", "12", "--gps", str(gps_file), "--table", "tblPositions_Deng2D", "--plots", "3D_legacy_A",
            "--lines", *DRAG_LINES]
     result = subprocess.run(cmd, cwd=lp.REPO)
     if result.returncode != 0 or not plot_drag_2d_done(c):
@@ -540,21 +554,57 @@ def positions_dbscan_done(c):
     return not positions_dbscan_enabled(c) or "tblPositions_DengDBSCAN" in table_names(c.db)
 
 
+def ping_acceleration(t, xy, gap_s):
+    """Horizontal acceleration (m/s^2) at each ping from the pings before and after it; NaN at the ends and across gaps over gap_s."""
+    a = np.full(len(t), np.nan)
+    if len(t) < 3:
+        return a
+    dt1, dt2 = t[1:-1] - t[:-2], t[2:] - t[1:-1]
+    ok = (dt1 > 0) & (dt2 > 0) & (dt1 <= gap_s) & (dt2 <= gap_s)
+    v1 = (xy[1:-1] - xy[:-2]) / np.where(dt1 > 0, dt1, 1)[:, None]
+    v2 = (xy[2:] - xy[1:-1]) / np.where(dt2 > 0, dt2, 1)[:, None]
+    accel = np.linalg.norm(v2 - v1, axis=1) / (0.5 * (dt1 + dt2))
+    a[1:-1][ok] = accel[ok]
+    return a
+
+
 def positions_dbscan_run(c):
-    """Optional screen: DBSCAN on each tag's root-B XY per transmission; keeps every root row of transmissions in clusters."""
+    """Optional screen of root-B pings; keeps every root row of the transmissions that fall in a cluster.
+    [legacy] dbscan_mode 'distance' (default): DBSCAN on per-transmission XY.
+    'acceleration': DBSCAN on XY, depth * dbscan_depth_weight and horizontal acceleration * dbscan_accel_scale (m per m/s^2)."""
     if not positions_dbscan_enabled(c):
         return {"skipped": "positions_dbscan = false (legacy steps unchanged)"}
     from sklearn.cluster import DBSCAN
-    eps = float(c.run["legacy"].get("dbscan_eps_m", 5.0))
-    min_samples = int(c.run["legacy"].get("dbscan_min_samples", 5))
+    legacy = c.run["legacy"]
+    mode = str(legacy.get("dbscan_mode", "distance")).lower()
+    if mode not in ("distance", "acceleration"):
+        raise ValueError("dbscan_mode must be 'distance' or 'acceleration', got %r" % mode)
+    eps = float(legacy.get("dbscan_eps_m", 8.0 if mode == "acceleration" else 5.0))
+    min_samples = int(legacy.get("dbscan_min_samples", 5))
+    accel_scale = float(legacy.get("dbscan_accel_scale", 5.0))
+    depth_weight = float(legacy.get("dbscan_depth_weight", 1.0))
+    gap_s = float(legacy.get("dbscan_accel_gap_s", 12.0))
     pos = lp.query(c.db, "select * from tblPositions_Deng where comment = 'solution found'")
     root = pos[pos.solution == "B"]
+    if mode == "acceleration":
+        if "T01" not in root:
+            raise ValueError("acceleration mode needs T01 in tblPositions_Deng")
+        root = root.assign(**{col: pd.to_numeric(root[col], errors="coerce") for col in ("X", "Y", "Z", "ToA", "T01")})
+        root = root.assign(t0=root.ToA - root.T01)
+        root = root[np.isfinite(root[["X", "Y", "Z", "t0"]]).all(axis=1) & root[["X", "Y", "Z"]].abs().lt(1000).all(axis=1)]
     kept, notes = [], {}
     for tag, rows in root.groupby("Tag_ID"):
-        xy = rows.groupby("transNo")[["X", "Y"]].mean()
-        labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(xy.to_numpy(dtype=float))
-        kept_trans = set(xy.index[labels != -1])
-        notes[tag] = {"transmissions": int(len(xy)), "kept": int(len(kept_trans)), "eps_m": eps, "min_samples": min_samples}
+        if mode == "distance":
+            ping = rows.groupby("transNo")[["X", "Y"]].mean()
+            features = ping.to_numpy(dtype=float)
+        else:
+            ping = rows.groupby("transNo").agg(X=("X", "mean"), Y=("Y", "mean"), Z=("Z", "mean"), t0=("t0", "median")).sort_values("t0")
+            accel = ping_acceleration(ping.t0.to_numpy(), ping[["X", "Y"]].to_numpy(), gap_s)
+            accel = np.where(np.isnan(accel), np.nanmedian(accel) if np.isfinite(accel).any() else 0.0, accel)
+            features = np.column_stack([ping.X, ping.Y, depth_weight * ping.Z, accel_scale * accel])
+        labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(features)
+        kept_trans = set(ping.index[labels != -1])
+        notes[tag] = {"mode": mode, "transmissions": int(len(ping)), "kept": int(len(kept_trans)), "eps_m": eps, "min_samples": min_samples}
         kept.append(pos[(pos.Tag_ID == tag) & pos.transNo.isin(kept_trans)])
     con = sqlite3.connect(c.db)
     pd.concat(kept).to_sql("tblPositions_DengDBSCAN", con, if_exists="replace", index=False)
@@ -723,7 +773,9 @@ def main(argv=None):
             steps[name].update(status="FAILED", minutes=round((time.time() - began) / 60, 1),
                                error="%s: %s" % (type(error).__name__, error), traceback=trace.splitlines()[-12:])
             failed = name
-            print("FAILED: %s: %s\n%s" % (type(error).__name__, error, "\n".join(trace.splitlines()[-8:])), flush=True)
+            print("FAILED: %s: %s" % (type(error).__name__, error), flush=True)
+            print("FULL TRACEBACK:")
+            print(trace, flush=True)
         status_path.write_text(json.dumps(status, indent=2, default=str))
         if failed:
             break
