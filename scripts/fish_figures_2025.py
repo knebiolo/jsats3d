@@ -1,7 +1,7 @@
 """Generator for the PM's 2026-10-22 example-fish figures (early fish, 4 tags).
 
 Persistent deliverable tool (NOT a pipeline step; never invoked by run_data.py or
-tagdrag_2025_pipeline.py). Re-run as methods improve:
+_2025_pipeline.py). Re-run as methods improve:
 
     python scripts/fish_figures_2025.py [--db DB_PATH] [--out OUT_DIR]
 

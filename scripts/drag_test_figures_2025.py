@@ -1,7 +1,7 @@
 """Client figure generator for the 2026-10-22 PM request (tag drags).
 
 Persistent deliverable tool (NOT a pipeline step; never invoked by run_data.py or
-tagdrag_2025_pipeline.py). Re-run as methods improve:
+_2025_pipeline.py). Re-run as methods improve:
 
     python scripts/drag_test_figures_2025.py [--db DB_PATH] [--out OUT_DIR]
 

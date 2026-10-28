@@ -105,7 +105,7 @@ C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev
 #### Step 3: Run the 2025 Pipeline
 
 ```powershell
-C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev\jsat3d\jsats3d\scripts\tagdrag_2025_pipeline.py "C:\Dev\jsat3d\jsats3d\config\run_data_earlyfish_2026-10-26.toml"
+C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev\jsat3d\jsats3d\scripts\_2025_pipeline.py "C:\Dev\jsat3d\jsats3d\config\run_data_earlyfish_2026-10-26.toml"
 ```
 
 - **Timeout:** 48 hours (172,800,000 ms) — pipeline takes ~35 min, but 48h gives headroom

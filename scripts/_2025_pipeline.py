@@ -1,7 +1,7 @@
 """2025 tag drag workflow after the build: paper steps 2-11 on a legacy-format database, one command, resumable.
 
     python scripts/run_data.py config/run_data_tagdrag_ent.toml                   step 1 (parse raw files, study parameters)
-    python scripts/tagdrag_2025_pipeline.py config/run_data_tagdrag_ent.toml      everything after step 1
+    python scripts/_2025_pipeline.py config/run_data_tagdrag_ent.toml      everything after step 1
     options: --db PATH (other database, own work folder)  --only NAME ...  --from NAME  --to NAME  --list
              --init-from DB [--swap REC_A REC_B]  what-if copy of a finished database, optionally with two hydrophone positions exchanged
 

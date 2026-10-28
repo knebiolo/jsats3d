@@ -4,7 +4,7 @@
 # Pulse periods are not in any deliverable: regression of ping times on pulse count over contiguous runs (+-0.004 s). Owner to confirm.
 # K: is read only; everything is written to C:.
 # Run from the repo folder:  python scripts/run_data.py config/run_data_chinook_aug.toml   (add --dry-run to check)
-# Then:  python scripts/tagdrag_2025_pipeline.py config/run_data_chinook_aug.toml   (steps 2-11; drag plots skip themselves)
+# Then:  python scripts/_2025_pipeline.py config/run_data_chinook_aug.toml   (steps 2-11; drag plots skip themselves)
 
 data_format = 'ats'
 overwrite = false
