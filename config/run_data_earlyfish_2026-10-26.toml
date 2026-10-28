@@ -48,7 +48,7 @@ run               = true
 env               = 'jsat_legacy'
 method            = 'KNN'
 surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
-                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
 deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
 receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
 receivers_2d      = []
