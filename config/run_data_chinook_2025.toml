@@ -1,0 +1,71 @@
+# Run file for the 2025 Chinook fish positioning (created 2026-10-19).
+# 4 Chinook tags: 0FBD, 041D, 493F, 5F82 (all released from Cispus River to Clear Fork)
+# Full deployment period to capture all detections for 2D/3D positioning.
+# K: is read only; everything is written to C:.
+# Run from the repo folder:  python scripts/run_data.py config/run_data_chinook_2025.toml
+# A blank value ('' or []) means "not used" / "no filter".
+
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\jsats3d_2025_chinook.db'
+
+[selection]
+species   = []
+tags      = ['0FBD', '041D', '493F', '5F82']
+start     = '2025-06-17 00:00:00'
+end       = '2025-07-31 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-17 00:00:00'
+synch_time_end   = '2025-07-31 23:59:59'
+pulse_rates      = {}
+
+[legacy]
+run               = false
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD01', 'CFD05', 'CFD09']
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'  # Field team 2026-10-22: use tape-measured Z for ZOI01-03 (36.6, 40.7, 33.8 ft). Deng3D got 0 solutions here; tape is authoritative.
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = false
+work_dir          = ''
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-17 00:00:00'
+end             = '2025-07-31 23:59:59'
+output_dir      = ''

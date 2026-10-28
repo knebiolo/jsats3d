@@ -50,7 +50,7 @@ receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI0
 fixed_z_2d        = ''
 fixed_z_2d_by_tag = { FC36 = -1.524, FFD3 = -4.572 }   # drag depths 5 ft / 15 ft below the surface (tblReceiver Z frame); depth reference to be confirmed
 deep_solution     = 'A'
-adopt_deep_z      = 'solved'  # 'solved' = legacy (adopt Deng median Z); 'config' = keep measured hydrophone depth (ZOI02 solved Z was 4.3 m off measured)
+adopt_deep_z      = 'config'  # Field team 2026-10-22: use tape-measured Z for ZOI01-03 (36.6, 40.7, 33.8 ft). Deng was off by 7ft/14ft/5ft.
 known_depth_diagnostics = true  # 2D plots: GPS truth (black) vs Deng2D solved (blue)
 deng_surface      = false   # true: also Deng static surface receivers; 2026-10-08 test made GPS worse, keep false
 positions_dbscan   = true    # DBSCAN screen on root-B pings; separate table/plots, legacy tables unchanged (owner sign-off pending for production)
@@ -71,3 +71,13 @@ anchor          = 'ZOI03'
 start           = '2025-06-10 09:00:00'
 end             = '2025-06-10 13:00:00'
 output_dir      = ''
+
+# Figure-generator options (scripts/drag_test_figures_2025.py, scripts/fish_figures_2025.py).
+# depth_floor_m: Z (m) below which solutions are unphysical (tags cannot be below the bay bottom).
+#   Project-specific — set it per deployment from the known bathymetry.
+#   When omitted the generators auto-derive it: deepest receiver Z_t minus depth_floor_margin_m.
+# This site: deepest measured TOTAL depth 13.3 m (43.5 ft at ZOI02, config workbook); deepest
+# hydrophone -12.40 m; -16.0 m = hydrophone + 4 m (chinook 2026-10-21 audit margin).
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0

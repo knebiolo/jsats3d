@@ -1,0 +1,88 @@
+# Run file for the 2025 early-fish positioning (created 2026-10-22, PM example-fish request).
+# 4 example fish tags: 26E4, 9F8C, 1D5A, B5ED (all released Cispus River -> Clear Fork).
+# 1D5A released 2025-06-17, 9F8C/B5ED 2025-06-24 (released_v0); 26E4 absent from
+# released_v0 (released earlier? - PM to confirm). Raw scan 2026-10-23: all four present,
+# raw times 2025-06-11 .. 2025-08-06 (receiver-local, unclock-corrected), 19 receivers.
+# Window 2025-06-15 -> 2025-08-06: covers the full raw detection span (extended beyond
+# the original 06-17..07-31 plan so no fate is clipped at the tail).
+# K: is read only; everything is written to C:.
+# Run from the repo folder:  python scripts/run_data.py config/run_data_earlyfish_2026-10-26.toml
+# A blank value ('' or []) means "not used" / "no filter".
+
+data_format = 'ats'
+overwrite = true
+
+[paths]
+raw_root        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\raw_data'
+config_xlsx     = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Tag Drag Period\DD_N'
+released_file   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\10272026_test\jsats3d_2025_earlyfish.db'
+
+[selection]
+species   = []
+tags      = ['26E4', '9F8C', '1D5A', 'B5ED']
+start     = '2025-06-15 00:00:00'
+end       = '2025-08-06 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-15 00:00:00'
+synch_time_end   = '2025-08-06 23:59:59'
+# Pulse periods (s), measured 2026-10-23 from the parsed detections (median of
+# inter-pulse gaps in [2.5, 4.5] s, pooled over all 20 receivers; p10-p90 within
+# 0.02 s for each tag). released_v0.csv carries no pulse-rate column, so these are
+# the authoritative source for this build.
+pulse_rates      = { '26E4' = 2.986, '9F8C' = 3.050, '1D5A' = 3.081, 'B5ED' = 2.969 }
+
+[legacy]
+run               = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = []
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'  # Field team 2026-10-22: use tape-measured Z for ZOI01-03 (36.6, 40.7, 33.8 ft). Deng3D got 0 solutions here; tape is authoritative.
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = true
+work_dir          = ''
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-15 00:00:00'
+end             = '2025-08-06 23:59:59'
+output_dir      = ''
+
+# Figure-generator options (scripts/drag_test_figures_2025.py, scripts/fish_figures_2025.py).
+# depth_floor_m: Z (m) below which solutions are unphysical (fish cannot be below the bay bottom).
+#   Project-specific — set it per deployment from the known bathymetry.
+#   When omitted the generators auto-derive it: deepest receiver Z_t minus depth_floor_margin_m.
+# This site: deepest measured TOTAL depth 13.3 m (43.5 ft at ZOI02, config workbook); deepest
+# hydrophone -12.40 m; -16.0 m = hydrophone + 4 m (chinook 2026-10-21 audit margin).
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0

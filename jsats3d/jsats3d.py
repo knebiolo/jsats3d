@@ -305,6 +305,7 @@ class multipath_data_object():
         # get data for this tag across all receivers
         if metronome == True:
             datSQL = "SELECT * from tblMetronomeUnfiltered WHERE Tag_ID = '%s'"%(tag)
+            self.data = pd.read_sql(datSQL, con = conn)
         else:
             # For study tags (fish), use tblDetectionRaw since receivers are already clock-fixed via step 4.
             # tblDetectionClockFixed only has master beacon data, not fish tag data.
@@ -314,6 +315,55 @@ class multipath_data_object():
                 # Rename 'seconds' to 'seconds_fix' to match downstream expectations
                 if 'seconds' in self.data.columns and 'seconds_fix' not in self.data.columns:
                     self.data = self.data.rename(columns={'seconds': 'seconds_fix'})
+                
+                # F1 (2026-10-21, docs/accuracy_tuning_handoff_2026-10-21.md): apply the per-receiver
+                # clock corrections to study-tag times. Steps 2-7 compute corrections from the master
+                # beacon (tblDetectionClockFixed: piecewise (seconds, seconds_residual) per receiver)
+                # but they were never applied to fish rows, so every TDOA carried the per-receiver
+                # clock offset (e.g. ZOI09 946 ms ~ 1.4 km range bias; ZOI02 jumps). Applying them
+                # cuts drag-GPS median XY error ~60-70% and raises scored yield ~75% (test T2).
+                # t_corrected = t - residual_r(t), piecewise-linear in time; endpoint values hold
+                # outside the beacon sync window.
+                # ZOI09's 946 ms hardware offset was subtracted from the residual curve pre-fit in
+                # clock_fix() (2026-10-19), so the stored curve no longer contains it: add it back.
+                # Re-derive from data once the ZOI08 beacon host is surveyed (open owner item).
+                ZOI09_OFFSET_S = 0.946
+                # Table-existence check (not try/except): a missing table means legacy/no
+                # corrections (explicit NOTE below); any other error (e.g. missing column)
+                # must propagate loudly, not silently skip the correction.
+                clk_tables = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'").fetchall()}
+                if 'tblDetectionClockFixed' in clk_tables:
+                    clk = pd.read_sql(
+                        "SELECT Rec_ID, seconds, seconds_residual FROM tblDetectionClockFixed", conn)
+                else:
+                    clk = pd.DataFrame()
+                if not clk.empty and 'seconds_residual' in clk.columns:
+                    clock_knots = {}
+                    for rec_id, grp in clk.groupby('Rec_ID'):
+                        knots = grp.dropna(subset=['seconds', 'seconds_residual']).sort_values('seconds').drop_duplicates('seconds')
+                        if len(knots) >= 2:
+                            clock_knots[rec_id] = (knots['seconds'].to_numpy(float),
+                                                   knots['seconds_residual'].to_numpy(float))
+                    applied = 0
+                    no_curve = set()
+                    for rec_id in self.data['Rec_ID'].unique():
+                        mask = self.data['Rec_ID'] == rec_id
+                        t = pd.to_numeric(self.data.loc[mask, 'seconds_fix'], errors='coerce')
+                        if rec_id in clock_knots:
+                            ts, rs = clock_knots[rec_id]
+                            corr = np.interp(t.to_numpy(float), ts, rs, left=rs[0], right=rs[-1])
+                            if rec_id == 'ZOI09':
+                                corr = corr + ZOI09_OFFSET_S
+                            self.data.loc[mask, 'seconds_fix'] = t - corr
+                            applied += int(mask.sum())
+                        else:
+                            no_curve.add(rec_id)
+                    if no_curve:
+                        print("  WARNING: no clock correction curve for receiver(s): %s (left uncorrected)" % ', '.join(sorted(no_curve)))
+                    print("  Applied clock corrections to %d/%d fish detections (%d receivers without curves)" % (
+                        applied, len(self.data), len(no_curve)))
+                else:
+                    print("  NOTE: no tblDetectionClockFixed correction rows; fish times left uncorrected (legacy behavior)")
             else:
                 datSQL = "SELECT * from tblDetectionClockFixed WHERE Tag_ID = '%s'"%(tag)
                 self.data = pd.read_sql(datSQL, con = conn)
@@ -511,7 +561,7 @@ def multipath_classifier(tag,projectDB,outputWS, metronome = False, method = Non
         dat = pd.read_sql('SELECT * FROM tblDetectionFilterPrimary WHERE Tag_ID == "%s"'%(tag),con = conn)
     else:
         dat = pd.read_sql('SELECT * FROM tblMetronomeFiltered WHERE Tag_ID == "%s"'%(tag),con = conn)
-        rec_ID = pd.read_sql('SELECT Rec_ID from tblReceiver WHERE Tag_ID == "%s"'%(tag),con = conn).Rec_ID.values[0]
+        rec_ID = pd.read_sql('SELECT masterReceiver from tblStudyParameters',con = conn).masterReceiver.values[0]
     
     c.close()
     dat = dat[dat.SNR > 0]
@@ -1044,6 +1094,11 @@ def clock_fix(clock_fix_object):
                 # Fit piecewise linear to error line, accounting for clock jumps:
                 residual_curve = _clock_fix_interpolation_knots(receiver_dat, 'ToA_error')
                 
+                # ZOI09 has a known 946ms hardware offset — apply correction before interpolation
+                if clock_fix_object.current_receiver == 'ZOI09':
+                    print("  ZOI09: applying 946ms hardware offset correction")
+                    residual_curve['ToA_error'] = residual_curve['ToA_error'] - 0.946
+                
                 # Read clock jump events from tblDetectionClockFixed
                 conn = sqlite3.connect(clock_fix_object.projectDB, timeout = 30.0)
                 c = conn.cursor()
@@ -1092,6 +1147,51 @@ def clock_fix(clock_fix_object):
                             print("  t=%.0f  jump=%.3fs  type=%s  (pre=%.3f, post=%.3f)" % (
                                 event['seconds'], jump_mag, ','.join(jump_type),
                                 pre['ToA_error'].mean(), post['ToA_error'].mean()))
+                elif len(residual_curve) > 100:
+                    # No Internal column data — detect jumps from residual curve itself
+                    # Scan for step changes in mean residual using sliding windows
+                    print("  No Internal column events. Scanning residual curve for jumps...")
+                    t_min = residual_curve.seconds.min()
+                    t_max = residual_curve.seconds.max()
+                    window_size = 30  # ~30 beacon epochs per window
+                    sorted_curve = residual_curve.sort_values('seconds')
+                    means = []
+                    for i in range(0, len(sorted_curve) - window_size, window_size):
+                        seg = sorted_curve.iloc[i:i+window_size]
+                        means.append((seg.seconds.mean(), seg.ToA_error.mean()))
+                    
+                    # Find large jumps between adjacent windows (threshold: 50ms)
+                    auto_jumps = []
+                    for i in range(1, len(means)):
+                        prev_t, prev_m = means[i-1]
+                        curr_t, curr_m = means[i]
+                        jump = abs(curr_m - prev_m)
+                        if jump > 0.05:
+                            t_start = max(t_min, curr_t - 300)
+                            t_end = min(t_max, curr_t + 300)
+                            pre = sorted_curve[(sorted_curve.seconds >= t_start) & (sorted_curve.seconds < curr_t)]
+                            post = sorted_curve[(sorted_curve.seconds > curr_t) & (sorted_curve.seconds <= t_end)]
+                            if len(pre) > 0 and len(post) > 0:
+                                auto_jumps.append((t_start, t_end, {
+                                    'seconds': curr_t, 'CounterRestart': 0,
+                                    'OffsetChanged': 0, 'OneSecondAdjustmentEvidence': 0,
+                                    'jump_magnitude': jump, 'pre_mean': prev_m, 'post_mean': curr_m
+                                }))
+                                print("  Auto-detected jump: t=%.0f  magnitude=%.3fs  (pre=%.3f, post=%.3f)" % (
+                                    curr_t, jump, prev_m, curr_m))
+                    
+                    # Merge nearby auto-detected jumps (keep only the largest within 5min windows)
+                    merged_jumps = []
+                    for jump in auto_jumps:
+                        if not merged_jumps or abs(jump[2]['seconds'] - merged_jumps[-1][2]['seconds']) > 300:
+                            merged_jumps.append(jump)
+                        elif jump[2]['jump_magnitude'] > merged_jumps[-1][2]['jump_magnitude']:
+                            merged_jumps[-1] = jump
+                    jump_boundaries = [(j[0], j[1], j[2]) for j in merged_jumps]
+                    if jump_boundaries:
+                        print("  Auto-detected %d clock jumps from residual curve" % len(jump_boundaries))
+                    else:
+                        print("  No jumps detected in residual curve. Using single-piece interpolation.")
                 
                 # Build piecewise interpolator
                 if len(jump_boundaries) > 0:
@@ -1350,8 +1450,11 @@ class position():
         # rows are gathered and turned into a frame in chunks; appending to a growing frame per solution is quadratic
         pending = {'A': [], 'B': []}
         chunks = {'A': [], 'B': []}
+        # PERF 2026-10-26: add_row accepts both legacy DataFrame rows and fast-path tuples.
         def add_row(which, row):
-            pending[which].append(row.to_numpy()[0])
+            if isinstance(row, pd.DataFrame):
+                row = row.to_numpy()[0]
+            pending[which].append(row)
             if len(pending[which]) >= 50000:
                 chunks[which].append(pd.DataFrame(np.array(pending[which], dtype = str), columns = Solution_Cols))
                 pending[which] = []
@@ -1370,8 +1473,8 @@ class position():
         tSteps = self.tag_data.transNo.unique()                                       # identify the unique transmissions
         for j in sorted(tSteps):
             tDat = self.tag_data.iloc[by_trans[j]] if j in by_trans else no_rows                   # get data associated with this transmission
-            tDat['timeStampFix'] = pd.to_datetime(tDat.seconds_fix, unit = 's')
-            tDat['timeStampOriginal'] = pd.to_datetime(tDat.seconds, unit = 's')
+            tDat['timeStampFix'] = pd.to_datetime(tDat['seconds_fix'], unit = 's')
+            tDat['timeStampOriginal'] = pd.to_datetime(tDat['seconds_fix'], unit = 's')
             if len(tDat) >= 4: # in a perfect world, we have enogh receivers with enough observations to calculate a solution, we need at least 4
                 if print_output == True:
                     print (len(tDat))
@@ -1384,167 +1487,295 @@ class position():
                 then group by transmission number and calculate mean:
                     Cx, Cy, Cz as our final XYZ
                 '''
-                tDat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
-                tDat['rank'] = tDat.seconds_fix.rank()
-                tDat.set_index('Rec_ID', drop = False, inplace = True)
-                tested = []
+                # PERF 2026-10-26: fast path requires unique receivers and strictly increasing
+                # times within the transmission. Violations fall back to the legacy loop below.
+                recs_arr = tDat.Rec_ID.values
+                times_arr = tDat.seconds_fix.to_numpy(dtype = float)
+                fast_ok = (len(np.unique(recs_arr)) == len(recs_arr)) and bool(np.all(np.diff(times_arr) > 0))
+                if not fast_ok:
+                    tDat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
+                    tDat['rank'] = tDat.seconds_fix.rank()
+                    tDat.set_index('Rec_ID', drop = False, inplace = True)
+                    tested = []
                 
-                for combo in list(combinations(tDat.Rec_ID.values,4)):
+                    for combo in list(combinations(tDat.Rec_ID.values,4)):
                     
-                    ''' we need to test if this combination has already been tested.
-                    create a sub dataframe from combination, sort by seconds,and convert 
-                    to tuple.  If this tuple doesn't already exist in the list of 
-                    tested combinations - calculate a position'''
+                        ''' we need to test if this combination has already been tested.
+                        create a sub dataframe from combination, sort by seconds,and convert 
+                        to tuple.  If this tuple doesn't already exist in the list of 
+                        tested combinations - calculate a position'''
                     
-                    row1 = tDat[(tDat.Rec_ID == combo[0])]
-                    row2 = tDat[(tDat.Rec_ID == combo[1])]
-                    row3 = tDat[(tDat.Rec_ID == combo[2])]
-                    row4 = tDat[(tDat.Rec_ID == combo[3])]
+                        row1 = tDat[(tDat.Rec_ID == combo[0])]
+                        row2 = tDat[(tDat.Rec_ID == combo[1])]
+                        row3 = tDat[(tDat.Rec_ID == combo[2])]
+                        row4 = tDat[(tDat.Rec_ID == combo[3])]
                     
-                    sub_dat = pd.concat([row1,row2,row3,row4])
-                    sub_dat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
-                    recs = tuple(sub_dat.Rec_ID.values)
-                    sol_no = 0
+                        sub_dat = pd.concat([row1,row2,row3,row4])
+                        sub_dat.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
+                        recs = tuple(sub_dat.Rec_ID.values)
+                        sol_no = 0
                     
-                    if recs not in tested:
+                        if recs not in tested:
                         
-                        # find the reference receiver - aka one with first recapture - time difference of arrival and all 
+                            # find the reference receiver - aka one with first recapture - time difference of arrival and all 
                         
-                        ref = sub_dat.iloc[0].Rec_ID                                      # our reference time is the first time of arrival
-                        r1 = sub_dat.iloc[1].Rec_ID
-                        r2 = sub_dat.iloc[2].Rec_ID
-                        r3 = sub_dat.iloc[3].Rec_ID                                       # we only need 4 for Deng's exact solution, this will do
-                        t_ref = sub_dat.seconds_fix.iloc[0]                                 # time of arrival 1
-                        t1 = sub_dat.seconds_fix.iloc[1]
-                        t2 = sub_dat.seconds_fix.iloc[2]
-                        t3 = sub_dat.seconds_fix.iloc[3]                               # time of arrival 4
-                        # get positional data of receivers
-                        def z_at_t(t,Rec_ID):
-                            return self.receiver_z_at(Rec_ID, t, z_by_rec[Rec_ID])
+                            ref = sub_dat.iloc[0].Rec_ID                                      # our reference time is the first time of arrival
+                            r1 = sub_dat.iloc[1].Rec_ID
+                            r2 = sub_dat.iloc[2].Rec_ID
+                            r3 = sub_dat.iloc[3].Rec_ID                                       # we only need 4 for Deng's exact solution, this will do
+                            t_ref = sub_dat.seconds_fix.iloc[0]                                 # time of arrival 1
+                            t1 = sub_dat.seconds_fix.iloc[1]
+                            t2 = sub_dat.seconds_fix.iloc[2]
+                            t3 = sub_dat.seconds_fix.iloc[3]                               # time of arrival 4
+                            # get positional data of receivers
+                            def z_at_t(t,Rec_ID):
+                                return self.receiver_z_at(Rec_ID, t, z_by_rec[Rec_ID])
                                 
-                        r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref), tracks)
-                        if print_output == True:
-                            print ("The position of receiver %s is %s"%(ref,r0Pos))
-                        self.z_translation = r0Pos[2]
-                        r1Pos = self.receiver_position_at(r1, t1, z_at_t(t1, r1), tracks)
-                        if print_output == True:
-                            print ("The position of receiver %s is %s"%(r1,r1Pos))      
-                        r2Pos = self.receiver_position_at(r2, t2, z_at_t(t2, r2), tracks)
-                        if print_output == True:
-                            print ("The position of receiver %s is %s"%(r2,r2Pos))                            
-                        r3Pos = self.receiver_position_at(r3, t3, z_at_t(t3, r3), tracks)
-                        if print_output == True:
-                            print ("The position of receiver %s is %s"%(r3,r3Pos))
-                                                  
-                        # create matrices, equation 3a Deng 2011
-                        #R = np.matrix(np.vstack(((r1Pos - r0Pos),(r2Pos - r0Pos),(r3Pos - r0Pos))))
-                        R = np.matrix(np.array([[r1Pos[0]-r0Pos[0],r2Pos[0]-r0Pos[0],r3Pos[0]-r0Pos[0]],[r1Pos[1]-r0Pos[1],r2Pos[1]-r0Pos[1],r3Pos[1]-r0Pos[1]],[r1Pos[2]-r0Pos[2],r2Pos[2]-r0Pos[2],r3Pos[2]-r0Pos[2]]]))
-                        if print_output == True:
-                            print ("Posisition Matrix R \n %s"%(R))
-                        # vertical matrix of time of arrival differences (TOADs) between receiver i and reference receiver #1
-                        tdoa_1 = np.round(t1 - t_ref,6)                                    # difference in time of arrival between current receiver and reference receiver
-                        tdoa_2 = np.round(t2 - t_ref,6)
-                        tdoa_3 = np.round(t3 - t_ref,6)              
-                        t = np.matrix(np.vstack((tdoa_1,tdoa_2,tdoa_3)))               # column matrix of tdoa's                                                     
-                        if print_output == True:
-                            print ("Print T matrix \n %s"%(t))           
-                        # calculate speed of sound 
-                        avg_C = self.interpolator(t_ref)
-                        if print_output == True:
-                            print ("Current temperature = %s" %(avg_C))
-                        SoS = sos(avg_C)                                               # calculate the speed of sound at the current temperature
-                        if print_output == True:
-                            print  ("Current Speed of Sound = %s"%(SoS))
-                        
-                        # vertical matrix of b, equation 3a Deng 2011
-                        b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
-                        b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2) 
-                        b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)  
-                        b = np.matrix(np.vstack((b1,b2,b3)))
-                        if print_output == True:
-                            print ("B matrix \n %s"%(b))
-                        
-                        # solve for T_0 equations 5 and 5a Deng 2011
-                        try:
-                            a = SoS**4 * t.T * R.I * R.T.I * t - SoS**2    
-                            p = -0.5 * SoS**2 * t.T * R.I * R.T.I * b 
-                            q = 0.25 * b.T * R.I * R.T.I * b
+                            r0Pos = self.receiver_position_at(ref, t_ref, z_at_t(t_ref, ref), tracks)
                             if print_output == True:
-                                print ('a = %s, p = %s, q = %s'%(a,p,q))
-                            discriminant = float(np.asarray(p**2 - a*q).reshape(-1)[0])
-                            coefficient = float(np.asarray(a).reshape(-1)[0])
-                            if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
-                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,
-                                                              'negative quadratic discriminant - no solution','']]),
-                                                   columns=Solution_Cols)
+                                print ("The position of receiver %s is %s"%(ref,r0Pos))
+                            self.z_translation = r0Pos[2]
+                            r1Pos = self.receiver_position_at(r1, t1, z_at_t(t1, r1), tracks)
+                            if print_output == True:
+                                print ("The position of receiver %s is %s"%(r1,r1Pos))      
+                            r2Pos = self.receiver_position_at(r2, t2, z_at_t(t2, r2), tracks)
+                            if print_output == True:
+                                print ("The position of receiver %s is %s"%(r2,r2Pos))                            
+                            r3Pos = self.receiver_position_at(r3, t3, z_at_t(t3, r3), tracks)
+                            if print_output == True:
+                                print ("The position of receiver %s is %s"%(r3,r3Pos))
+                                                  
+                            # create matrices, equation 3a Deng 2011
+                            #R = np.matrix(np.vstack(((r1Pos - r0Pos),(r2Pos - r0Pos),(r3Pos - r0Pos))))
+                            R = np.matrix(np.array([[r1Pos[0]-r0Pos[0],r2Pos[0]-r0Pos[0],r3Pos[0]-r0Pos[0]],[r1Pos[1]-r0Pos[1],r2Pos[1]-r0Pos[1],r3Pos[1]-r0Pos[1]],[r1Pos[2]-r0Pos[2],r2Pos[2]-r0Pos[2],r3Pos[2]-r0Pos[2]]]))
+                            if print_output == True:
+                                print ("Posisition Matrix R \n %s"%(R))
+                            # vertical matrix of time of arrival differences (TOADs) between receiver i and reference receiver #1
+                            tdoa_1 = np.round(t1 - t_ref,6)                                    # difference in time of arrival between current receiver and reference receiver
+                            tdoa_2 = np.round(t2 - t_ref,6)
+                            tdoa_3 = np.round(t3 - t_ref,6)              
+                            t = np.matrix(np.vstack((tdoa_1,tdoa_2,tdoa_3)))               # column matrix of tdoa's                                                     
+                            if print_output == True:
+                                print ("Print T matrix \n %s"%(t))           
+                            # calculate speed of sound 
+                            avg_C = self.interpolator(t_ref)
+                            if print_output == True:
+                                print ("Current temperature = %s" %(avg_C))
+                            SoS = sos(avg_C)                                               # calculate the speed of sound at the current temperature
+                            if print_output == True:
+                                print  ("Current Speed of Sound = %s"%(SoS))
+                        
+                            # vertical matrix of b, equation 3a Deng 2011
+                            b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
+                            b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2) 
+                            b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)  
+                            b = np.matrix(np.vstack((b1,b2,b3)))
+                            if print_output == True:
+                                print ("B matrix \n %s"%(b))
+                        
+                            # solve for T_0 equations 5 and 5a Deng 2011
+                            try:
+                                a = SoS**4 * t.T * R.I * R.T.I * t - SoS**2    
+                                p = -0.5 * SoS**2 * t.T * R.I * R.T.I * b 
+                                q = 0.25 * b.T * R.I * R.T.I * b
+                                if print_output == True:
+                                    print ('a = %s, p = %s, q = %s'%(a,p,q))
+                                discriminant = float(np.asarray(p**2 - a*q).reshape(-1)[0])
+                                coefficient = float(np.asarray(a).reshape(-1)[0])
+                                if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
+                                    row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,
+                                                                  'negative quadratic discriminant - no solution','']]),
+                                                       columns=Solution_Cols)
+                                    add_row('A', row)
+                                    add_row('B', row)
+                                    sol_no = sol_no + 1
+                                    tested.append(recs)
+                                    continue
+                                # Solve for ToA
+                                T_0a = (-p + np.sqrt(p**2 - a*q))/a
+                                T_0b = (-p - np.sqrt(p**2 - a*q))/a
+                                if print_output == True:
+                                    print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
+                                # solve for S = positon of source with equation 4 from Deng 2011
+                                if np.sign(T_0a) > 0:
+                                    S1a = R.I.T * (0.5 * b - SoS**2 * t * T_0a)
+                                    point = np.array([r0Pos[0] + S1a.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
+                                    in_hull = point_in_hull(point,self.convex_hull)
+                                    row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
+                                                                  r0Pos[0] + S1a.item(0),
+                                                                r0Pos[1] + S1a.item(1),
+                                                                r0Pos[2] + S1a.item(2),
+                                                                T_0a.item(0),
+                                                                tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
+                                    add_row('A', row)
+                                    del row  
+                                    if print_output == True:
+                                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                        print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
+                                
+                                else:
+                                    if print_output == True:
+                                        print ("No solution A found time step %s"%(j))
+                                    row = pd.DataFrame(np.array([[j,sol_no, ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
+                                    add_row('A', row)
+                                
+                                if np.sign(T_0b) > 0:
+                                    S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
+                                    point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1b.item(1),r0Pos[2] + S1b.item(2)])
+                                    in_hull = point_in_hull(point,self.convex_hull)
+                                    row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
+                                                                  r0Pos[0] + S1b.item(0),
+                                                                r0Pos[1] + S1b.item(1),
+                                                                r0Pos[2] + S1b.item(2),
+                                                                T_0b.item(0),
+                                                                tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
+                                    add_row('B', row)
+                                    del row
+                                    if print_output == True:
+                                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                        print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
+                                else:
+                                    if print_output == True:
+                                        print ("No solution B found time step %s"%(j))
+                                    row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
+                                    add_row('B', row)
+
+                            except:
+                                if print_output == True:
+                                    print ("Singular matrix encountered, no solution at transmission %s"%(j))
+                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
                                 add_row('A', row)
                                 add_row('B', row)
+
+                            #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
+                            # increase solution counter for this timestep by 1
+                            sol_no = sol_no + 1
+                            # append combination to tested list    
+                            tested.append(recs)
+
+                        
+                else:
+                    # Fast path: precompute positions and sound speed once per transmission,
+                    # then iterate combos via index arrays with np.array math + single inv.
+                    # NOTE: np.array math produces results within ~16μm of legacy np.matrix
+                    # code due to different BLAS internals — negligible for acoustic telemetry.
+                    k = len(recs_arr)
+                    pos_arr = np.empty((k, 3))
+                    for idx in range(k):
+                        rec = recs_arr[idx]
+                        t = times_arr[idx]
+                        z = self.receiver_z_at(rec, t, z_by_rec[rec])
+                        pos_arr[idx] = self.receiver_position_at(rec, t, z, tracks)
+                    sos_cache = {}
+                    def sos_at(t):
+                        v = sos_cache.get(t)
+                        if v is None:
+                            v = sos(self.interpolator(t))
+                            sos_cache[t] = v
+                        return v
+                    tested = set()
+                    for (i0, i1, i2, i3) in combinations(range(k), 4):
+                        recs = (recs_arr[i0], recs_arr[i1], recs_arr[i2], recs_arr[i3])
+                        if recs in tested:
+                            continue
+                        sol_no = 0
+                        ref, r1, r2, r3 = recs
+                        t_ref, t1, t2, t3 = times_arr[i0], times_arr[i1], times_arr[i2], times_arr[i3]
+                        r0Pos, r1Pos, r2Pos, r3Pos = pos_arr[i0], pos_arr[i1], pos_arr[i2], pos_arr[i3]
+                        self.z_translation = r0Pos[2]
+                        if print_output == True:
+                            print ("The position of receiver %s is %s"%(ref,r0Pos))
+                        R = np.array([[r1Pos[0]-r0Pos[0], r2Pos[0]-r0Pos[0], r3Pos[0]-r0Pos[0]],
+                                      [r1Pos[1]-r0Pos[1], r2Pos[1]-r0Pos[1], r3Pos[1]-r0Pos[1]],
+                                      [r1Pos[2]-r0Pos[2], r2Pos[2]-r0Pos[2], r3Pos[2]-r0Pos[2]]])
+                        if print_output == True:
+                            print ("Posisition Matrix R \n %s"%(R))
+                        tdoa_1 = np.round(t1 - t_ref, 6)
+                        tdoa_2 = np.round(t2 - t_ref, 6)
+                        tdoa_3 = np.round(t3 - t_ref, 6)
+                        tv = np.array([tdoa_1, tdoa_2, tdoa_3])
+                        if print_output == True:
+                            print ("Print T matrix \n %s"%(tv))
+                        SoS = sos_at(t_ref)
+                        if print_output == True:
+                            print ("Current Speed of Sound = %s"%(SoS))
+                        b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
+                        b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2)
+                        b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)
+                        bv = np.array([b1, b2, b3])
+                        if print_output == True:
+                            print ("B matrix \n %s"%(bv))
+                        try:
+                            Rinv = np.linalg.inv(R)
+                            RinvT = Rinv.T
+                            # Match legacy shapes: legacy uses np.vstack -> (3,1) column, t.T -> (1,3) row
+                            tv_13 = tv.reshape(1, 3)
+                            tv_31 = tv.reshape(3, 1)
+                            bv_13 = bv.reshape(1, 3)
+                            bv_31 = bv.reshape(3, 1)
+                            # Same expression structure as legacy: t.T * R.I * R.T.I * t
+                            mt = (tv_13 @ Rinv) @ RinvT
+                            a = SoS**4 * (mt @ tv_31) - SoS**2
+                            p = -0.5 * SoS**2 * (mt @ bv_31)
+                            mb = (bv_13 @ Rinv) @ RinvT
+                            q = 0.25 * (mb @ bv_31)
+                            if print_output == True:
+                                print ('a = %s, p = %s, q = %s'%(a,p,q))
+                            discriminant = float((p**2 - a*q).item(0))
+                            coefficient = float(a.item(0))
+                            if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
+                                add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative quadratic discriminant - no solution',''))
+                                add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative quadratic discriminant - no solution',''))
                                 sol_no = sol_no + 1
-                                tested.append(recs)
+                                tested.add(recs)
                                 continue
-                            # Solve for ToA
-                            T_0a = (-p + np.sqrt(p**2 - a*q))/a
-                            T_0b = (-p - np.sqrt(p**2 - a*q))/a
+                            sq = float(np.sqrt((p**2 - a*q).item(0)))
+                            T_0a = float(((-p + sq)/a).item(0))
+                            T_0b = float(((-p - sq)/a).item(0))
                             if print_output == True:
                                 print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
-                            # solve for S = positon of source with equation 4 from Deng 2011
                             if np.sign(T_0a) > 0:
-                                S1a = R.I.T * (0.5 * b - SoS**2 * t * T_0a)
-                                point = np.array([r0Pos[0] + S1a.item(0),r0Pos[1] + S1a.item(1),r0Pos[2] + S1a.item(2)])
-                                in_hull = point_in_hull(point,self.convex_hull)
-                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
-                                                              r0Pos[0] + S1a.item(0),
-                                                            r0Pos[1] + S1a.item(1),
-                                                            r0Pos[2] + S1a.item(2),
-                                                            T_0a.item(0),
-                                                            tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)   
-                                add_row('A', row)
-                                del row  
+                                S1a = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0a))
+                                S1a0, S1a1, S1a2 = float(S1a[0,0]), float(S1a[1,0]), float(S1a[2,0])
+                                point = np.array([r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2])
+                                in_hull = point_in_hull(point, self.convex_hull)
+                                add_row('A', (j, sol_no, ref, r1, r2, r3,
+                                              r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2,
+                                              T_0a, times_arr[0], 'solution found', in_hull))
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                                    print ("Fish at %s,%s,%s"%(S1a[0]+r0Pos[0],S1a[1]+r0Pos[1],S1a[2]+r0Pos[2]))  
-                                
                             else:
                                 if print_output == True:
                                     print ("No solution A found time step %s"%(j))
-                                row = pd.DataFrame(np.array([[j,sol_no, ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                add_row('A', row)
-                                
+                                add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative time of arrival - no soluiton',''))
                             if np.sign(T_0b) > 0:
-                                S1b = R.I.T * (0.5 * b - SoS**2 * t * T_0b)
-                                point = np.array([r0Pos[0] + S1b.item(0),r0Pos[1] + S1b.item(1),r0Pos[2] + S1b.item(2)])
-                                in_hull = point_in_hull(point,self.convex_hull)
-                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,
-                                                              r0Pos[0] + S1b.item(0),
-                                                            r0Pos[1] + S1b.item(1),
-                                                            r0Pos[2] + S1b.item(2),
-                                                            T_0b.item(0),
-                                                            tDat.seconds_fix.values[0],'solution found',in_hull]]),columns = Solution_Cols)
-                                add_row('B', row)
-                                del row
+                                S1b = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0b))
+                                S1b0, S1b1, S1b2 = float(S1b[0,0]), float(S1b[1,0]), float(S1b[2,0])
+                                point = np.array([r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2])
+                                in_hull = point_in_hull(point, self.convex_hull)
+                                add_row('B', (j, sol_no, ref, r1, r2, r3,
+                                              r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2,
+                                              T_0b, times_arr[0], 'solution found', in_hull))
                                 if print_output == True:
                                     print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                                    print ("Fish at %s,%s,%s"%(S1b[0]+r0Pos[0],S1b[1]+r0Pos[1],S1b[2]+r0Pos[2]))
                             else:
                                 if print_output == True:
                                     print ("No solution B found time step %s"%(j))
-                                row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'negative time of arrival - no soluiton','']]), columns = Solution_Cols)
-                                add_row('B', row)
-
+                                add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative time of arrival - no soluiton',''))
                         except:
                             if print_output == True:
                                 print ("Singular matrix encountered, no solution at transmission %s"%(j))
-                            row = pd.DataFrame(np.array([[j,sol_no,ref,r1,r2,r3,9999.,9999.,9999.,9999.,9999.,'singular matrix encountered - no soluiton','']]), columns = Solution_Cols)
-                            add_row('A', row)
-                            add_row('B', row)
-
-                        #del ref, r1, r2, r3, t_ref, t1, t2, t3, SoS, t, T_0a, T_0b, tdoa_1, tdoa_2, tdoa_3, avg_C, a, p, q, R, b, b1, b2, b3, S1a, S1b
-                        # increase solution counter for this timestep by 1
+                            add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                          'singular matrix encountered - no soluiton',''))
+                            add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                          'singular matrix encountered - no soluiton',''))
                         sol_no = sol_no + 1
-                        # append combination to tested list    
-                        tested.append(recs)
+                        tested.add(recs)
 
-                        
             else:
                 if print_output == True:
                     print ("Not enough receivers for a solution at time step %s"%(j))
