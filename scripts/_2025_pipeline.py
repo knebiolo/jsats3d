@@ -674,11 +674,12 @@ def build_context(args):
     work.mkdir(parents=True, exist_ok=True)
     deng = deep + ([r for r in receivers_3d if r in surface and r != master_rec] if legacy.get("deng_surface", False) else [])  # static only; CFD floats never targets
     deng_tags = {r: lp.query(db, "select Tag_ID from tblReceiver where Rec_ID = ?", (r,)).Tag_ID.iloc[0] for r in deng}
+    drag_plots = not getattr(args, "no_drag_plots", False)
     return SimpleNamespace(run=run, paths=paths, db=db, work=work, surface=surface, deep=deep, receivers_3d=receivers_3d,
                            receivers_2d=list(legacy.get("receivers_2d") or []), fixed_z_2d=dict(legacy.get("fixed_z_2d_by_tag") or {}),
                            review=lp.REPO / "output" / "2025_review" / db.stem,
                            reference=[r for r in receivers_3d if r not in deep], reference_2d=[r for r in (legacy.get("receivers_2d") or receivers_3d) if r not in deep], tags=tags, deng=deng, deng_tags=deng_tags,
-                           window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]))
+                           window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]), drag_plots=drag_plots)
 
 
 def init_whatif(source, target, swaps):
@@ -730,6 +731,7 @@ def main(argv=None):
     parser.add_argument("--list", action="store_true", help="show the steps and exit")
     parser.add_argument("--init-from", metavar="DB", help="what-if: create --db as a reset copy of DB (derived tables dropped, config receivers)")
     parser.add_argument("--swap", nargs=2, action="append", metavar=("REC_A", "REC_B"), help="with --init-from: exchange two hydrophone positions")
+    parser.add_argument("--no-drag-plots", action="store_true", help="skip drag plot steps (12, 12b, 12c)")
     args = parser.parse_args(argv)
     names = [s[0] for s in STEPS]
     if args.list:
@@ -751,9 +753,15 @@ def main(argv=None):
     status = json.loads(status_path.read_text()) if status_path.exists() else {}
     status.update({"database": str(c.db), "run_file": str(Path(args.run_file)), "git_head": git_head(), "tags": c.tags})
     steps = status.setdefault("steps", {})
-    print("Database %s\nTags %s | master/anchor from run file | window %s to %s" % (c.db, c.tags, c.window_start, c.window_end))
+    print("Database %s\nTags %s | master/anchor from run file | window %s to %s | drag_plots=%s" % (c.db, c.tags, c.window_start, c.window_end, c.drag_plots))
     failed = None
     for name, label, done, run in STEPS:
+        # Skip drag plot steps if --no-drag-plots was passed
+        if not c.drag_plots and name.startswith("plot_drag"):
+            print("\n=== step %s: %s ===" % (label, name), flush=True)
+            print("skipped (--no-drag-plots)", flush=True)
+            steps.setdefault(name, {})["status"] = "done (skipped, --no-drag-plots)"
+            continue
         if name not in selected:
             continue
         print("\n=== step %s: %s ===" % (label, name), flush=True)

@@ -116,6 +116,8 @@ def main():
     ap.add_argument("--depth-floor-m", type=float, default=None,
                     help="Z (m) below which solutions are unphysical (default: [figures] depth_floor_m, "
                          "else deepest receiver Z minus margin)")
+    ap.add_argument("--tags", nargs="+", default=None,
+                    help="tags to generate figures for (default: all study tags in DB)")
     args = ap.parse_args()
     db, out = Path(args.db), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -130,10 +132,17 @@ def main():
     for c in ("X", "Y", "Z", "t0"):
         p[c] = pd.to_numeric(p[c], errors="coerce")
     p = p[(p.solution == "B") & p[["X", "Y", "Z", "t0"]].notna().all(axis=1)].copy()
-    tags = [t for t in TAG_ORDER if (p.Tag_ID == t).any()]
-    extra = sorted(set(p.Tag_ID.unique()) - set(TAG_ORDER))
-    if extra:
-        print("note: other root-B tags in DB (not requested, ignored): %s" % extra)
+    # Determine which tags to process
+    if args.tags:
+        tags = [t for t in args.tags if (p.Tag_ID == t).any()]
+        missing = [t for t in args.tags if t not in p.Tag_ID.values]
+        if missing:
+            print("note: tags not in DB (ignored): %s" % missing)
+    else:
+        tags = [t for t in TAG_ORDER if (p.Tag_ID == t).any()]
+        extra = sorted(set(p.Tag_ID.unique()) - set(TAG_ORDER))
+        if extra:
+            print("note: other root-B tags in DB (not requested, ignored): %s" % extra)
     if not tags:
         print("NO study-tag root-B positions in %s" % db.name)
         con.close()

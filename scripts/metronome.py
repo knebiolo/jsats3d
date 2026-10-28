@@ -46,5 +46,4 @@ jsats3d.multipath_data_management(outputWS,dbDir,beacon_multipath = True)       
 
 print ("All tags processed, proceed to clock fixing")
 print ("Metronome filtering took %s seconds to compile"%(round(time.time() - ts,4))) 
-    
-    
+

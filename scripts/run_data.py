@@ -40,6 +40,9 @@ DEFAULT_RUN_FILE = REPO / "config" / "run_data.toml"
 PARSER = REPO / "scripts" / "parse_ats_raw_to_legacy.py"
 DBSCAN = REPO / "scripts" / "beacon_pairwise_dbscan.py"
 LEGACY = REPO / "scripts" / "legacy_pipeline.py"
+PIPELINE_2025 = REPO / "scripts" / "_2025_pipeline.py"
+FISH_FIGURES = REPO / "scripts" / "fish_figures_2025.py"
+DRAG_FIGURES = REPO / "scripts" / "drag_test_figures_2025.py"
 
 FORMATS = {
     "ats": (["config_xlsx", "gps_csv", "covariate_csv", "temperature_csv", "released_file"], ["raw_root", "hobo_dir"]),
@@ -136,7 +139,7 @@ def read_run_file(path):
     with open(path, "rb") as stream:
         run = tomllib.load(stream)
     run["paths"] = {name: resolve_path(value) for name, value in run.get("paths", {}).items() if str(value).strip()}
-    for section in ("selection", "study", "legacy", "dbscan"):
+    for section in ("selection", "study", "legacy", "dbscan", "outputs"):
         run.setdefault(section, {})
     run.setdefault("data_format", "ats")
     if run["data_format"] not in FORMATS:
@@ -226,6 +229,14 @@ def legacy_command(legacy, subcommand, run_file):
     return [sys.executable, str(LEGACY), subcommand, str(run_file)]
 
 
+def pipeline_2025_command(run_file, drag_plots=True):
+    """Run the 2025 pipeline (metronome, clocks, Deng, multipath, export, figures)."""
+    cmd = [sys.executable, str(PIPELINE_2025), str(run_file)]
+    if not drag_plots:
+        cmd.append("--no-drag-plots")
+    return cmd
+
+
 def dbscan_command(output_db, dbscan, start, end):
     begin, finish = dbscan.get("start") or start, dbscan.get("end") or end
     if not (begin and finish):
@@ -238,6 +249,43 @@ def dbscan_command(output_db, dbscan, start, end):
         "--start", str(begin), "--end", str(finish),
         "--output-dir", str(output_dir),
     ]
+
+
+def fish_figures_command(output_db, out_dir, tags=None, run_file=None):
+    """Generate fish track figures (plan view, 3D, GIFs, CSVs)."""
+    cmd = [sys.executable, str(FISH_FIGURES), "--db", str(output_db), "--out", str(out_dir)]
+    if tags:
+        for tag in tags:
+            cmd += ["--tags", tag]
+    if run_file:
+        cmd += ["--run-file", str(run_file)]
+    return cmd
+
+
+def drag_figures_command(output_db, out_dir, run_file=None):
+    """Generate drag test figures (per-ID plots, static holds, QC)."""
+    cmd = [sys.executable, str(DRAG_FIGURES), "--db", str(output_db), "--out", str(out_dir)]
+    if run_file:
+        cmd += ["--run-file", str(run_file)]
+    return cmd
+
+
+def _run_fish_figures(output_db, out_dir, tags=None, run_file=None):
+    """Run fish_figures_2025.py as a step."""
+    cmd = fish_figures_command(output_db, out_dir, tags=tags, run_file=run_file)
+    result = subprocess.run(cmd, cwd=REPO)
+    if result.returncode != 0:
+        raise RuntimeError("fish figures failed (exit %d)" % result.returncode)
+    print("Fish figures written to: %s" % out_dir)
+
+
+def _run_drag_figures(output_db, out_dir, run_file=None):
+    """Run drag_test_figures_2025.py as a step."""
+    cmd = drag_figures_command(output_db, out_dir, run_file=run_file)
+    result = subprocess.run(cmd, cwd=REPO)
+    if result.returncode != 0:
+        raise RuntimeError("drag test figures failed (exit %d)" % result.returncode)
+    print("Drag test figures written to: %s" % out_dir)
 
 
 def study_row(study, start, end):
@@ -307,7 +355,7 @@ def parse_args(argv=None):
 def prepare_run(args):
     run_file = Path(args.run_file).resolve()
     run = read_run_file(run_file)
-    paths, selection, study, legacy, dbscan = (run[k] for k in ("paths", "selection", "study", "legacy", "dbscan"))
+    paths, selection, study, legacy, dbscan, outputs = (run[k] for k in ("paths", "selection", "study", "legacy", "dbscan", "outputs"))
     data_format = run["data_format"]
     check_inputs(paths, data_format)
     output_db = paths["output_db"]
@@ -317,7 +365,7 @@ def prepare_run(args):
     else:
         check_output(output_db, paths, bool(run.get("overwrite", False)), data_format)
     start, end = check_time(selection)
-    return args, run_file, run, paths, selection, study, legacy, dbscan, output_db, start, end
+    return args, run_file, run, paths, selection, study, legacy, dbscan, outputs, output_db, start, end
 
 
 def select_inputs(data_format, paths, selection):
@@ -332,7 +380,7 @@ def select_inputs(data_format, paths, selection):
 
 
 def print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
-                      species_codes, repaired, unresolved, study, legacy):
+                      species_codes, repaired, unresolved, study, legacy, outputs):
     print("Run file:    %s" % run_file)
     print("Data format: %s" % data_format)
     print("Output DB:   %s" % output_db)
@@ -349,12 +397,17 @@ def print_run_summary(run_file, output_db, data_format, start, end, selection, t
     else:
         print("Teknologic import takes every tag inside the [study] sync window (legacy behaviour); choose tags to position with [legacy] study_tags.")
     if legacy.get("run"):
-        print("Legacy:      master %s, surface %s, deep %s, method %s, env %s"
-              % (study.get("master_receiver"), legacy.get("surface_receivers"), legacy.get("deep_receivers"),
-                 legacy.get("method", "KNN"), legacy.get("env") or "jsat_legacy"))
+        run_2025 = bool(legacy.get("run_2025_pipeline", False))
+        pipeline_name = "2025 pipeline" if run_2025 else "legacy"
+        print("Pipeline:    %s (master %s, surface %s, deep %s, method %s, env %s)"
+              % (pipeline_name, study.get("master_receiver"), legacy.get("surface_receivers"), legacy.get("deep_receivers"),
+                 legacy.get("method", "KNN") if not run_2025 else "ATS timing", legacy.get("env") or "jsat_legacy"))
+    if outputs:
+        enabled = [k for k, v in outputs.items() if isinstance(v, bool) and v]
+        print("Outputs:     %s" % (", ".join(enabled) if enabled else "none (defaults: positions only)"))
 
 
-def build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, output_db, start, end, tags):
+def build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags):
     ats = data_format == "ats"
     steps = []
     if not args.skip_build:
@@ -371,7 +424,12 @@ def build_steps(args, run_file, data_format, paths, selection, study, legacy, db
         if missing:
             raise ValueError("[legacy] run needs [study] %s: legacy clock_fix_object reads BM_Elev "
                              "(converts it by units) and masterReceiver" % " and ".join(missing))
-        steps.append(("legacy workflow", legacy_command(legacy, "process", run_file)))
+        run_2025 = bool(legacy.get("run_2025_pipeline", False))
+        if run_2025:
+            drag_plots = outputs.get("drag_plots", True)
+            steps.append(("2025 pipeline", pipeline_2025_command(run_file, drag_plots=drag_plots)))
+        else:
+            steps.append(("legacy workflow", legacy_command(legacy, "process", run_file)))
     if dbscan.get("run"):
         if not ats:
             raise ValueError("[dbscan] runs on ATS data only")
@@ -380,6 +438,15 @@ def build_steps(args, run_file, data_format, paths, selection, study, legacy, db
         if receivers and not needed <= receivers:
             raise ValueError("[dbscan] needs receivers %s in [selection] receivers" % sorted(needed - receivers))
         steps.append(("pairwise beacon DBSCAN", dbscan_command(output_db, dbscan, start, end)))
+
+    # Figure generation (post-pipeline)
+    out_dir = paths.get("output_figures") or (output_db.parent / "figures")
+    if outputs.get("fish_figures", False):
+        figure_tags = outputs.get("figure_tags") or []
+        steps.append(("fish figures", lambda: _run_fish_figures(output_db, out_dir, tags=figure_tags or None, run_file=str(run_file))))
+    if outputs.get("drag_test_figures", False):
+        steps.append(("drag test figures", lambda: _run_drag_figures(output_db, out_dir, run_file=str(run_file))))
+
     return steps
 
 
@@ -403,12 +470,12 @@ def run_steps(steps, manifest, manifest_path):
 
 
 def main(argv=None):
-    args, run_file, run, paths, selection, study, legacy, dbscan, output_db, start, end = prepare_run(parse_args(argv))
+    args, run_file, run, paths, selection, study, legacy, dbscan, outputs, output_db, start, end = prepare_run(parse_args(argv))
     data_format = run["data_format"]
     species_codes, repaired, unresolved, tags, serials = select_inputs(data_format, paths, selection)
     print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
-                      species_codes, repaired, unresolved, study, legacy)
-    steps = build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, output_db, start, end, tags)
+                      species_codes, repaired, unresolved, study, legacy, outputs)
+    steps = build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags)
     if args.dry_run:
         print("Dry run: nothing run. Steps: %s" % "; ".join(name for name, _ in steps))
         return 0
@@ -419,7 +486,7 @@ def main(argv=None):
         "git": git_state(),
         "data_format": data_format,
         "paths": {name: str(path) for name, path in paths.items()},
-        "selection": selection, "study": study, "legacy": legacy, "dbscan": dbscan,
+        "selection": selection, "study": study, "legacy": legacy, "dbscan": dbscan, "outputs": outputs,
         "tags": sorted(tags),
         "ptagis_repaired": [[str(raw), code] for raw, code in repaired],
         "ptagis_unresolved": [[str(raw), reason] for raw, reason in unresolved],

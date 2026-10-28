@@ -47,6 +47,3 @@ for i in tags:
 #jsats3d.multipath_data_management(outputWS,dbDir,primary = False)         # add data to database
 
 print ("All tags processed, proceed to positioning")
-
-
-    

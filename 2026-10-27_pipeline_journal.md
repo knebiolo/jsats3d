@@ -1,13 +1,78 @@
 # 2025 Pipeline Run Journal — 2026-10-27
 
-## Summary
+## 2026-10-28: Unified Wrapper Test (run_data.py single-command)
 
-Full 2025 early-fish tag drag pipeline run from scratch:
-- **Parsed** 304 ATS raw files → 29,912,682 detections → 15.58 GB SQLite DB
-- **Ran** full 2025 pipeline: DBSCAN metronome → clock surface → deep beacons → Deng 3D positioning → ATS timing multipath → speed of sound → fish positions → DBSCAN screen
-- **Generated** figures for 4 tags: 26E4, 9F8C, 1D5A, B5ED
+### What was built
 
-**Output:** `C:\Dev\jsat3d\jsats3d\output\10272026_test\`
+Modified `run_data.py` to be the **single entry point** for everything:
+
+```powershell
+python scripts/run_data.py config/run_data_earlyfish_2026-10-28.toml
+```
+
+This one command runs:
+1. Parse raw data → build DB
+2. Run 2025 pipeline (metronome → clocks → Deng → multipath → export → DBSCAN)
+3. Generate fish figures (if `[outputs] fish_figures = true`)
+
+### Config controls what runs
+
+```toml
+[legacy]
+run               = true
+run_2025_pipeline = true   # true = _2025_pipeline.py, false = legacy_pipeline.py
+
+[outputs]
+positions             = true    # Deng 3D positions (written to DB)
+drag_plots            = true    # Drag GPS vs Deng (2025 pipeline only)
+fish_figures          = true    # Fish track plots + GIFs + CSVs
+drag_test_figures     = false   # Drag test per-ID plots + static holds + QC
+figure_tags           = []      # [] = all study tags, or ["26E4", "9F8C"]
+```
+
+### Results
+
+| Step | Status | Time |
+|------|--------|------|
+| Parse 304 files → 29.9M detections | ✅ | ~30 min |
+| Study parameters + indexes | ✅ | — |
+| Metronome (DBSCAN) | ✅ | 7.1 min |
+| Clock surface | ✅ | 5.9 min |
+| Deep beacons | ✅ | 4.9 min |
+| Deep positions | ✅ | 9.2 min |
+| Deep clocks | ✅ | 14.1 min |
+| Fish multipath (ATS timing) | ✅ | 1.7 min |
+| Positions (Deng) | ✅ | 2.5 min |
+| Export | ✅ | 0.1 min |
+| Positions DBSCAN | ✅ | 0.1 min |
+| Fish figures (4 tags) | ✅ | ~5 min |
+
+**Total time:** ~1 hour 10 minutes (parse to figures)
+
+### Position Summary
+
+| Tag | Root-B Solutions | DBSCAN Kept | Span | Max Speed |
+|-----|-----------------|-------------|------|-----------|
+| 1D5A | 51,859 | 6,866 | 17.3 h | 11.49 m/s |
+| B5ED | 37,263 | 3,950 | 12.1 h | 4.86 m/s |
+| 26E4 | 19,897 | 1,802 | 2.1 h | 1.90 m/s |
+| 9F8C | 1,654 | 80 | 0.2 h | 2.71 m/s |
+
+**Output:** `C:\Dev\jsat3d\jsats3d\output\10282026_test\`
+
+### Key findings
+
+- **Unified wrapper works:** One command replaces the old 3-step manual process
+- **Backward compatible:** `run_2025_pipeline = false` runs legacy pipeline as before
+- **Output toggles work:** Users can enable/disable individual output types
+- **Speed of sound:** Already calculated inside Deng (step 9 is just a diagnostic check)
+- **CFD05 excluded:** No clock data for CFD05 — removed from surface_receivers
+- **ZOI04, ZOI11:** No clock correction curves (91.7% of fish detections still corrected)
+- **DBSCAN screening:** Rejected ~10-56% of transmissions per tag (acceleration mode, eps=8m, min_samples=5)
+
+---
+
+## 2026-10-27: Initial Pipeline Run (manual 3-step process)
 
 ---
 
@@ -61,9 +126,6 @@ The `run_data.py` indexes step failed with "database or disk is full." Created i
 ### Config File
 
 `config/run_data_earlyfish_2026-10-26.toml` — key settings:
-
-```toml
-[paths]
 raw_root        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\raw_data'
 config_xlsx     = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
 gps_csv         = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
@@ -86,39 +148,52 @@ deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
 
 ### Step-by-Step Commands
 
-#### Step 1: Clear Output Folder
-
-```powershell
-Remove-Item "C:\Dev\jsat3d\jsats3d\output\10272026_test\*" -Recurse -Force -ErrorAction SilentlyContinue
-```
-
-#### Step 2: Run `run_data.py` (Parse Raw Files)
+#### Single-Command Workflow (NEW)
 
 ```powershell
 C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev\jsat3d\jsats3d\scripts\run_data.py "C:\Dev\jsat3d\jsats3d\config\run_data_earlyfish_2026-10-26.toml"
 ```
 
-- **Timeout:** Use 48 hours (172,800,000 ms) — parse takes ~30 min, indexes step can take 30-60 min, but 48h gives plenty of headroom
-- **Output:** 29.9M detections, ~13 GB DB (before indexes)
-- **Note:** `run_data.py` already has all logic for study parameters, pulse rates, and indexes — no separate scripts needed
+**One command does everything:**
+1. Parse raw data → build DB
+2. Run 2025 pipeline (metronome → clocks → Deng → multipath → export)
+3. Generate fish figures (if `[outputs] fish_figures = true`)
 
-#### Step 3: Run the 2025 Pipeline
+**Config controls what runs** (in `run_data_earlyfish_2026-10-26.toml`):
 
-```powershell
-C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev\jsat3d\jsats3d\scripts\_2025_pipeline.py "C:\Dev\jsat3d\jsats3d\config\run_data_earlyfish_2026-10-26.toml"
+```toml
+[legacy]
+run               = true
+run_2025_pipeline = true   # true = 2025 pipeline, false = legacy pipeline
+
+[outputs]
+positions             = true    # Deng 3D positions (written to DB)
+drag_plots            = true    # Drag GPS vs Deng (2025 pipeline only)
+fish_figures          = true    # Fish track plots + GIFs + CSVs
+drag_test_figures     = false   # Drag test per-ID plots + static holds + QC
+figure_tags           = []      # [] = all study tags, or ["26E4", "9F8C"]
 ```
 
-- **Timeout:** 48 hours (172,800,000 ms) — pipeline takes ~35 min, but 48h gives headroom
-- **Steps run:** prepare → metronome → clock_surface → deep_beacons → deep_positions → deep_clocks → fish_multipath → positions → export → positions_dbscan
-- **Total pipeline time:** ~35 minutes
+**Timeout:** 48 hours (172,800,000 ms) — full run takes ~40 min
 
-#### Step 4: Generate Figures
+#### Legacy Multi-Step Workflow (still works)
 
+If you need more control, run steps individually:
+
+**Step 1: Parse**
 ```powershell
-C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev\jsat3d\jsats3d\scripts\fish_figures_2025.py --db "C:\Dev\jsat3d\jsats3d\output\10272026_test\jsats3d_2025_earlyfish.db" --out "C:\Dev\jsat3d\jsats3d\output\10272026_test\figures"
+python scripts/run_data.py config/run_data_earlyfish_2026-10-26.toml
 ```
 
-- **Output:** 25 files (6 per tag + fish_qc.csv)
+**Step 2: Pipeline**
+```powershell
+python scripts/_2025_pipeline.py config/run_data_earlyfish_2026-10-26.toml
+```
+
+**Step 3: Figures**
+```powershell
+python scripts/fish_figures_2025.py --db output/10272026_test/jsats3d_2025_earlyfish.db
+```
 
 ---
 
@@ -153,7 +228,36 @@ C:\Users\Ethan.Muhlestein\AppData\Local\anaconda3\envs\jsat_3d\python.exe C:\Dev
 | File | Change |
 |------|--------|
 | `jsats3d/scripts/parse_ats_raw_to_legacy.py` | Fixed 3 bugs in batch commit (lines 521, 543, 548) |
-| `jsats3d/config/run_data_earlyfish_2026-10-26.toml` | Removed CFD05 from surface_receivers |
+| `jsats3d/config/run_data_earlyfish_2026-10-26.toml` | Removed CFD05 from surface_receivers; added `[outputs]` section; `run_2025_pipeline = true` |
+| `jsats3d/scripts/run_data.py` | Unified orchestrator: calls `_2025_pipeline.py` or `legacy_pipeline.py` based on config; runs figure scripts post-pipeline |
+| `jsats3d/scripts/_2025_pipeline.py` | Added `--no-drag-plots` flag; conditional drag plot steps |
+| `jsats3d/scripts/fish_figures_2025.py` | Added `--tags` argument for user-specified tag filtering |
+| `jsats3d/scripts/tagdrag_2025_pipeline.py` | Renamed to `_2025_pipeline.py` |
+| `jsats3d/scripts/pipeline_runner.py` | Deleted (duplicate) |
+| `jsats3d/scripts/metronome.py` | Deleted (not imported by any pipeline) |
+| `jsats3d/scripts/mulitpath.py` | Deleted (not imported by any pipeline) |
+| `jsats3d/scripts/fish_dashboard_v2.py` | Deleted (exploratory) |
+| `jsats3d/scripts/fish_dashboard_v3.py` | Deleted (exploratory) |
+| `jsats3d/scripts/fish_dashboard_build.py` | Deleted (exploratory) |
+| `jsats3d/scripts/_recycle_inspect.py` | Deleted (diagnostic) |
+| `jsats3d/scripts/_db_complete_check.py` | Deleted (diagnostic) |
+| `jsats3d/scripts/diagnose_clock_jumps.py` | Deleted (diagnostic) |
+| `jsats3d/tests/test_resume.py` | Deleted |
+| `jsats3d/tests/test_2025_contracts.py` | Deleted |
+
+## Final Script Inventory
+
+| Script | Purpose |
+|--------|---------|
+| `run_data.py` | **Main entry point** — parse + pipeline + figures |
+| `_2025_pipeline.py` | 2025 pipeline (DBSCAN metronome, ATS multipath, Deng) |
+| `legacy_pipeline.py` | Legacy pipeline (KNN multipath, Kevin's workflow) |
+| `parse_ats_raw_to_legacy.py` | Parse ATS raw files → legacy DB format |
+| `adapt_2025_to_legacy.py` | Data adapter (imported by parse_ats) |
+| `beacon_pairwise_dbscan.py` | DBSCAN metronome (imported by _2025_pipeline) |
+| `fish_figures_2025.py` | Fish track figures (plan, 3D, GIFs, CSVs) |
+| `drag_test_figures_2025.py` | Drag test figures (per-ID, static holds, QC) |
+| `ent_analysis_2025.py` | Drag analysis (imported by fish_figures and drag_test_figures) |
 
 ## Output Structure
 

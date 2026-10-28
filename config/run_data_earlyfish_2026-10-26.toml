@@ -45,6 +45,7 @@ pulse_rates      = { '26E4' = 2.986, '9F8C' = 3.050, '1D5A' = 3.081, 'B5ED' = 2.
 
 [legacy]
 run               = true
+run_2025_pipeline = true   # true = use _2025_pipeline.py, false = use legacy_pipeline.py
 env               = 'jsat_legacy'
 method            = 'KNN'
 surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
@@ -86,3 +87,15 @@ output_dir      = ''
 [figures]
 depth_floor_m        = -16.0
 depth_floor_margin_m = 4.0
+
+# ============================================================================
+# Output selection — what to produce during the pipeline run.
+# Set to true to enable, false to skip. figure_tags: [] = all study tags.
+# ============================================================================
+[outputs]
+positions             = true    # Deng 3D positions (written to DB)
+drag_plots            = true    # Drag GPS vs Deng comparison plots (2025 pipeline only)
+fish_figures          = true    # Fish track plots + GIFs + CSVs
+drag_test_figures     = false   # Drag test per-ID plots + static holds + QC
+clock_drift_plots     = true    # Clock drift PNGs (legacy pipeline only)
+figure_tags           = []      # [] = all study tags, or ["26E4", "9F8C"]
