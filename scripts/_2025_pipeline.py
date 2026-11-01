@@ -6,7 +6,8 @@
              --init-from DB [--swap REC_A REC_B]  what-if copy of a finished database, optionally with two hydrophone positions exchanged
 
 Run order and names (paper step in brackets):
-    prepare (1b)  metronome (2-3)  clock_surface (4)  deep_beacons (5)  deep_positions (6)  adopt_deep (6b)  deep_clocks (7)
+    prepare (1b)  clock_jumps (1c, experimental: apply_clock_jumps)  metronome (2-3)  clock_surface (4)
+    deep_beacons (5)  deep_positions (6)  adopt_deep (6b)  deep_clocks (7)
     fish_multipath (8)  speed_of_sound (9)  positions (11)  export (10)  positions_2d (optional)  plot_drag (12)
     plot_drag_2d (12c, optional)
 A step whose output tables already exist is skipped, so a rerun resumes. Each step checks its own result and a status
@@ -109,6 +110,64 @@ def prepare_run(c):
     if dup:
         raise RuntimeError("check failed: %d duplicate tblWSEL timestamps" % dup)
     return {"wsel_rows_inserted": len(rows), "wsel_rows_in_window": in_window}
+
+
+def clock_jumps_done(c):
+    if not c.run["legacy"].get("apply_clock_jumps", False):
+        return True
+    return count(c.db, lp.PROGRESS_TABLE, "where Tag_ID = ?", ("__ats_clock_jumps__",)) > 0
+
+
+def clock_jumps_run(c):
+    """Step 1c (experimental; [legacy] apply_clock_jumps = true): correct receiver clock
+    jumps BEFORE clock sync (scripts/clock_jump_pre.py). Events from the per-file internal
+    offset-change codes in tblDetectionRaw (OffsetChanged/CounterRestart), magnitudes from
+    the master-beacon TDoA median +/- clock_jump_window_s per side, applied to
+    tblDetectionRaw.seconds with the audit column jump_offset_s, recorded in
+    tblClockJumpEvents. Downstream tables are dropped so the pipeline rebuilds them on the
+    corrected times. Jumps without an internal code are left to the legacy auto-detect."""
+    import clock_jump_pre
+    legacy = c.run["legacy"]
+    master_rec, master_tag = lp.master(c.db)
+    period = float(lp.query(c.db, "select pulseRate from tblTag where Tag_ID = ?", (master_tag,)).pulseRate.iloc[0])
+    notes, jumps = clock_jump_pre.run(
+        str(c.db), list(dict.fromkeys(c.surface + c.deep)), master_rec, master_tag, period,
+        c.window_start, c.window_end,
+        window_s=float(legacy.get("clock_jump_window_s", 300)),
+        min_step=float(legacy.get("clock_jump_min_step_s", 0.05)),
+        max_step=float(legacy.get("clock_jump_max_step_s", 5.0)),
+        apply=True)
+    if jumps:
+        _invalidate_clock_outputs(c)
+    lp.ensure_progress(c.db)
+    lp.mark_done(c.db, "__ats_clock_jumps__")
+    return notes
+
+
+def _invalidate_clock_outputs(c):
+    """Drop everything derived from detection times so the pipeline rebuilds it after a
+    change to tblDetectionRaw (same pattern as deep_clocks_run / adopt_deep_run).
+    tblInterpolatedTemp and tblWSEL are parse artifacts (external temperature/covariate
+    files, independent of detection times) and must be kept: the metronome reads the
+    temperature table before step 9 runs."""
+    con = sqlite3.connect(c.db)
+    if lp.PROGRESS_TABLE in table_names(c.db):
+        con.execute("delete from %s where Tag_ID in ('__ats_phase2__', '__ats_fish_two_stage__', '__export__')" % lp.PROGRESS_TABLE)
+    for table in lp.DERIVED_TABLES + ["tblPositions_Deng", "tblPositions_Deng2D", "tblPositions_DengDBSCAN",
+                                      "tblPositions_Deng3DConsensus", "tblPositions_Deng2DJoint",
+                                      "tblPositions_Deng2DJointQuality", "tblPositions_Deng3DJoint",
+                                      "tblPositions_Deng3DJointQuality", "tblDeepReceiver_step6_solution"]:
+        con.execute("drop table if exists %s" % table)
+    con.commit()
+    con.close()
+    for folder in ("positions", "positions_2d"):
+        shutil.rmtree(c.work / folder, ignore_errors=True)
+    for line in DRAG_LINES:
+        (c.review / ("%s_positions.png" % line.replace("-", ""))).unlink(missing_ok=True)
+        for tag in ("FC36", "FFD3"):
+            for suffix in ("", "_full_range"):
+                (c.review / ("item12_pipeline3d_3D_legacy_A_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
+                (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
 
 
 def metronome_done(c):
@@ -637,7 +696,8 @@ def plot_drag_dbscan_run(c):
     return {"folder": str(plot_dbscan_folder(c)), "pngs": sorted(p.name for p in plot_dbscan_folder(c).glob("item12_pipeline3d_*.png"))}
 
 
-STEPS = [("prepare", "1b", prepare_done, prepare_run), ("metronome", "2-3", metronome_done, metronome_run),
+STEPS = [("prepare", "1b", prepare_done, prepare_run), ("clock_jumps", "1c", clock_jumps_done, clock_jumps_run),
+         ("metronome", "2-3", metronome_done, metronome_run),
          ("clock_surface", "4", clock_surface_done, clock_surface_run),
          ("deep_beacons", "5", deep_beacons_done, deep_beacons_run),
          ("deep_positions", "6", deep_positions_done, deep_positions_run),

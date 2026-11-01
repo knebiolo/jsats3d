@@ -1,0 +1,92 @@
+# A/B experiment arm B (2026-10-29): 2025 early-fish positioning WITH pre-clock-sync jump
+# correction (scripts/clock_jump_pre.py). Identical to run_data_earlyfish_2026-10-28.toml
+# (arm A baseline = output\10292026_Test) except:
+#   [legacy] apply_clock_jumps = true   (new experimental step 1c, before metronome)
+#   [paths]  output_db -> output\ab_B_2026-10-29
+# Events: per-file internal offset-change codes in tblDetectionRaw (OffsetChanged/
+# CounterRestart). Magnitudes: master-beacon (7DB7 @ ZOI08) TDoA median +/-300 s per
+# side. Offsets applied to tblDetectionRaw BEFORE the piecewise-regression clock sync.
+# Comparison: scripts/_exp_jump_ab.py (arm A DB vs this DB).
+# K: is read only; everything is written to C:.
+
+data_format = 'ats'
+overwrite = true
+
+[paths]
+raw_root        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\raw_data'
+config_xlsx     = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Tag Drag Period\DD_N'
+released_file   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\ab_B_2026-10-29\jsats3d_2025_earlyfish.db'
+
+[selection]
+species   = []
+tags      = ['26E4', '9F8C', '1D5A', 'B5ED']
+start     = '2025-06-15 00:00:00'
+end       = '2025-08-06 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-15 00:00:00'
+synch_time_end   = '2025-08-06 23:59:59'
+pulse_rates      = { '26E4' = 2.986, '9F8C' = 3.050, '1D5A' = 3.081, 'B5ED' = 2.969 }
+
+[legacy]
+run               = true
+run_2025_pipeline = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                      'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = []
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = true
+work_dir          = ''
+# --- experimental pre-clock-sync jump correction (step 1c) ---
+apply_clock_jumps   = true    # false (default) = legacy behavior, bit-identical runs
+clock_jump_window_s = 300     # TDoA median window per side of each internal event (s)
+clock_jump_min_step_s = 0.05  # accept a jump at/above this TDoA step (s)
+clock_jump_max_step_s = 5.0   # reject a jump above this (s)
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-15 00:00:00'
+end             = '2025-08-06 23:59:59'
+output_dir      = ''
+
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0
+
+[outputs]
+positions             = true
+drag_plots            = true
+fish_figures          = true
+drag_test_figures     = false
+clock_drift_plots     = true
+figure_tags           = []

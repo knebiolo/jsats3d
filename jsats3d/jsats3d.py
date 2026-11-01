@@ -1099,58 +1099,66 @@ def clock_fix(clock_fix_object):
                     print("  ZOI09: applying 946ms hardware offset correction")
                     residual_curve['ToA_error'] = residual_curve['ToA_error'] - 0.946
                 
-                # Read clock jump events from tblDetectionClockFixed
+                # Pre-sync jump corrections (experimental, scripts/clock_jump_pre.py): if this
+                # receiver's jumps were already removed from tblDetectionRaw before this sync,
+                # validate that the residual curve is continuous at each applied-jump time.
+                # A residual step at an applied-jump time means the pre-sync offset was
+                # mis-measured: raise (a missed jump must be reported, not smoothed over).
+                # Jumps without an internal code in the file are NOT pre-corrected; the
+                # legacy auto-detect below still handles them, unchanged.
                 conn = sqlite3.connect(clock_fix_object.projectDB, timeout = 30.0)
-                c = conn.cursor()
-                has_table = conn.execute(
-                    "select 1 from sqlite_master where type = 'table' and name = 'tblDetectionClockFixed'"
+                has_jump_table = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = 'tblClockJumpEvents'"
                 ).fetchone()
-                if has_table:
-                    jump_events = pd.read_sql("""
-                        SELECT seconds, CounterRestart, OffsetChanged, OneSecondAdjustmentEvidence
-                        FROM tblDetectionClockFixed
+                if has_jump_table:
+                    pre_jumps = pd.read_sql("""
+                        SELECT jump_time_s, offset_s, evidence
+                        FROM tblClockJumpEvents
                         WHERE Rec_ID = '%s'
-                          AND (CounterRestart = 1 OR OffsetChanged = 1 OR OneSecondAdjustmentEvidence = 1)
-                        ORDER BY seconds
+                        ORDER BY jump_time_s
                     """ % clock_fix_object.current_receiver, conn)
                 else:
-                    jump_events = pd.DataFrame()
-                c.close()
-                
+                    pre_jumps = pd.DataFrame()
+                conn.close()
+                if len(pre_jumps) > 0:
+                    print("\nPre-sync jump corrections on %s (validated against the residual curve):" % clock_fix_object.current_receiver)
+                    jwin = 300.0
+                    all_jump_times = pre_jumps.jump_time_s.to_numpy()
+                    max_residual_step_ms = 0.0
+                    for ev in pre_jumps.itertuples(index=False):
+                        t_ev = float(ev.jump_time_s)
+                        busy = pd.Series(False, index=residual_curve.index)
+                        for t_o in all_jump_times:
+                            if abs(t_o - t_ev) > 1.0:
+                                busy = busy | ((residual_curve.seconds >= t_o - jwin) & (residual_curve.seconds <= t_o + jwin))
+                        pre = residual_curve[(residual_curve.seconds >= t_ev - jwin) & (residual_curve.seconds < t_ev) & ~busy]
+                        post = residual_curve[(residual_curve.seconds > t_ev) & (residual_curve.seconds <= t_ev + jwin) & ~busy]
+                        if len(pre) >= 3 and len(post) >= 3:
+                            step_ms = (float(post.ToA_error.median() - pre.ToA_error.median())) * 1e3
+                            max_residual_step_ms = max(max_residual_step_ms, abs(step_ms))
+                            ok = abs(step_ms) < 50.0
+                            print("  t=%.0f  applied=%+8.1f ms  residual_step=%+8.1f ms  %s  [%s]" % (
+                                t_ev, ev.offset_s * 1e3, step_ms, "ok" if ok else "FAILED", ev.evidence))
+                        else:
+                            print("  t=%.0f  applied=%+8.1f ms  unverifiable (< 3 beacon epochs per side)" % (
+                                t_ev, ev.offset_s * 1e3))
+                    if max_residual_step_ms >= 50.0:
+                        raise RuntimeError(
+                            "clock-jump validation failed for %s: residual step of %.0f ms remains at an "
+                            "applied-jump time (pre-sync offset mis-measured? check tblClockJumpEvents)" % (
+                                clock_fix_object.current_receiver, max_residual_step_ms))
+                    print("  jump validation passed: max residual step %.1f ms" % max_residual_step_ms)
+
                 # Copy receiver data for clock fix processing
                 curr_rec_dat = receiver_dat.copy()
-                
+
                 # Identify jump boundaries (5 min before/after each event)
                 jump_boundaries = []
-                if len(jump_events) > 0:
-                    t_min = residual_curve.seconds.min()
-                    t_max = residual_curve.seconds.max()
-                    window = 300  # 5 minutes in seconds
-                    
-                    for _, event in jump_events.iterrows():
-                        t_event = event['seconds']
-                        t_start = max(t_min, t_event - window)
-                        t_end = min(t_max, t_event + window)
-                        jump_boundaries.append((t_start, t_end, event))
-                    
-                    # Quantify jump magnitudes
-                    print("\nClock jump events detected for %s:" % clock_fix_object.current_receiver)
-                    for t_start, t_end, event in jump_boundaries:
-                        pre = residual_curve[(residual_curve.seconds >= t_start) & (residual_curve.seconds < event['seconds'])]
-                        post = residual_curve[(residual_curve.seconds > event['seconds']) & (residual_curve.seconds <= t_end)]
-                        if len(pre) > 0 and len(post) > 0:
-                            jump_mag = post['ToA_error'].mean() - pre['ToA_error'].mean()
-                            jump_type = []
-                            if event['CounterRestart']: jump_type.append('CounterRestart')
-                            if event['OffsetChanged']: jump_type.append('OffsetChanged')
-                            if event['OneSecondAdjustmentEvidence']: jump_type.append('OneSecondAdjustment')
-                            print("  t=%.0f  jump=%.3fs  type=%s  (pre=%.3f, post=%.3f)" % (
-                                event['seconds'], jump_mag, ','.join(jump_type),
-                                pre['ToA_error'].mean(), post['ToA_error'].mean()))
-                elif len(residual_curve) > 100:
-                    # No Internal column data — detect jumps from residual curve itself
+                if len(residual_curve) > 100:
+                    # Detect jumps from the residual curve itself (legacy auto-detect; also
+                    # covers jumps that have no internal code in the file)
                     # Scan for step changes in mean residual using sliding windows
-                    print("  No Internal column events. Scanning residual curve for jumps...")
+                    print("  Scanning residual curve for jumps (auto-detect)...")
                     t_min = residual_curve.seconds.min()
                     t_max = residual_curve.seconds.max()
                     window_size = 30  # ~30 beacon epochs per window
