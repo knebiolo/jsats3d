@@ -1,0 +1,102 @@
+# ZOI11 A/B test — ARM A (WITHOUT ZOI11), created 2026-11-01.
+#
+# Question: does receiver ZOI11 (on the debris barrier, "Behind debris barrier" in the
+# config workbook, lat 46.4664220 lon -122.1084967, 10 ft hydrophone depth, deployed
+# 2025-06-10) help position fish near the debris barrier?
+#
+# Test data: FFD3 test tag static holds
+#   - Debris Barrier holds DB-2, DB-3, DB-4, DB-5, DB-1 on 2025-06-11 12:02:36-12:15:12
+#     (cowlitz_AT_2025_testing_sheets.xlsx, Forebay_StaticHolds, Zone = "Debris Barrier";
+#      no GPS positions were collected for any of the five holds)
+#   - Forebay holds FBY-S-1..FBY-S-10 on 2025-06-10 09:58:02-10:20:02 (same sheet,
+#      known Lat/Lon per hold) as bonus ground truth in the same area.
+#
+# Arm A = current production receiver set (no ZOI11 anywhere).
+# Arm B = identical + ZOI11 in surface_receivers and receivers_3d
+#         (config/run_data_zoi11_B.toml).
+#
+# Window 2025-06-10 00:00 -> 2025-06-13 23:59 gives clock-sync context around both
+# hold days. Raw files: C: OneDrive raw_data, staged as hard links under
+# output/zoi11_test/raw_staging (20250610_Receivers_array_testing + 20250618_Receivers,
+# 48 files, continuous coverage 2025-06-09/10 -> 06-18 for all 20 target receivers).
+# C: drive only. apply_clock_jumps = false (legacy default; both arms identical).
+# No algorithm change vs production; this run file only adds the time window and tag.
+
+data_format = 'ats'
+overwrite = true
+
+[paths]
+raw_root        = 'C:\Dev\jsat3d\jsats3d\output\zoi11_test\raw_staging'
+config_xlsx     = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Tag Drag Period\DD_N'
+released_file   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\zoi11_test\armA\zoi11_A.db'
+
+[selection]
+species   = []
+tags      = ['FFD3']
+start     = '2025-06-10 00:00:00'
+end       = '2025-06-13 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-10 00:00:00'
+synch_time_end   = '2025-06-13 23:59:59'
+pulse_rates      = { 'FFD3' = 3.33 }
+
+[legacy]
+run               = true
+run_2025_pipeline = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                      'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = []
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = true
+work_dir          = ''
+# legacy default: no pre-clock-sync jump correction (identical to arm B and to production)
+apply_clock_jumps = false
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-10 00:00:00'
+end             = '2025-06-13 23:59:59'
+output_dir      = ''
+
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0
+
+[outputs]
+positions             = true
+drag_plots            = false
+fish_figures          = false
+drag_test_figures     = false
+clock_drift_plots     = false
+figure_tags           = []

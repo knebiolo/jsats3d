@@ -1,0 +1,97 @@
+# ZOI11 A/B test — ARM B (WITH ZOI11), created 2026-11-01.
+#
+# Identical to run_data_zoi11_A.toml (arm A, no ZOI11) except:
+#   [paths] output_db -> output\zoi11_test\armB
+#   [legacy] surface_receivers += 'ZOI11'
+#   [legacy] receivers_3d      += 'ZOI11'
+#
+# ZOI11 config (cowlitz_2025_AT_config.xlsx): SR3017 serial 25307, beacon 1FF1 (60 s),
+# hydrophone depth 10 ft, lat 46.46642203483 lon -122.108496711918,
+# "Behind debris barrier", deployed 2025-06-10.
+# Clock sync for ZOI11 comes from the 7DB7 master beacon on ZOI08: the staged raw
+# files show 18,693 7DB7 detections at ZOI11 over 06-10 -> 06-18, so the sync is
+# well determined. ZOI11's own 30 season-internal offset-change flags are handled
+# by the legacy auto-detect path exactly like every other receiver
+# (apply_clock_jumps = false in both arms).
+#
+# See run_data_zoi11_A.toml for the full test description (debris-barrier holds
+# DB-1..DB-5 on 2025-06-11 + forebay holds FBY-S-1..10 on 2025-06-10, FFD3 tag).
+
+data_format = 'ats'
+overwrite = true
+
+[paths]
+raw_root        = 'C:\Dev\jsat3d\jsats3d\output\zoi11_test\raw_staging'
+config_xlsx     = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\Tag Drag Period\DD_N'
+released_file   = 'C:\Users\Ethan.Muhlestein\OneDrive - Kleinschmidt Associates\Documents\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\zoi11_test\armB\zoi11_B.db'
+
+[selection]
+species   = []
+tags      = ['FFD3']
+start     = '2025-06-10 00:00:00'
+end       = '2025-06-13 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-10 00:00:00'
+synch_time_end   = '2025-06-13 23:59:59'
+pulse_rates      = { 'FFD3' = 3.33 }
+
+[legacy]
+run               = true
+run_2025_pipeline = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10', 'ZOI11',
+                      'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10', 'ZOI11']
+receivers_2d      = []
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'
+known_depth_diagnostics = false
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = true
+work_dir          = ''
+# legacy default: no pre-clock-sync jump correction (identical to arm A and to production)
+apply_clock_jumps = false
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-10 00:00:00'
+end             = '2025-06-13 23:59:59'
+output_dir      = ''
+
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0
+
+[outputs]
+positions             = true
+drag_plots            = false
+fish_figures          = false
+drag_test_figures     = false
+clock_drift_plots     = false
+figure_tags           = []
