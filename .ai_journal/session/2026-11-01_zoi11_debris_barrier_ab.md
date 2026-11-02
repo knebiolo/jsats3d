@@ -48,6 +48,13 @@ FFD3 test tag near the debris barrier: positioning with vs. without ZOI11, using
 - Committed to `ENM_jsat3d_edits`: `tests/test_clock_jump_pre.py` (missed in a5b53a0) and the two
   zoi11 tomls + this journal. `output/` is gitignored (data stays local).
 
+## 2026-11-02 follow-up (user request)
+- Simplified `zoi11_ab_holds.png` in place via `compare_zoi11_ab.py`: larger markers (ms 11,
+  mew 2), one hold label at the arm-pair midpoint (nudged for the DB cluster), red ZOI11 dot,
+  no A→B shift vectors, one-line titles, bigger fonts. Data/CSVs unchanged.
+- Added a plain-language paragraph `## Summary` at the top of `REPORT.md` (setup / results /
+  conclusion in three paragraphs).
+
 ## Open items
 - None for this test. Production tomls (earlyfish etc.) intentionally untouched — the ZOI11
   addition is a run-file change the team can adopt when they want it.
