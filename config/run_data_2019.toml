@@ -44,6 +44,10 @@ deep_solution     = 'B'
 study_tags        = []
 signal_proxies    = false   # 2019 Teknologic data has real SNR/NBW
 work_dir          = ''
+# Bathymetry settings (same as run_data.toml; leave blank for WSEL-only check)
+bathy_path        = ''
+bathy_input_crs   = 'EPSG:26910'
+water_column      = false
 
 [dbscan]
 run = false

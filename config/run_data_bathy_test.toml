@@ -1,0 +1,60 @@
+# Bathymetry test run — same tags as the main project, with bathy filtering enabled
+# Run: conda run -n jsat_3d python scripts/run_data.py config/run_data_bathy_test.toml
+
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\raw_data'
+config_xlsx     = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\Tag Drag Period\DD_N'
+released_file   = 'K:\Jobs\5662\001\Data\DataTrans\2025_Data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\bathy_test.db'
+
+[selection]
+species   = []
+tags      = ['FFD3', 'FC36', '0B0A', '0AC6', '493F']
+start     = ''
+end       = ''
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-04 00:00:00'
+synch_time_end   = '2025-09-17 00:00:00'
+pulse_rates      = {}
+
+[legacy]
+run               = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+fixed_z_2d        = ''
+deep_solution     = 'B'
+study_tags        = []
+signal_proxies    = false
+work_dir          = ''
+# Bathymetry — ENABLED for this test
+bathy_path        = 'C:/Users/Ethan.Muhlestein/OneDrive - Kleinschmidt Associates/Documents/jsats_data/Cowlitz_Falls_Model_Geometry_Files_CRS/elev_contour2ras_1m_pts_refined_20240826_utm10n.xyz'
+bathy_input_crs   = 'EPSG:26910'
+water_column      = false
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI02'
+anchor          = 'ZOI09'
+start           = '2025-06-20'
+end             = '2025-06-22'
+output_dir      = ''

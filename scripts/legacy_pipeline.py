@@ -486,6 +486,45 @@ def export_positions(db, positions, work):
     mark_done(db, "__export__")
 
 
+def bathymetry_check(db, legacy_config):
+    """Apply bathymetry-based water column filtering to position solutions.
+
+    Reads [legacy] bathymetry settings from the run file:
+        bathy_path          – path to bathymetry XYZ/CSV/GeoTIFF
+        bathy_input_crs     – CRS of the input file (default EPSG:26910)
+        water_column        – if true and no bathy data, apply WSEL-only check
+
+    If bathy_path is set, loads the bathymetry into tblBathymetry and checks
+    every 'solution found' row in tblPositions_Deng:
+        - rejected_above_wsel  : Z > WSEL(ToA) + tolerance
+        - rejected_below_bathy : Z < local_bathy_Z(X,Y) - tolerance
+        - pass                 : within bounds
+
+    If no bathymetry but water_column is true, applies the legacy WSEL-only
+    check (reject above surface or below lowest receiver - 4 m).
+    """
+    bathy_path = legacy_config.get("bathy_path")
+    water_column = legacy_config.get("water_column", False)
+
+    if not bathy_path and not water_column:
+        print("Bathymetry: skipped (no bathy_path, water_column = false)")
+        return
+
+    # Import here to avoid pyproj/rasterio dependency when not needed
+    from jsats3d import bathymetry as bth
+
+    if bathy_path:
+        bathy_path = resolve_path(bathy_path)
+        input_crs = legacy_config.get("bathy_input_crs", "EPSG:26910")
+        print(f"Bathymetry: loading {bathy_path} (CRS: {input_crs})")
+        bth.load_xyz(str(db), bathy_path, input_crs=input_crs)
+        print("Bathymetry: checking position solutions")
+        bth.check_positions(str(db), wsel_tolerance_m=0.05)
+    elif water_column:
+        print("Bathymetry: no bathy data; applying WSEL-only water column check")
+        bth.check_positions_simple(str(db), water_column=True)
+
+
 def process(run, paths, resume=False):
     legacy = run.get("legacy", {})
     db = paths["output_db"]
@@ -559,6 +598,7 @@ def process(run, paths, resume=False):
                 deng_2d(db, tag, receivers_2d, positions_2d, work / "figures", float(legacy["fixed_z_2d"]))
         mark_done(db, tag)
     export_positions(db, positions, work)
+    bathymetry_check(db, legacy)
     count = query(db, "select count(*) as n from sqlite_master where name = 'tblPositions_Deng'").n.iloc[0]
     solved = query(db, "select count(*) as n from tblPositions_Deng where comment = 'solution found'").n.iloc[0] if count else 0
     print("Done. tblPositions_Deng: %s solutions found. Work folder: %s" % (solved, work))

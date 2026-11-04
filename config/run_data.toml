@@ -83,6 +83,17 @@ study_tags        = []
 signal_proxies    = false
 work_dir          = ''              # blank = output/<db name>_legacy
 
+# --- Bathymetry-based water column filtering --------------------------------
+# Path to a bathymetry file (XYZ, CSV, GeoTIFF, or ASCII raster).
+# When set, loads bathymetry into tblBathymetry and checks every Deng solution:
+#   rejected_above_wsel  – Z > WSEL(ToA) + tolerance
+#   rejected_below_bathy – Z < local_bathy_Z(X,Y) - tolerance
+#   pass                 – within bounds
+# Leave blank or set water_column = true for WSEL-only fallback (no bathymetry needed).
+bathy_path          = 'C:/Users/Ethan.Muhlestein/OneDrive - Kleinschmidt Associates/Documents/jsats_data/Cowlitz_Falls_Model_Geometry_Files_CRS/elev_contour2ras_1m_pts_refined_20240826_utm10n.xyz'
+bathy_input_crs     = 'EPSG:26910'  # CRS of the input file (only used if pyproj is available)
+water_column        = false          # WSEL-only check when no bathy data is provided
+
 [dbscan]
 # Optional: run the 2025 beacon pairwise DBSCAN diagnostic on the new database afterwards.
 # Parameters APPROVED 2026-10-01 (project lead), fixed study wide in beacon_pairwise_dbscan.py:

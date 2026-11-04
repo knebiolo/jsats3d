@@ -40,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import beacon_pairwise_dbscan as bpd  # noqa: E402
 import legacy_pipeline as lp  # noqa: E402
+sys.path.insert(0, str(lp.REPO))  # for `from jsats3d import bathymetry`
 
 warnings.filterwarnings("ignore")
 jsats3d = lp.jsats3d
@@ -506,6 +507,45 @@ def export_run(c):
                                           "from tblPositions_Deng group by Tag_ID, solution").to_dict("records")}
 
 
+def bathymetry_check_done(c):
+    """Bathymetry check is done when the check columns exist in tblPositions_Deng."""
+    if "tblPositions_Deng" not in table_names(c.db):
+        return False
+    cols = {r[1] for r in lp.query(c.db, "pragma table_info(tblPositions_Deng)").itertuples(index=False, name=None)}
+    return "bathymetry_check" in cols
+
+
+def bathymetry_check_run(c):
+    """Step 10b: apply bathymetry-based water column filtering to position solutions.
+
+    Reads [legacy] bathymetry settings:
+        bathy_path          – path to bathymetry XYZ/CSV/GeoTIFF
+        bathy_input_crs     – CRS of the input file (default EPSG:26910)
+        water_column        – if true and no bathy data, apply WSEL-only check
+    """
+    legacy = c.run["legacy"]
+    bathy_path = legacy.get("bathy_path")
+    water_column = legacy.get("water_column", False)
+
+    if not bathy_path and not water_column:
+        return {"status": "skipped", "reason": "no bathy_path, water_column = false"}
+
+    from jsats3d import bathymetry as bth
+
+    if bathy_path:
+        bathy_path = lp.resolve_path(bathy_path)
+        input_crs = legacy.get("bathy_input_crs", "EPSG:26910")
+        print(f"Bathymetry: loading {bathy_path} (CRS: {input_crs})")
+        n = bth.load_xyz(str(c.db), bathy_path, input_crs=input_crs)
+        print("Bathymetry: checking position solutions")
+        bth.check_positions(str(c.db), wsel_tolerance_m=0.05)
+        return {"status": "bathymetry", "points_loaded": n}
+    else:
+        print("Bathymetry: no bathy data; applying WSEL-only water column check")
+        bth.check_positions_simple(str(c.db), water_column=True)
+        return {"status": "water_column_only"}
+
+
 
 
 
@@ -706,6 +746,7 @@ STEPS = [("prepare", "1b", prepare_done, prepare_run), ("clock_jumps", "1c", clo
          ("fish_multipath", "8", fish_multipath_done, fish_multipath_run),
          ("speed_of_sound", "9", speed_of_sound_done, speed_of_sound_run),
          ("positions", "11", positions_done, positions_run), ("export", "10", export_done, export_run),
+         ("bathymetry_check", "10b", bathymetry_check_done, bathymetry_check_run),
          ("positions_2d", "11b", positions_2d_done, positions_2d_run),
          ("plot_drag", "12", plot_drag_done, plot_drag_run),
          ("plot_drag_2d", "12c", plot_drag_2d_done, plot_drag_2d_run),
