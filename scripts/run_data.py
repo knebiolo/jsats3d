@@ -5,6 +5,8 @@ Usage (from the repo folder, env jsat_3d):
     python scripts/run_data.py config/run_data_2019.toml   2019 Teknologic (paper data)
     python scripts/run_data.py --dry-run           shows the plan, runs nothing
     python scripts/run_data.py --skip-build        reuse output_db; only apply [study] and run later steps
+    python scripts/run_data.py EXPERIMENT.toml --compact-from SOURCE.db --temperature-source DONOR.db
+        --reserve-gib 4 --max-database-gib 6       isolated opt-in 2025 clock preparation only
 
 data_format = "ats"         2025 ATS raw files -> parse_ats_raw_to_legacy.py
 data_format = "teknologic"  2019 Teknologic files -> shared legacy-compatible importer
@@ -16,8 +18,12 @@ Species are turned into acoustic tag codes through PTAGIS released_v0 ("Acoustic
 Beacons are always added when tags are filtered, so clock synchronization stays possible.
 Raw data is read only: the run refuses to write inside an input folder or to replace an
 existing database unless overwrite = true.
+The opt-in segment-safe clock experiment uses --compact-from and then _2025_pipeline.py
+directly, without rebuilding raw inputs or rewriting copied metadata/signal values.
 """
 import argparse
+from contextlib import closing
+import shutil
 import itertools
 import json
 import math
@@ -27,7 +33,7 @@ import sqlite3
 import subprocess
 import sys
 import tomllib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -62,6 +68,154 @@ EXPONENT_CODES = [
     for e in itertools.product("0123456789", repeat=3 - size)
 ]
 
+
+COMPACT_METADATA_TABLES = (
+    "tblReceiver", "tblReceiver_initial", "tblReceiverGPS", "tblTag",
+    "tblWSEL", "tblStudyParameters",
+)
+COMPACT_EVENT_COLUMNS = (
+    "seconds", "Rec_ID", "OffsetChanged", "CounterRestart",
+    "OneSecondAdjustmentEvidence", "InternalOffsetValue", "SourceFile",
+)
+
+def _compact_readonly(path):
+    con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    con.execute("PRAGMA query_only=ON")
+    return con
+
+def _compact_quoted(name):
+    return '"' + name.replace('"', '""') + '"'
+
+def check_capacity(target, reserve_bytes, max_bytes):
+    if shutil.disk_usage(target.parent).free < reserve_bytes:
+        raise RuntimeError("Insufficient disk reserve; compact copy stopped, not complete")
+    if target.exists() and target.stat().st_size > max_bytes:
+        raise RuntimeError("Compact database exceeded its size budget; copy stopped, not complete")
+
+def _compact_copy_rows(source, destination, query, params, table, target, reserve_bytes, max_bytes):
+    cursor = source.execute(query, params)
+    placeholders = ",".join("?" for _ in cursor.description)
+    columns = ",".join(_compact_quoted(column[0]) for column in cursor.description)
+    sql = "INSERT INTO %s (%s) VALUES (%s)" % (_compact_quoted(table), columns, placeholders)
+    count = 0
+    while True:
+        rows = cursor.fetchmany(10000)
+        if not rows:
+            break
+        check_capacity(target, reserve_bytes, max_bytes)
+        destination.executemany(sql, rows)
+        destination.commit()
+        count += len(rows)
+    check_capacity(target, reserve_bytes, max_bytes)
+    return count
+
+def build_compact(source, target, tags, temperature_source, reserve_bytes, max_bytes):
+    source, target = Path(source).resolve(), Path(target).resolve()
+    temperature_source = Path(temperature_source).resolve()
+    tags = sorted(set(tags))
+    if not tags or any(not isinstance(t, str) or not t.strip() for t in tags):
+        raise ValueError("An explicit nonempty tag selection is required")
+    if reserve_bytes <= 0 or max_bytes <= 0:
+        raise ValueError("Disk reserve and maximum database size must be positive")
+    if not source.is_file() or not temperature_source.is_file():
+        raise FileNotFoundError("Source database and temperature donor must exist")
+    if target.exists() or target in (source, temperature_source):
+        raise FileExistsError("Compact destination must be a new database")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path = target.with_suffix(".compact.json")
+    if manifest_path.exists():
+        raise FileExistsError("A compact manifest already exists for this destination")
+    check_capacity(target, reserve_bytes, max_bytes)
+    manifest = {
+        "status": "in_progress", "source": str(source), "target": str(target),
+        "temperature_source": str(temperature_source), "tags": tags, "tables": {},
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "reserve_bytes": reserve_bytes, "max_database_bytes": max_bytes,
+    }
+    with closing(_compact_readonly(source)) as src, closing(_compact_readonly(temperature_source)) as temp:
+        src.execute("BEGIN")
+        temp.execute("BEGIN")
+        schemas = dict(src.execute("SELECT name,sql FROM sqlite_master WHERE type='table'"))
+        required = set(COMPACT_METADATA_TABLES) | {"tblDetectionRaw"}
+        if not required.issubset(schemas):
+            raise ValueError("Missing required source tables: %s" % sorted(required - schemas.keys()))
+        raw_columns = {row[1] for row in src.execute("PRAGMA table_info(tblDetectionRaw)")}
+        if not set(COMPACT_EVENT_COLUMNS).issubset(raw_columns):
+            raise ValueError("Source lacks required Internal evidence columns")
+        if "jump_offset_s" in raw_columns:
+            raise ValueError("Use an unshifted baseline, not a previously corrected raw database")
+        temp_schema = temp.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tblInterpolatedTemp'"
+        ).fetchone()
+        if temp_schema is None:
+            raise ValueError("Temperature donor lacks tblInterpolatedTemp")
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        with closing(sqlite3.connect(target)) as dst:
+            dst.execute("PRAGMA temp_store=MEMORY")
+            for table in ("tblDetectionRaw",) + COMPACT_METADATA_TABLES:
+                dst.execute(schemas[table])
+            dst.execute(temp_schema[0])
+            for table in COMPACT_METADATA_TABLES:
+                n = _compact_copy_rows(src, dst, "SELECT * FROM " + _compact_quoted(table), (), table,
+                              target, reserve_bytes, max_bytes)
+                expected = src.execute("SELECT count(*) FROM " + _compact_quoted(table)).fetchone()[0]
+                if n != expected:
+                    raise RuntimeError("Metadata count changed during copy: " + table)
+                manifest["tables"][table] = n
+                print("%s: %d rows" % (table, n), flush=True)
+            raw_count = 0
+            for tag in tags:
+                n = _compact_copy_rows(
+                    src, dst, "SELECT rowid,* FROM tblDetectionRaw WHERE Tag_ID=?",
+                    (tag,), "tblDetectionRaw", target, reserve_bytes, max_bytes)
+                expected = src.execute(
+                    "SELECT count(*) FROM tblDetectionRaw WHERE Tag_ID=?", (tag,)).fetchone()[0]
+                if not n or n != expected:
+                    raise RuntimeError("Selected tag missing or changed during copy: " + tag)
+                raw_count += n
+                print("Raw tag %s: %d rows" % (tag, n), flush=True)
+            manifest["tables"]["tblDetectionRaw"] = raw_count
+            evidence_columns = list(COMPACT_EVENT_COLUMNS)
+            if "SourceRow" in raw_columns:
+                evidence_columns.append("SourceRow")
+            if "InternalCounterValue" in raw_columns:
+                evidence_columns.append("InternalCounterValue")
+            event_query = (
+                "SELECT rowid AS source_rowid,%s FROM tblDetectionRaw "
+                "WHERE OffsetChanged=1 OR CounterRestart=1 OR OneSecondAdjustmentEvidence=1"
+            ) % ",".join(_compact_quoted(c) for c in evidence_columns)
+            dst.execute(
+                "CREATE TABLE tblClockEventEvidence (source_rowid INTEGER PRIMARY KEY,%s)"
+                % ",".join(_compact_quoted(c) for c in evidence_columns))
+            n = _compact_copy_rows(src, dst, event_query, (), "tblClockEventEvidence",
+                          target, reserve_bytes, max_bytes)
+            manifest["tables"]["tblClockEventEvidence"] = n
+            print("All-tag clock evidence: %d rows" % n, flush=True)
+            n = _compact_copy_rows(temp, dst, "SELECT * FROM tblInterpolatedTemp", (),
+                          "tblInterpolatedTemp", target, reserve_bytes, max_bytes)
+            if not n:
+                raise ValueError("Temperature donor table is empty")
+            manifest["tables"]["tblInterpolatedTemp"] = n
+            for name, columns in (
+                ("idx_raw_tag_rec_seconds", "Tag_ID,Rec_ID,seconds"),
+                ("idx_raw_rec", "Rec_ID"),
+            ):
+                check_capacity(target, reserve_bytes, max_bytes)
+                dst.execute("CREATE INDEX %s ON tblDetectionRaw (%s)" % (name, columns))
+            dst.execute("CREATE INDEX idx_clock_evidence_rec_time ON tblClockEventEvidence (Rec_ID,seconds)")
+            dst.commit()
+            check_capacity(target, reserve_bytes, max_bytes)
+            for table, expected in manifest["tables"].items():
+                actual = dst.execute("SELECT count(*) FROM " + _compact_quoted(table)).fetchone()[0]
+                if actual != expected:
+                    raise RuntimeError("Destination row count failed for " + table)
+            checks = [row[0] for row in dst.execute("PRAGMA quick_check")]
+            if checks != ["ok"]:
+                raise RuntimeError("Compact database quick_check failed: %s" % checks)
+    manifest.update(status="complete", completed_utc=datetime.now(timezone.utc).isoformat(),
+                    database_bytes=target.stat().st_size, integrity="quick_check: ok")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
 
 def normalize_acoustic_code(value):
     """Return (4-hex code, repair note) or (None, reason).
@@ -349,6 +503,10 @@ def parse_args(argv=None):
     parser.add_argument("run_file", nargs="?", default=str(DEFAULT_RUN_FILE))
     parser.add_argument("--dry-run", action="store_true", help="Check inputs and print the plan without running")
     parser.add_argument("--skip-build", action="store_true", help="Reuse an existing output_db")
+    parser.add_argument("--compact-from", type=Path, help="2025 experiment only: copy selected raw tags and metadata from an unshifted database; do not run solutions")
+    parser.add_argument("--temperature-source", type=Path, help="Read-only temperature donor for --compact-from")
+    parser.add_argument("--reserve-gib", type=float, help="Required free-space reserve for --compact-from")
+    parser.add_argument("--max-database-gib", type=float, help="Maximum destination size for --compact-from")
     return parser.parse_args(argv)
 
 
@@ -470,7 +628,32 @@ def run_steps(steps, manifest, manifest_path):
 
 
 def main(argv=None):
-    args, run_file, run, paths, selection, study, legacy, dbscan, outputs, output_db, start, end = prepare_run(parse_args(argv))
+    parsed = parse_args(argv)
+    if parsed.compact_from:
+        if parsed.skip_build or parsed.dry_run:
+            raise ValueError("--compact-from cannot be combined with --skip-build or --dry-run")
+        run = read_run_file(Path(parsed.run_file).resolve())
+        if run["data_format"] != "ats" or not run["legacy"].get("clock_segment_safe", False):
+            raise ValueError("Compact construction is restricted to the opt-in 2025 clock experiment")
+        if parsed.temperature_source is None or parsed.reserve_gib is None or parsed.max_database_gib is None:
+            raise ValueError("--compact-from requires --temperature-source, --reserve-gib and --max-database-gib")
+        with closing(_compact_readonly(parsed.compact_from)) as con:
+            beacons = [r[0] for r in con.execute(
+                "SELECT Tag_ID FROM tblReceiver WHERE Rec_ID IN (%s)"
+                % ",".join("?" for _ in run["legacy"]["deep_receivers"] + [run["study"]["master_receiver"]]),
+                run["legacy"]["deep_receivers"] + [run["study"]["master_receiver"]])]
+        tags = list(run["selection"]["tags"]) + beacons
+        result = build_compact(parsed.compact_from, run["paths"]["output_db"], tags,
+                               parsed.temperature_source, parsed.reserve_gib * 2**30,
+                               parsed.max_database_gib * 2**30)
+        print(json.dumps(result, indent=2))
+        return 0
+    if any(value is not None for value in (parsed.temperature_source, parsed.reserve_gib, parsed.max_database_gib)):
+        raise ValueError("Compact-copy options require --compact-from")
+    run_for_policy = read_run_file(Path(parsed.run_file).resolve())
+    if run_for_policy["legacy"].get("clock_segment_safe", False):
+        raise ValueError("Use --compact-from to construct the isolated clock experiment, then _2025_pipeline.py directly; raw rebuilding and metadata/proxy rewriting are prohibited")
+    args, run_file, run, paths, selection, study, legacy, dbscan, outputs, output_db, start, end = prepare_run(parsed)
     data_format = run["data_format"]
     species_codes, repaired, unresolved, tags, serials = select_inputs(data_format, paths, selection)
     print_run_summary(run_file, output_db, data_format, start, end, selection, tags,

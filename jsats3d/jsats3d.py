@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import os
 import sqlite3
+from contextlib import closing
 import datetime as dt
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -332,6 +333,13 @@ class multipath_data_object():
                 # corrections (explicit NOTE below); any other error (e.g. missing column)
                 # must propagate loudly, not silently skip the correction.
                 clk_tables = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'").fetchall()}
+                segment_safe = _clock_experiment_enabled(conn)
+                if segment_safe:
+                    policy = conn.execute("SELECT receivers_3d FROM tblClockExperimentPolicy").fetchone()
+                    safe_receivers = set(policy[0].split(";")) - {self.master_receiver}
+                    master_period = conn.execute(
+                        "SELECT t.pulseRate FROM tblTag t JOIN tblReceiver r ON t.Tag_ID=r.Tag_ID WHERE r.Rec_ID=?",
+                        (self.master_receiver,)).fetchone()[0]
                 if 'tblDetectionClockFixed' in clk_tables:
                     clk = pd.read_sql(
                         "SELECT Rec_ID, seconds, seconds_residual FROM tblDetectionClockFixed", conn)
@@ -352,17 +360,27 @@ class multipath_data_object():
                         if rec_id in clock_knots:
                             ts, rs = clock_knots[rec_id]
                             corr = np.interp(t.to_numpy(float), ts, rs, left=rs[0], right=rs[-1])
+                            if segment_safe and rec_id in safe_receivers:
+                                corr, supported = _clock_supported_interpolation(
+                                    t.to_numpy(float), ts, rs, master_period)
+                                if not supported.all():
+                                    raise RuntimeError("Clock review required: %d unsupported detections on %s for %s"
+                                                       % (int((~supported).sum()), rec_id, tag))
                             if rec_id == 'ZOI09':
                                 corr = corr + ZOI09_OFFSET_S
                             self.data.loc[mask, 'seconds_fix'] = t - corr
                             applied += int(mask.sum())
                         else:
+                            if segment_safe and rec_id in safe_receivers:
+                                raise RuntimeError("Clock review required: no clock curve for %s" % rec_id)
                             no_curve.add(rec_id)
                     if no_curve:
                         print("  WARNING: no clock correction curve for receiver(s): %s (left uncorrected)" % ', '.join(sorted(no_curve)))
                     print("  Applied clock corrections to %d/%d fish detections (%d receivers without curves)" % (
                         applied, len(self.data), len(no_curve)))
                 else:
+                    if segment_safe:
+                        raise RuntimeError("Clock review required: experimental clock curves are missing")
                     print("  NOTE: no tblDetectionClockFixed correction rows; fish times left uncorrected (legacy behavior)")
             else:
                 datSQL = "SELECT * from tblDetectionClockFixed WHERE Tag_ID = '%s'"%(tag)
@@ -899,9 +917,89 @@ def _clock_fix_interpolation_knots(receiver_dat, value_column):
     return receiver_dat.drop_duplicates("seconds", keep="first").sort_values("seconds")
 
 
+def _clock_experiment_enabled(con):
+    table = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tblClockExperimentPolicy'"
+    ).fetchone()
+    if not table:
+        return False
+    row = con.execute("SELECT segment_safe FROM tblClockExperimentPolicy").fetchall()
+    if len(row) != 1 or row[0][0] not in (0, 1):
+        raise ValueError("Clock experiment policy must contain exactly one boolean segment_safe value")
+    return bool(row[0][0])
+
+def _clock_supported_interpolation(times, seconds, residuals, period):
+    """Return residuals and a support mask, including exact observed knots.
+
+    Two missed nominal epochs or a >=50 ms adjacent step bound an unresolved interval.
+    These reuse the audit's gap/step screens, not a new clock-fit or accuracy model.
+    """
+    times = np.asarray(times, dtype=float)
+    seconds = np.asarray(seconds, dtype=float)
+    residuals = np.asarray(residuals, dtype=float)
+    if not np.isfinite(period) or period <= 0:
+        raise ValueError("A positive finite beacon period is required")
+    if (seconds.ndim != 1 or residuals.shape != seconds.shape or len(seconds) < 2
+            or not np.all(np.isfinite(seconds)) or not np.all(np.isfinite(residuals))
+            or np.any(np.diff(seconds) <= 0)):
+        raise ValueError("Clock knots require at least two finite, strictly increasing timestamps")
+    values = np.interp(times, seconds, residuals)
+    right = np.searchsorted(seconds, times, side="left")
+    safe_right = np.clip(right, 0, len(seconds) - 1)
+    exact = np.isfinite(times) & (seconds[safe_right] == times)
+    interior = np.isfinite(times) & (right > 0) & (right < len(seconds))
+    right_index = np.clip(right, 1, len(seconds) - 1)
+    left_index = right_index - 1
+    supported = exact | (interior
+                        & (seconds[right_index] - seconds[left_index] <= 2 * period)
+                        & (np.abs(residuals[right_index] - residuals[left_index]) < 0.05))
+    return np.where(supported, values, np.nan), supported
+
+def _clock_mapped_event_bounds(events):
+    """Map each original event's two sides separately into corrected receiver time."""
+    if {"corrected_before_s", "corrected_after_s"} <= set(events.keys()):
+        before = np.asarray(events["corrected_before_s"], dtype=float)
+        after = np.asarray(events["corrected_after_s"], dtype=float)
+        if not np.all(np.isfinite(before)) or not np.all(np.isfinite(after)):
+            raise ValueError("Applied event corrected sides must be finite")
+        return np.minimum(before, after), np.maximum(before, after)
+    offsets = np.asarray(events["offset_s"], dtype=float)
+    times = np.asarray(events["jump_time_s"], dtype=float)
+    if not np.all(np.isfinite(offsets)) or not np.all(np.isfinite(times)):
+        raise ValueError("Applied event times and offsets must be finite")
+    cumulative = np.cumsum(offsets)
+    before = times - (cumulative - offsets)
+    after = times - cumulative
+    return np.minimum(before, after), np.maximum(before, after)
+
+def _clock_validate_applied_events(knots, events, receiver, window_s=300.0):
+    """Report continuity at mapped event sides; never certify missing measurements."""
+    events = events.sort_values("jump_time_s")
+    low, high = _clock_mapped_event_bounds(events)
+    records = []
+    for i, event in enumerate(events.to_dict("records")):
+        before = (knots.seconds >= low[i] - window_s) & (knots.seconds < low[i])
+        after = (knots.seconds > high[i]) & (knots.seconds <= high[i] + window_s)
+        for j in range(len(events)):
+            if i != j:
+                busy = (knots.seconds >= low[j] - window_s) & (knots.seconds <= high[j] + window_s)
+                before &= ~busy
+                after &= ~busy
+        pre, post = knots[before], knots[after]
+        step = float(post.ToA_error.median() - pre.ToA_error.median()) if min(len(pre), len(post)) >= 3 else np.nan
+        records.append({
+            "Rec_ID": receiver, "jump_time_s": event["jump_time_s"],
+            "start_s": float(low[i] - window_s), "end_s": float(high[i] + window_s),
+            "n_pre": len(pre), "n_post": len(post), "residual_step_s": step,
+            "status": "unverifiable" if not np.isfinite(step) else ("passed" if abs(step) <= 0.0005 else "failed"),
+        })
+    return records
+
 def clock_fix(clock_fix_object):
     '''function to fix clocks on a receiver by receiver basis - we will use mutiprocessing
     to speed things up'''
+    with closing(sqlite3.connect(clock_fix_object.projectDB)) as policy_con:
+        segment_safe = _clock_experiment_enabled(policy_con)
     master_receiver = clock_fix_object.master_clock_rec_ID                                         # get the Rec ID of the master receiver
     current_receiver = clock_fix_object.current_receiver                                                 # get the Rec ID of the current receiver
     master_elev_ref = clock_fix_object.receivers[clock_fix_object.receivers.Rec_ID == master_receiver].Ref_Elev.values[0]
@@ -1018,6 +1116,9 @@ def clock_fix(clock_fix_object):
                 that could bias clock synchronization.                
                 '''
                 iters = 5
+                if segment_safe:
+                    receiver_dat.to_csv(os.path.join(clock_fix_object.figureWS,
+                        'receiver_%s_clock_prefilter.csv' % current_receiver), index=False)
                 for i in np.arange(0,iters,1):
                     
                     # find first and last time step
@@ -1040,6 +1141,13 @@ def clock_fix(clock_fix_object):
                     ext_dist = pd.DataFrame(euc_dist).quantile(q = [0.90,0.95,0.96,0.97,0.98,0.99]).values
                     
                     # apply dbscan and plot clusters and get progressively less strict
+                    # drop NaN rows (from missing temperature data before interpolation range)
+                    valid = np.isfinite(ts) & np.isfinite(ddoa)
+                    if not valid.all():
+                        ts = ts[valid]
+                        ddoa = ddoa[valid]
+                        if len(ts) < 3:
+                            break  # not enough valid data for DBSCAN
                     if i == 0:
                         eps = float(np.asarray(ext_dist[0]).reshape(-1)[0])
                         test = DBSCAN(eps=eps, min_samples=3, metric='euclidean').fit(
@@ -1093,6 +1201,8 @@ def clock_fix(clock_fix_object):
                 
                 # Fit piecewise linear to error line, accounting for clock jumps:
                 residual_curve = _clock_fix_interpolation_knots(receiver_dat, 'ToA_error')
+                # Drop rows with NaN ToA_error (from missing temperature data before interpolation range)
+                residual_curve = residual_curve.dropna(subset=['ToA_error'])
                 
                 # ZOI09 has a known 946ms hardware offset — apply correction before interpolation
                 if clock_fix_object.current_receiver == 'ZOI09':
@@ -1112,7 +1222,7 @@ def clock_fix(clock_fix_object):
                 ).fetchone()
                 if has_jump_table:
                     pre_jumps = pd.read_sql("""
-                        SELECT jump_time_s, offset_s, evidence
+                        SELECT *
                         FROM tblClockJumpEvents
                         WHERE Rec_ID = '%s'
                         ORDER BY jump_time_s
@@ -1120,7 +1230,19 @@ def clock_fix(clock_fix_object):
                 else:
                     pre_jumps = pd.DataFrame()
                 conn.close()
-                if len(pre_jumps) > 0:
+                if segment_safe and len(pre_jumps) > 0:
+                    validation = pd.DataFrame(_clock_validate_applied_events(
+                        residual_curve, pre_jumps, current_receiver))
+                    with closing(sqlite3.connect(clock_fix_object.projectDB)) as validation_con:
+                        exists = validation_con.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tblClockJumpValidation'"
+                        ).fetchone()
+                        if exists:
+                            validation_con.execute("DELETE FROM tblClockJumpValidation WHERE Rec_ID=?", (current_receiver,))
+                            validation_con.commit()
+                        validation.to_sql("tblClockJumpValidation", validation_con, if_exists="append", index=False)
+                    print("  Mapped jump validation: %s" % validation.status.value_counts().to_dict())
+                if len(pre_jumps) > 0 and not segment_safe:
                     print("\nPre-sync jump corrections on %s (validated against the residual curve):" % clock_fix_object.current_receiver)
                     jwin = 300.0
                     all_jump_times = pre_jumps.jump_time_s.to_numpy()
@@ -1154,7 +1276,7 @@ def clock_fix(clock_fix_object):
 
                 # Identify jump boundaries (5 min before/after each event)
                 jump_boundaries = []
-                if len(residual_curve) > 100:
+                if len(residual_curve) > 100 and not segment_safe:
                     # Detect jumps from the residual curve itself (legacy auto-detect; also
                     # covers jumps that have no internal code in the file)
                     # Scan for step changes in mean residual using sliding windows
@@ -1244,6 +1366,14 @@ def clock_fix(clock_fix_object):
                                       kind='linear', bounds_error=False, fill_value=9999)
                     print("  No clock jumps detected. Using single-piece interpolation.")
                 
+                if segment_safe:
+                    def supported_residual(t):
+                        values, support = _clock_supported_interpolation(
+                            t, residual_curve.seconds.to_numpy(),
+                            residual_curve.ToA_error.to_numpy(), clock_fix_object.master_pulse_rate)
+                        return np.where(support, values, 9999.0)
+                    residual = supported_residual
+
                 receiver_dat['seconds_residual_predicted'] = residual(receiver_dat.seconds)   # predict the residual and visually confirm with plot            
                 receiver_dat['prev_seconds'] = receiver_dat.seconds.shift()
                 receiver_dat['prev_error'] = receiver_dat.ToA_error.shift()

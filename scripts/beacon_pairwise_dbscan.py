@@ -170,12 +170,13 @@ def steady_reflection_labels(g, tolerance_s=TIMING_BUDGET_S):
     return set(spans.index.values[late.any(axis=0)])
 
 
-def cluster(series, period, tolerance_s=TIMING_BUDGET_S, window_periods=TIME_WINDOW_PERIODS, min_samples=MIN_SAMPLES):
+def cluster(series, period, tolerance_s=TIMING_BUDGET_S, window_periods=TIME_WINDOW_PERIODS,
+            min_samples=MIN_SAMPLES, eps=1.0):
     out = []
     for rid, g in series.groupby("Rec_ID"):
         g = g.sort_values("t_anchor").copy()
         x = np.column_stack([g.t_anchor / (window_periods * period), g.delta_s / tolerance_s])
-        g["label"] = DBSCAN(eps=1.0, min_samples=min_samples, metric="chebyshev").fit_predict(x)
+        g["label"] = DBSCAN(eps=eps, min_samples=min_samples, metric="chebyshev").fit_predict(x)
         late = steady_reflection_labels(g, tolerance_s)
         g["dbscan_class"] = np.where(g.label < 0, "noise", np.where(g.label.isin(late), "steady_reflection", "clean"))
         out.append(_fit_residuals(g, (g.dbscan_class == "clean").values))
