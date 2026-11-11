@@ -13,6 +13,16 @@ Three commands, each writes one markdown file into --out:
   dispositions  what did Stage 1 itself decide about the events next to each missed
                 step?                                       (CSV only)
                 -> followup_dispositions.md
+  brackets      how much time, and how many fish detections, fall where the clock
+                state is off or ambiguous?                  (CSV, plus one database
+                read-only for the fish rows)                -> followup_brackets.md
+  crossbeacon   does a second, independent beacon see the same clock state at the
+                same time?                                  (two series CSVs)
+                -> followup_crossbeacon_<label>.md
+  extract       write the first-arrival TDoA series of one beacon tag against the
+                master receiver, with the project's own function
+                (clock_jump_pre.beacon_first_arrivals). Unshifted database only,
+                read-only.                                  -> the CSV named by --out-csv
 
 Nothing here changes a timestamp on disk. The flag test subtracts the documented
 adjustment from an in-memory copy of the TDoA series and counts the steps again.
@@ -33,7 +43,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import stage1_closure_audit as sca  # noqa: E402
 
-VERSION = "followup-2026-11-11-a"
+VERSION = "followup-2026-11-12-b"
 JOIN_TOLERANCE_S = 1e-4
 SIZE_EDGES = [0.05, 0.25, 0.75, 1.25, 1.75, 2.25, 5.0, 25.0, np.inf]
 SIZE_LABELS = ["0.05-0.25 s", "0.25-0.75 s", "0.75-1.25 s (one second)", "1.25-1.75 s",
@@ -278,6 +288,175 @@ def cmd_dispositions(steps, jumps, evidence_only, unresolvable, out):
     return result
 
 
+
+# ---------------------------------------------------------------------------- extract
+def cmd_extract(db, tag, master, period, scripts_dir, out_csv):
+    sys.path.insert(0, os.path.abspath(scripts_dir))
+    import clock_jump_pre
+    con = sqlite3.connect("file:%s?mode=ro" % os.path.abspath(db).replace("\\", "/"), uri=True)
+    try:
+        con.execute("PRAGMA query_only=ON")
+        if "jump_offset_s" in {r[1] for r in con.execute("PRAGMA table_info(tblDetectionRaw)")}:
+            raise RuntimeError("This database has shifted timestamps; extract only from the unshifted baseline")
+        span = con.execute("SELECT MIN(seconds), MAX(seconds), COUNT(*) FROM tblDetectionRaw WHERE Tag_ID = ?",
+                           (tag,)).fetchone()
+        if not span[2]:
+            raise RuntimeError("No detections of tag %s" % tag)
+        series = clock_jump_pre.beacon_first_arrivals(con, master, tag, period, span[0] - 60.0, span[1] + 60.0)
+    finally:
+        con.close()
+    if series.empty:
+        raise RuntimeError("No paired epochs: does %s hear tag %s?" % (master, tag))
+    os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+    series.to_csv(out_csv, index=False)
+    counts = series.groupby("Rec_ID").size()
+    print("tag %s vs %s: raw rows %d, paired epochs %d, receivers %d" % (tag, master, span[2], len(series), len(counts)))
+    print(counts.to_string())
+    return series
+
+
+# --------------------------------------------------------------------------- brackets
+MAX_BRACKET_S = 300.0     # a longer bracket is a beacon gap, not a pinned jump
+PAIR_WINDOW_S = 90.0      # one and a half nominal periods
+
+
+def load_fish_rows(db, tags):
+    con = sqlite3.connect("file:%s?mode=ro" % os.path.abspath(db).replace("\\", "/"), uri=True)
+    try:
+        con.execute("PRAGMA query_only=ON")
+        cols = {r[1] for r in con.execute("PRAGMA table_info(tblDetectionRaw)")}
+        original = "seconds+COALESCE(jump_offset_s,0)" if "jump_offset_s" in cols else "seconds"
+        rows = pd.read_sql("SELECT Rec_ID, %s AS o FROM tblDetectionRaw WHERE Tag_ID IN (%s)"
+                           % (original, ",".join("?" for _ in tags)), con, params=list(tags))
+    finally:
+        con.close()
+    return rows
+
+
+def _in_intervals(x, starts, ends):
+    """True where x lies inside any [start, end]; intervals sorted and non-overlapping."""
+    if len(starts) == 0:
+        return np.zeros(len(x), dtype=bool)
+    i = np.searchsorted(starts, x, side="right") - 1
+    ok = i >= 0
+    return ok & (x <= ends[np.clip(i, 0, len(ends) - 1)])
+
+
+def cmd_brackets(series, fish, out):
+    rows = []
+    for rec in sorted(series.Rec_ID.unique()):
+        g = series[series.Rec_ID == rec].sort_values("t")
+        t, y = g.t.to_numpy(float), g.tdoa_s.to_numpy(float)
+        base = sca.baseline_level(y)
+        steps = sca.find_steps(t, y)
+        d = np.diff(y, prepend=np.nan)
+        gap = np.diff(t, prepend=np.nan)
+        # Every interval between two consecutive beacon epochs is one of four kinds.
+        changed = np.abs(d) >= sca.MIN_STEP_S                    # level differs across the interval
+        long_gap = gap > MAX_BRACKET_S                           # no beacon knot for over 300 s
+        off = np.abs(y - base) >= sca.MIN_STEP_S                 # epoch is away from the path delay
+        prev_off = np.roll(off, 1)
+        kind = np.full(len(t), "clean", dtype=object)            # both ends on the path delay, same level
+        kind[(~changed) & off & prev_off] = "steady_offset"      # both ends at the same shifted level
+        kind[changed] = "ambiguous"                              # the clock changed somewhere inside
+        kind[long_gap] = "beacon_gap"
+        kind[0] = "first"
+        seconds = {k: float(np.nansum(gap[kind == k])) for k in ("clean", "steady_offset", "ambiguous", "beacon_gap")}
+        span = float(t[-1] - t[0])
+        row = {"Rec_ID": rec, "span_days": span / 86400.0, "sustained_steps": len(steps),
+               "changed_intervals": int((kind == "ambiguous").sum()),
+               "clean_time_pct": 100.0 * seconds["clean"] / span,
+               "steady_offset_time_pct": 100.0 * seconds["steady_offset"] / span,
+               "ambiguous_time_pct": 100.0 * seconds["ambiguous"] / span,
+               "beacon_gap_time_pct": 100.0 * seconds["beacon_gap"] / span}
+        if fish is not None:
+            f = np.sort(fish.loc[fish.Rec_ID == rec, "o"].to_numpy(float))
+            f = f[(f >= t[0]) & (f <= t[-1])]
+            k = np.clip(np.searchsorted(t, f, side="left"), 1, len(t) - 1)    # interval (t[k-1], t[k]]
+            kinds = kind[k]
+            n = max(len(f), 1)
+            row.update(fish_rows=int(len(f)),
+                       fish_clean_pct=100.0 * float(np.mean(kinds == "clean")) if len(f) else np.nan,
+                       fish_steady_offset_pct=100.0 * float(np.sum(kinds == "steady_offset")) / n if len(f) else np.nan,
+                       fish_ambiguous_pct=100.0 * float(np.sum(kinds == "ambiguous")) / n if len(f) else np.nan,
+                       fish_beacon_gap_pct=100.0 * float(np.sum(kinds == "beacon_gap")) / n if len(f) else np.nan)
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "followup_brackets.md"), "w", encoding="utf-8") as f:
+        f.write(_header("Follow-up: time and fish detections by clock state"))
+        f.write("Each interval between two consecutive master-beacon epochs of a receiver is one of four kinds.\n\n"
+                "- clean: both ends at the path delay.\n"
+                "- steady_offset: both ends at the same shifted level (50 ms or more from the path delay, "
+                "and less than 50 ms apart). The clock is wrong by a known amount.\n"
+                "- ambiguous: the two ends differ by 50 ms or more. The clock changed somewhere inside; "
+                "which side a detection belongs to is not known from this beacon alone.\n"
+                "- beacon_gap: more than 300 s without a master-beacon epoch.\n\n"
+                "Fish columns count study-tag detections of that receiver by the kind of interval they fall in. "
+                "The master receiver has no series of its own and is not in this table.\n\n")
+        f.write("## Table R. Share of time by clock state\n\n"
+                + sca.md_table(table[[c for c in table.columns if not c.startswith("fish_")]], "%.2f") + "\n")
+        if fish is not None:
+            cols = ["Rec_ID"] + [c for c in table.columns if c.startswith("fish_")]
+            total = table.fish_rows.sum()
+            weighted = {c: float((table[c] * table.fish_rows).sum() / max(total, 1)) for c in cols[2:]}
+            f.write("## Table R2. Share of fish detections by clock state\n\n" + sca.md_table(table[cols], "%.2f") + "\n")
+            f.write("## Table R3. All receivers together\n\n"
+                    + sca.md_table(pd.DataFrame([dict(fish_rows=int(total), **weighted)]), "%.2f") + "\n")
+    return table
+
+
+# ------------------------------------------------------------------------ crossbeacon
+def cmd_crossbeacon(first, second, label, out):
+    rows = []
+    for rec in sorted(set(first.Rec_ID) & set(second.Rec_ID)):
+        a = first[first.Rec_ID == rec].sort_values("t")
+        b = second[second.Rec_ID == rec].sort_values("t")
+        ta, ya = a.t.to_numpy(float), a.tdoa_s.to_numpy(float)
+        tb, yb = b.t.to_numpy(float), b.tdoa_s.to_numpy(float)
+        base_a, base_b = sca.baseline_level(ya), sca.baseline_level(yb)
+        if not (np.isfinite(base_a) and np.isfinite(base_b)) or len(ta) < 2:
+            continue
+        k = np.searchsorted(ta, tb, side="left")
+        ok = (k >= 1) & (k < len(ta))
+        k = np.clip(k, 1, len(ta) - 1)
+        bracketed = ok & (tb - ta[k - 1] <= PAIR_WINDOW_S) & (ta[k] - tb <= PAIR_WINDOW_S)
+        stable = bracketed & (np.abs(ya[k] - ya[k - 1]) < sca.MIN_STEP_S)
+        state_a = (0.5 * (ya[k] + ya[k - 1]) - base_a)[stable]
+        state_b = (yb - base_b)[stable]
+        off_a, off_b = np.abs(state_a) >= sca.MIN_STEP_S, np.abs(state_b) >= sca.MIN_STEP_S
+        agree = np.abs(state_a - state_b) < sca.MIN_STEP_S
+        either = off_a | off_b
+        rows.append({
+            "Rec_ID": rec, "second_beacon_epochs": len(tb), "paired_stable": int(stable.sum()),
+            "not_paired_or_in_changed_interval": int(len(tb) - stable.sum()),
+            "both_at_path_delay": int((~either).sum()),
+            "both_shifted_same_amount": int((off_a & off_b & agree).sum()),
+            "both_shifted_different": int((off_a & off_b & ~agree).sum()),
+            "only_first_beacon_shifted": int((off_a & ~off_b).sum()),
+            "only_second_beacon_shifted": int((~off_a & off_b).sum()),
+            "agreement_when_first_shifted_pct": (100.0 * float((off_a & agree).sum()) / off_a.sum()
+                                                 if off_a.any() else np.nan),
+            "second_baseline_ms": base_b * 1e3})
+    table = pd.DataFrame(rows)
+    os.makedirs(out, exist_ok=True)
+    name = "followup_crossbeacon_%s.md" % label
+    total = pd.DataFrame([{c: int(table[c].sum()) for c in table.columns
+                           if c not in ("Rec_ID", "agreement_when_first_shifted_pct", "second_baseline_ms")}]) if len(table) else table
+    if len(table):
+        shifted = total.both_shifted_same_amount + total.both_shifted_different + total.only_first_beacon_shifted
+        total["agreement_when_first_shifted_pct"] = 100.0 * total.both_shifted_same_amount / shifted.clip(lower=1)
+    with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+        f.write(_header("Follow-up: does a second beacon see the same clock state? (%s)" % label))
+        f.write("First series = master beacon. Second series = another beacon, same reference receiver. "
+                "For each second-beacon epoch the two master-beacon epochs around it must be within 90 s and "
+                "less than 50 ms apart; otherwise it is not compared. 'Shifted' means 50 ms or more from that "
+                "series' own path delay. If the shift is a state of the receiver clock, both beacons must show it. "
+                "If it belongs to single records, the second beacon will not.\n\n")
+        f.write("## Totals\n\n" + sca.md_table(total, "%.1f") + "\n")
+        f.write("## Table S. Per receiver\n\n" + sca.md_table(table, "%.1f") + "\n")
+    return table
+
 # --------------------------------------------------------------------------- selftest
 def selftest():
     rng = np.random.default_rng(11)
@@ -316,6 +495,16 @@ def selftest():
                                  "note": ["window clipped below 150 s by a neighbouring event"]})
     evidence_only = pd.DataFrame({"Rec_ID": ["TEST1"], "jump_time_s": [rec_l[531] - 20.0], "offset_s": [0.01]})
     disp = cmd_dispositions(steps, lines, evidence_only, unresolvable, folder)
+    # brackets: fish rows spread evenly; second beacon sharing the clock state
+    fish = pd.DataFrame({"Rec_ID": "TEST1", "o": np.linspace(rec_l[10], rec_l[-10], 20000)})
+    br = cmd_brackets(series, fish, folder).iloc[0]
+    t2 = true_m + 20.0
+    state = (rec_l - rec_m) - 0.030
+    second = pd.DataFrame({"Rec_ID": "TEST1", "t": t2, "transNo": np.arange(n),
+                           "tdoa_s": 0.045 + np.round(state, 1) + rng.normal(0, 0.0002, n)})
+    cb = cmd_crossbeacon(series, second, "selftest", folder).iloc[0]
+    per_record = second.assign(tdoa_s=0.045 + rng.normal(0, 0.0002, n))
+    cb2 = cmd_crossbeacon(series, per_record, "selftest_per_record", folder).iloc[0]
     nrow = table_n.iloc[0]
     checks = {
         "signed classes add up": abs(j.iloc[0][[c for c in j.columns if c.endswith("_s") and c not in
@@ -330,6 +519,13 @@ def selftest():
         "one unresolvable and one evidence only": (int((disp.disposition == "unresolvable").sum()) == 1
                                                     and int((disp.disposition == "evidence_only").sum()) == 1),
         "two with no stage 1 event": int((disp.disposition == "no_stage1_event").sum()) == 2,
+        "five changed intervals": int(br.changed_intervals) == 5,
+        "time shares add to 100": abs(br.clean_time_pct + br.steady_offset_time_pct + br.ambiguous_time_pct
+                                      + br.beacon_gap_time_pct - 100.0) < 0.1,
+        "fish shares follow time shares": abs(br.fish_steady_offset_pct - br.steady_offset_time_pct) < 0.5
+                                          and abs(br.fish_ambiguous_pct - br.ambiguous_time_pct) < 0.2,
+        "second beacon agrees when state is shared": cb.agreement_when_first_shifted_pct > 99.0,
+        "second beacon disagrees when per record": cb2.agreement_when_first_shifted_pct < 1.0,
     }
     for name, ok in checks.items():
         print("%-42s %s" % (name, "OK" if ok else "FAIL"))
@@ -349,7 +545,7 @@ def _read_optional(path):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", nargs="?", choices=["signed", "flags", "dispositions"])
+    p.add_argument("command", nargs="?", choices=["signed", "flags", "dispositions", "brackets", "crossbeacon", "extract"])
     p.add_argument("--series", help="series_armA_uncorrected.csv")
     p.add_argument("--lines", help="stage1_correction_lines.csv")
     p.add_argument("--db", help="flags: database holding tblDetectionRaw with Internal (opened read-only)")
@@ -357,13 +553,43 @@ def main(argv=None):
     p.add_argument("--master", default="ZOI08")
     p.add_argument("--steps", help="dispositions: steps_detected.csv from the closure audit")
     p.add_argument("--stage1-report", help="dispositions: folder with jumps.csv, evidence_only.csv, unresolvable.csv")
+    p.add_argument("--fish-tags", nargs="*", default=["26E4", "9F8C", "1D5A", "B5ED"],
+                   help="brackets: study tags to count (needs --db)")
+    p.add_argument("--second-series", help="crossbeacon: series CSV of another beacon, same reference receiver")
+    p.add_argument("--label", default="second", help="crossbeacon: short name of the second beacon, used in the file name")
+    p.add_argument("--period", type=float, default=60.0, help="extract: nominal beacon period (s)")
+    p.add_argument("--scripts-dir", help="extract: the repository scripts folder (for clock_jump_pre)")
+    p.add_argument("--out-csv", help="extract: CSV file to write")
     p.add_argument("--out")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args(argv)
     if args.selftest:
         return selftest()
+    if args.command == "extract":
+        if not (args.db and args.scripts_dir and args.out_csv):
+            p.error("--db, --scripts-dir and --out-csv are required")
+        cmd_extract(args.db, args.tag, args.master, args.period, args.scripts_dir, args.out_csv)
+        return 0
     if not args.command or not args.out:
         p.error("a command and --out are required")
+    if args.command == "brackets":
+        if not args.series:
+            p.error("--series is required")
+        series = pd.read_csv(args.series, dtype={"Rec_ID": str}).dropna(subset=["t", "tdoa_s"])
+        fish = load_fish_rows(args.db, args.fish_tags) if args.db else None
+        table = cmd_brackets(series, fish, args.out)
+        print("receivers %d | fish rows %s" % (len(table), int(table.fish_rows.sum()) if fish is not None else "not counted"))
+        print("Report: %s" % os.path.join(args.out, "followup_brackets.md"))
+        return 0
+    if args.command == "crossbeacon":
+        if not (args.series and args.second_series):
+            p.error("--series and --second-series are required")
+        first = pd.read_csv(args.series, dtype={"Rec_ID": str}).dropna(subset=["t", "tdoa_s"])
+        second = pd.read_csv(args.second_series, dtype={"Rec_ID": str}).dropna(subset=["t", "tdoa_s"])
+        table = cmd_crossbeacon(first, second, args.label, args.out)
+        print("receivers compared %d" % len(table))
+        print("Report: %s" % os.path.join(args.out, "followup_crossbeacon_%s.md" % args.label))
+        return 0
     if args.command in ("signed", "flags"):
         if not (args.series and args.lines):
             p.error("--series and --lines are required")
