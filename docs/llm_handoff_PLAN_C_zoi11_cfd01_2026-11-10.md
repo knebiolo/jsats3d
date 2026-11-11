@@ -11,6 +11,40 @@ This plan does not touch the clock jump experiment. No gate, no policy table, no
 
 ---
 
+## Revision 2026-11-11. Read this before anything else. It overrides the sections below where they differ.
+
+The Plan B run reported that `output\zoi11_test\armA\zoi11_A.db` is no longer on disk. The plan below builds every arm from that file, so the build route changes. Everything about scoring, plotting, checks and wording stays as written.
+
+**R1. Task 0 adds a source search.** Report each of these as found (path, size, last write) or not found:
+- `Get-ChildItem C:\Dev\jsat3d -Recurse -Filter zoi11_A.db -ErrorAction SilentlyContinue` (this also covers `C:\Dev\jsat3d\output_archive_*`)
+- the folder `output\zoi11_test\raw_staging` and its file count
+- `output\jsats3d_2025_tagdrag_ent_anchorZOI03.db`
+- the two raw folders `20250610_Receivers_array_testing` and `20250618_Receivers` under the `raw_root` of `config\run_data_earlyfish_2026-11-03_clocksync.toml`, with file counts
+
+**R2. Choose the route by what exists. Do not choose by preference.**
+
+| Found | Route |
+|---|---|
+| `zoi11_A.db` anywhere | **Route 1.** Follow the plan below unchanged, with that path as the `--init-from` source. Never write to it. |
+| no `zoi11_A.db` | **Route 2.** Build arm N from raw, then make Z, C and ZC from arm N. Steps below. |
+
+**R3. Route 2 steps.**
+
+1. Run file `config\run_data_zoi11cfd01_N.toml` is still a copy of `run_data_zoi11_A.toml`. Allowed differences now: comments, `output_db`, `raw_root`, and `tags`.
+   - `raw_root`: keep the staging folder if it still exists with 48 files. Otherwise use the `raw_root` value of the earlyfish clocksync run file. The window in `[selection]` limits what is parsed.
+   - `tags = ['FFD3', 'FC36']`. The parse happens anyway, so FC36 is added now. This answers owner question 1 of Task 1 in advance. Do **not** add a pulse rate for FC36 to the run file. After the build, report `SELECT Tag_ID, TagType, pulseRate FROM tblTag WHERE Tag_ID IN ('FFD3','FC36')`. If FC36 has no pulse rate, it cannot be positioned: report that and continue with FFD3 only. Never invent a pulse rate.
+2. `python.exe scripts\run_data.py config\run_data_zoi11cfd01_N.toml --dry-run`. Paste the whole output. **STOP and wait for the owner's OK.** The dry run shows the receivers, window, tags and steps without running anything.
+3. After the OK: the same command without `--dry-run`, console saved with `*>&1 | Tee-Object output\11112026_zoi11_cfd01\armN\run_log.txt`. This parses raw files (read only), builds the database and runs the full 2025 pipeline. If it stops, paste the last 40 lines and STOP.
+4. Now run the Task 1 inventory on `arm_N.db` (the plan's 1a to 1f, with `arm_N.db` in place of `zoi11_A.db`; the arm B checks in 1b are skipped). In 1a confirm `tblReceiver_initial` exists and compare its ZOI05 and ZOI06 rows with `tblReceiver`. If they differ, STOP.
+5. Arms Z, C, ZC: the Task 3 command with `--init-from output\11112026_zoi11_cfd01\armN\arm_N.db`. Their run files differ from the N run file only in `output_db`, `surface_receivers`, `receivers_3d`. Show `git diff --no-index` of each against the **N** file.
+6. Disk: report the size of `arm_N.db` before making copies. Three more copies must leave at least 3 GB free. If not, STOP.
+
+**R4. Task 4 check 1 changes under Route 2.** There is no old database to compare with. Instead report arm N's FFD3 median error on each forebay hold with GPS, next to the 2026-11-01 journal figures (five holds where ZOI11 heard the tag: arm A mean 21.0 m, median 11.6 m; FBY-S-10 47.6 m; FBY-S-7 205.9 m; FBY-S-4 71.8 m). Exact agreement is not expected because the code has changed. A hold that differs by more than 5 m goes under "Things that looked wrong".
+
+**R5. Rule 3 changes.** There may be no `output\zoi11_test\` to protect. The rule becomes: never write outside `output\11112026_zoi11_cfd01\`, `config\` (four run files), the journal and the report.
+
+---
+
 ## 1. The request
 
 Drew, verbatim: "The hydrophones for ZOI11 and CFD01 should both be 1 ft below the bottom of the debris barrier and therefore useful for positioning, but likely plagued with multipath signal conflicts. Include each of the receivers individually, and both and create plots for all the static holds, validation drags in comparison to the original without each included."
