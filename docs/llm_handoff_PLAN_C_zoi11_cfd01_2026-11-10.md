@@ -45,6 +45,53 @@ The Plan B run reported that `output\zoi11_test\armA\zoi11_A.db` is no longer on
 
 ---
 
+## Revision 2, 2026-11-11: the PM's written request. Overrides everything below and Revision 1 where they differ.
+
+Source: `docs/pm_request_zoi11_cfd01_evaluation_2026-11-11.md`. Read it. It is the authority on what the PM wants.
+
+**The decision this work serves.** Include or exclude ZOI11 and CFD01 from the production array. The PM's only reason to include either: *it increases positioning resolution underneath the debris barrier without degrading positions in other locations.* The assessment is **qualitative**. Plots come first. Tables support them.
+
+**V1. Arm names.** Use the PM's names on every plot, table and file. The letters stay as short keys in file paths only.
+
+| Key | Name on plots | Colour |
+|---|---|---|
+| N | 1. Excluded | `#9a9a9a` grey |
+| Z | 2. ZOI11 Only | `#1f6fb5` blue |
+| C | 3. CFD01 Only | `#dd6b20` orange |
+| ZC | 4. Both | `#2e8b57` green |
+
+**V2. Events.** Every static hold whose Test ID contains `-S-` (forebay) or starts with `DB` (debris barrier), and every validation drag line in the GPS file. If Task 1d finds other event types in the workbook, list them and ask. Do not drop any event silently. An event outside the built window is listed as "outside window", not skipped.
+
+**V3. Two plots per event and tag, replacing Task 5b.** Both show all four arms, GPS truth where it exists, and the receivers.
+
+1. **2D plan view, PNG** `plots_2d\<TestID>_<tag>.png`. As Task 5b's left panel, at full width. No bar chart panel. Legend with the four arm names and `n=` fixes per arm.
+2. **Interactive 3D, HTML** `plots_3d\<TestID>_<tag>.html`, plotly `Scatter3d`.
+   - x, y in local metres, z in metres (negative down). Set `scene.aspectmode="data"`.
+   - One trace per arm: per transmission medians for holds, the Kalman track for drags (`mode="markers"` for holds, `"lines+markers"` for drags), marker size 3, the arm's colour. Hover: arm name, local time (PDT), x, y, z, number of solutions.
+   - GPS truth: black. A hold is one black diamond; a drag is a black line. Place truth at the tag's known depth, `dtf.TAGZ[tag]`. Say in the hover that the depth is the deployed tag depth, not a GPS measurement.
+   - Receivers: small black markers with their names as text, from `dm.xyz` (`X_t, Y_t, Z_t`). ZOI11 and CFD01 larger and red.
+   - Write with `fig.write_html(path, include_plotlyjs="directory")`. That puts one shared `plotly.min.js` in the folder, so the files work offline and stay small.
+   - Title: `<TestID>  <tag>  <date> <start> to <end> local time (PDT)`. Debris barrier holds add `no GPS truth`.
+3. An `index.html` in the output folder: one table row per event and tag, linking the PNG and the HTML, with the fix count per arm.
+
+Open every PNG. Open at least five of the HTML files in a browser, among them one debris barrier hold and one drag, and rotate them. Write one line per file opened.
+
+**V4. What to report, replacing Task 6 tables 1 and 6. Tables 2 to 5 stay.**
+
+*Table V4a, per event, tag and arm:* transmissions with a fix; total solutions; spread as std of x, std of y, std of z of the per transmission medians; median z; and, where GPS exists, median XY error.
+
+*Table V4b, new fixes:* for arms Z, C and ZC against arm N, per event and tag: transmissions that have a fix in the arm and none in arm N; transmissions that have a fix in arm N and none in the arm; transmissions in both. Match on `transNo` (valid here, see section 8).
+
+*Table V4c, where the new fixes are:* for the transmissions counted as new in V4b, the distance from each fix to the nearer of ZOI11 and CFD01 (XY, from `dm.xyz`). Report the count in three bands: under 25 m, 25 to 50 m, over 50 m. These bands only describe the result. They are not pipeline parameters and nothing is filtered by them.
+
+*Table V4d, elsewhere:* for events with GPS, the change in median XY error against arm N for Z, C and ZC, next to the distance from the event's GPS truth (its median point) to the nearer of ZOI11 and CFD01. Sort by that distance. This is the direct look at "without degrading positions in other locations".
+
+**V5. Wording for the summary.** Three short paragraphs, one per added arm. Each states only: how many events gained fixes and how many transmissions (V4b); where those fixes sit (V4c); on how many events with GPS the median error rose by more than 0.5 m, fell by more than 0.5 m, or stayed within 0.5 m, and how far from the two receivers the risers are (V4d). Then one line: "Include or exclude is the PM's decision." Do not recommend.
+
+**V6. Constraints repeated from the PM's request.** No existing output folder or database is modified. New work goes in `output\11112026_zoi11_cfd01\`. Only the receiver lists differ between arms. No commit. No push.
+
+---
+
 ## 1. The request
 
 Drew, verbatim: "The hydrophones for ZOI11 and CFD01 should both be 1 ft below the bottom of the debris barrier and therefore useful for positioning, but likely plagued with multipath signal conflicts. Include each of the receivers individually, and both and create plots for all the static holds, validation drags in comparison to the original without each included."
