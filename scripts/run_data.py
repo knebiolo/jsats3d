@@ -16,6 +16,13 @@ Species are turned into acoustic tag codes through PTAGIS released_v0 ("Acoustic
 Beacons are always added when tags are filtered, so clock synchronization stays possible.
 Raw data is read only: the run refuses to write inside an input folder or to replace an
 existing database unless overwrite = true.
+
+Incremental tag addition: on a finished database, adding tags to [selection] tags and rerunning
+stages ONLY the new tags' raw detections (parsed into a temporary database, then appended row by
+row with per-chunk commits) and registers their pulse rates ([study] pulse_rates, or measured from
+the staged detections: median inter-pulse gap in [2.5, 4.5] s pooled over receivers). The 2025
+pipeline then positions only the new tags; every receiver-level step and every finished tag's
+rows are skipped/untouched. Deleting the database is the only way to force a full rebuild.
 """
 import argparse
 import itertools
@@ -34,7 +41,7 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
-from parse_ats_raw_to_legacy import load_target_receivers  # noqa: E402
+from parse_ats_raw_to_legacy import DETECTION_DB_COLUMNS, load_target_receivers  # noqa: E402
 
 DEFAULT_RUN_FILE = REPO / "config" / "run_data.toml"
 PARSER = REPO / "scripts" / "parse_ats_raw_to_legacy.py"
@@ -199,11 +206,11 @@ def receiver_serials(config_xlsx, receivers):
     return [by_name[name] for name in receivers]
 
 
-def parser_command(paths, start, end, serials, tags):
+def parser_command(paths, start, end, serials, tags, include_beacons=True, output_db=None):
     command = [
         sys.executable, str(PARSER), str(paths["raw_root"]),
         "--config-xlsx", str(paths["config_xlsx"]),
-        "--output-db", str(paths["output_db"]),
+        "--output-db", str(output_db or paths["output_db"]),
         "--legacy-db",
         "--temperature-csv", str(paths["temperature_csv"]),
         "--hobo-dir", str(paths["hobo_dir"]),
@@ -219,8 +226,9 @@ def parser_command(paths, start, end, serials, tags):
     if tags:
         for tag in sorted(tags):
             command += ["--tag", tag]
-        # Tag filter on: add every configured beacon so clock sync stays possible.
-        command.append("--include-config-beacons")
+        if include_beacons:
+            # Tag filter on: add every configured beacon so clock sync stays possible.
+            command.append("--include-config-beacons")
     return command
 
 
@@ -288,6 +296,101 @@ def _run_drag_figures(output_db, out_dir, run_file=None):
     print("Drag test figures written to: %s" % out_dir)
 
 
+def staged_tags(output_db):
+    """Tags that already have rows in tblDetectionRaw (None when the database does not exist)."""
+    if not output_db.is_file():
+        return None
+    connection = sqlite3.connect(str(output_db))
+    try:
+        tables = {r[0] for r in connection.execute("select name from sqlite_master where type = 'table'")}
+        if "tblDetectionRaw" not in tables:
+            return set()
+        return {r[0] for r in connection.execute("select distinct Tag_ID from tblDetectionRaw")}
+    finally:
+        connection.close()
+
+
+def measure_pulse_rate(raw, tag, lo=2.5, hi=4.5):
+    """Median inter-pulse gap in [lo, hi] s, pooled over receivers (the run file method).
+
+    Returns (median, p10, p90, n) or None when fewer than 50 in-window gaps (sparse tag:
+    no measurable pulse rate -> stays staged but is excluded from the positioning chain)."""
+    gaps = raw[raw.Tag_ID == tag].groupby("Rec_ID")["seconds"].diff()
+    gaps = pd.to_numeric(gaps, errors="coerce").dropna()
+    gaps = gaps[(gaps >= lo) & (gaps <= hi)]
+    if len(gaps) < 50:
+        return None
+    return float(gaps.median()), float(gaps.quantile(0.1)), float(gaps.quantile(0.9)), int(len(gaps))
+
+
+def stage_new_tags(output_db, paths, start, end, new_tags):
+    """Parse the new tags' raw detections and append them to output_db (the incremental step).
+
+    The parser is a from-scratch builder (it replaces its output database), so it runs on a
+    temporary database; then only the new tags' rows are appended:
+      - tblDetectionRaw rows in chunks of 200k with a commit per chunk (a failure must never
+        leave a giant uncommitted transaction),
+      - tblTag rows for the new tags (their pulse rates are filled in next, by 'study
+        parameters and indexes', from [study] pulse_rates or measurement),
+      - existing tags' rows are never touched.
+    """
+    if not new_tags:
+        # Guard: an empty filter would make the parser run UNFILTERED (full dataset).
+        # Refuse loudly instead of writing a ~15 GB temporary database.
+        raise ValueError("stage_new_tags: no new tags to stage (refusing an unfiltered parse)")
+    tmp = output_db.parent / ("%s_addtags_parse.db" % output_db.stem)
+    if tmp.exists():
+        tmp.unlink()
+    cmd = parser_command(paths, start, end, [], new_tags, include_beacons=False, output_db=tmp)
+    print("Parsing %d new tags into temporary database %s: %s" % (len(new_tags), tmp.name, ", ".join(new_tags)))
+    result = subprocess.run(cmd, cwd=REPO)
+    if result.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("raw parse of the new tags failed (exit %d)" % result.returncode)
+    tcon = sqlite3.connect(str(tmp))
+    try:
+        parsed = {r[0]: r[1] for r in tcon.execute("select Tag_ID, count(*) from tblDetectionRaw group by Tag_ID")}
+        absent = [t for t in new_tags if not parsed.get(t)]
+        if absent:
+            raise RuntimeError("no raw detections for: %s (checked %s; the raw files may not cover these tags)"
+                               % (absent, paths["raw_root"]))
+        src_tags = {r[0] for r in tcon.execute("select distinct Tag_ID from tblDetectionRaw")}
+        if not src_tags <= set(new_tags):
+            raise RuntimeError("temporary parse contains unexpected tags: %s" % sorted(src_tags - set(new_tags)))
+        main_cols = {r[1] for r in sqlite3.connect(str(output_db)).execute("PRAGMA table_info(tblDetectionRaw)")}
+        missing_cols = [c for c in DETECTION_DB_COLUMNS if c not in main_cols]
+        if missing_cols:
+            raise RuntimeError("output_db tblDetectionRaw lacks parser columns: %s" % missing_cols)
+        cols = DETECTION_DB_COLUMNS
+        insert = "insert into tblDetectionRaw (%s) values (%s)" % (
+            ", ".join('"%s"' % c for c in cols), ", ".join("?" * len(cols)))
+        con = sqlite3.connect(str(output_db))
+        total = 0
+        try:
+            chunks = pd.read_sql("select %s from tblDetectionRaw" % ", ".join(cols), tcon, chunksize=200_000)
+            for i, rows in enumerate(chunks, start=1):
+                con.executemany(insert, rows.itertuples(index=False, name=None))
+                total += len(rows)
+                con.commit()
+                print("    chunk %d: %d rows (total %d)" % (i, len(rows), total), flush=True)
+        finally:
+            con.close()
+        expected = sum(parsed[t] for t in new_tags)
+        if total != expected:
+            raise RuntimeError("row count mismatch after append: parsed %d, appended %d" % (expected, total))
+        tag_rows = list(tcon.execute("select Tag_ID, TagType, pulseRate from tblTag where Tag_ID in (%s)"
+                                     % ",".join("?" * len(new_tags)), new_tags))
+        con = sqlite3.connect(str(output_db))
+        con.executemany("insert or ignore into tblTag (Tag_ID, TagType, pulseRate) values (?, ?, ?)", tag_rows)
+        con.commit()
+        con.close()
+        print("Staged %d raw rows for %s (existing tags' rows untouched)" % (total, ", ".join(new_tags)))
+        return {"tags": new_tags, "raw_rows_appended": total, "parsed_rows_by_tag": parsed}
+    finally:
+        tcon.close()
+        tmp.unlink(missing_ok=True)
+
+
 def study_row(study, start, end):
     """tblStudyParameters values from [study]; the sync window defaults to the selection time frame."""
     def value(key, default=None):
@@ -297,8 +400,9 @@ def study_row(study, start, end):
             value("master_receiver"), value("synch_time_start") or start, value("synch_time_end") or end]
 
 
-def finish_database(db, study, start, end, signal_proxies, pulse_rates=None):
-    """Fill tblStudyParameters, pulse rates from the run file, optional ATS stand-ins for SNR/NBW, and indexes."""
+def finish_database(db, study, start, end, signal_proxies, pulse_rates=None, selection_tags=()):
+    """Fill tblStudyParameters, pulse rates (run file, then measured for new staged tags),
+    optional ATS stand-ins for SNR/NBW, and indexes."""
     connection = sqlite3.connect(db)
     try:
         connection.execute("DROP TABLE IF EXISTS tblStudyParameters")
@@ -308,6 +412,24 @@ def finish_database(db, study, start, end, signal_proxies, pulse_rates=None):
         for tag, rate in (pulse_rates or {}).items():
             updated = connection.execute("UPDATE tblTag SET pulseRate = ? WHERE Tag_ID = ?", (float(rate), tag.upper())).rowcount
             print("pulseRate %s = %s s%s" % (tag.upper(), rate, "" if updated else " (tag not in tblTag, ignored)"))
+        # Staged tags without a run-file rate (incremental addition): measure from their
+        # staged detections, same method as the [study] pulse_rates source.
+        for tag in sorted({str(t).upper() for t in (selection_tags or ())}):
+            row = connection.execute("select pulseRate from tblTag where Tag_ID = ?", (tag,)).fetchone()
+            if row is None or row[0] is not None:
+                continue  # not staged in this database, or already has a rate
+            raw = pd.read_sql("select Tag_ID, Rec_ID, seconds from tblDetectionRaw where Tag_ID = ?",
+                              connection, params=(tag,))
+            raw = raw.sort_values(["Rec_ID", "seconds"])
+            measured = measure_pulse_rate(raw, tag)
+            if measured is None:
+                print("pulseRate %s = not measurable (<50 gaps in [2.5, 4.5] s); tag stays staged but is "
+                      "excluded from positioning" % tag)
+                continue
+            med, p10, p90, n = measured
+            connection.execute("update tblTag set pulseRate = ? where Tag_ID = ?", (med, tag))
+            print("pulseRate %s = %.4f s (measured: median inter-pulse gap, p10-p90 %.4f-%.4f, n=%d)"
+                  % (tag, med, p10, p90, n))
         filled = 0
         if signal_proxies:
             # PROVISIONAL (Kevin to approve): ATS has no SNR/NBW. Legacy multipath_classifier keeps SNR > 0 and
@@ -413,12 +535,34 @@ def build_steps(args, run_file, data_format, paths, selection, study, legacy, db
     if not args.skip_build:
         if ats:
             serials = receiver_serials(paths["config_xlsx"], selection.get("receivers") or [])
-            steps.append(("parse ATS raw files", parser_command(paths, start, end, serials, tags)))
+            staged = staged_tags(output_db)
+            if staged is None:
+                # New database: full build (parser writes directly; beacons included).
+                steps.append(("parse ATS raw files", parser_command(paths, start, end, serials, tags)))
+            elif tags and any(t not in staged for t in tags):
+                missing = sorted(t for t in tags if t not in staged)
+
+                def stage_missing(missing=missing):  # default arg binds the value NOW:
+                    return stage_new_tags(output_db, paths, start, end, missing)  # `missing` is reassigned further down (study keys)
+
+                steps.append(("parse + stage new tags: %s" % ", ".join(missing), stage_missing))
+            elif tags:
+                print("All %d selected tags already staged in %s; parse skipped." % (len(tags), output_db.name))
+            else:
+                print("No tag filter and %s exists; parse skipped (delete the database to force a full rebuild)."
+                      % output_db.name)
         else:
             steps.append(("legacy 2019 import", legacy_command(legacy, "import-2019", run_file)))
+    elif ats and tags:
+        staged = staged_tags(output_db)
+        missing = sorted(t for t in tags if t not in staged)
+        if missing:
+            raise ValueError("--skip-build: tags %s are not staged in %s; run without --skip-build to stage them"
+                             % (", ".join(missing), output_db.name))
     proxies = ats and bool(legacy.get("signal_proxies", False))
     rates = study.get("pulse_rates") or {}
-    steps.append(("study parameters and indexes", lambda: finish_database(output_db, study, start, end, proxies, rates)))
+    steps.append(("study parameters and indexes",
+                  lambda: finish_database(output_db, study, start, end, proxies, rates, selection_tags=tags)))
     if legacy.get("run"):
         missing = [key for key in ("bm_elev", "master_receiver") if str(study.get(key, "")).strip() == ""]
         if missing:

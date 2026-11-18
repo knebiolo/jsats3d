@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore")
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from ent_analysis_2025 import (legacy_receiver_set_consensus,  # noqa: E402
-                               receiver_3d_box, three_d_box_mask)
+                               spatial_box, three_d_box_mask)
 from drag_test_figures_2025 import (smooth_track, kalman_filter_track,  # noqa: E402
                                     resolve_depth_floor, run_file_from_status)
 
@@ -762,12 +762,10 @@ def main():
     recs_all = rec[rec[["X_t", "Y_t"]].notna().all(axis=1)]
     box = None
     if box_on:
-        x0, x1, y0, y1, _rzmin, _rzmax = receiver_3d_box(recs_all)
-        box = (x0, x1, y0, y1, float(floor_m), 0.0)
-        print("3D window: X [%.2f, %.2f]  Y [%.2f, %.2f]  Z [%.2f, 0.00]  (margin %.1f m; "
-              "%d receivers: %s)"
-              % (x0 - box_margin, x1 + box_margin, y0 - box_margin, y1 + box_margin,
-                 floor_m, box_margin, len(recs_all), "+".join(recs_all.index)))
+        box, box_margin, box_src = spatial_box(figs, recs_all, floor_m, box_margin)
+        print("3D window: X [%.2f, %.2f]  Y [%.2f, %.2f]  Z [%.2f, 0.00]  (%s)"
+              % (box[0] - box_margin, box[1] + box_margin, box[2] - box_margin, box[3] + box_margin,
+                 floor_m, box_src))
     else:
         print("3D window: OFF (legacy behavior; run file [figures] position_3d_box)")
     wsel_t0 = wallclock_epoch(wsel.timeStamp)

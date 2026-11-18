@@ -74,6 +74,33 @@ def need_rows(db, table, where="", params=(), minimum=1):
     return n
 
 
+# ----------------------------------------------------------------------------------------------- per-tag progress
+# Per-tag completion markers (__mp__<TAG> multipath, __pos__<TAG> Deng+export) let a rerun add
+# new tags to a finished database without redoing the finished ones. Runs before this mechanism
+# marked run-level flags only; tags with finished-stage rows in the DB get their markers
+# backfilled once below (evidence-based, idempotent).
+
+def tag_markers(db, tags):
+    """Backfill per-tag markers from finished-stage rows; return (all marker keys, backfilled keys)."""
+    lp.ensure_progress(db)
+    marked = set(lp.query(db, "select Tag_ID from %s" % lp.PROGRESS_TABLE).Tag_ID)
+    secondary = (set(lp.query(db, "select distinct Tag_ID from tblDetectionFilterSecondary").Tag_ID)
+                 if "tblDetectionFilterSecondary" in table_names(db) else set())
+    positions = (set(lp.query(db, "select distinct Tag_ID from tblPositions_Deng "
+                                       "where comment = 'solution found'").Tag_ID)
+                 if "tblPositions_Deng" in table_names(db) else set())
+    backfilled = []
+    for t in tags:
+        if "__mp__" + t not in marked and t in secondary:
+            lp.mark_done(db, "__mp__" + t)
+            backfilled.append("__mp__" + t)
+        if "__pos__" + t not in marked and t in positions:
+            lp.mark_done(db, "__pos__" + t)
+            backfilled.append("__pos__" + t)
+    marked = set(lp.query(db, "select Tag_ID from %s" % lp.PROGRESS_TABLE).Tag_ID)
+    return marked, backfilled
+
+
 
 
 
@@ -203,7 +230,13 @@ def clock_surface_run(c):
 
 
 def deep_beacons_done(c):
-    return all(count(c.db, "tblDetectionFilterSecondary", "where Tag_ID = ?", (t,)) > 0 for t in c.deng_tags.values())
+    if all(count(c.db, "tblDetectionFilterSecondary", "where Tag_ID = ?", (t,)) > 0 for t in c.deng_tags.values()):
+        return True
+    # On a finished database the per-fish multipath step (8) reloads tblDetectionFilterSecondary
+    # and the deep beacons' rows are gone, so row presence alone can never signal completion.
+    # The beacons are the input of deep_positions: with the deep receivers positioned, step 5
+    # is done. (Pre-existing gap; surfaced by the 2026-11-17 incremental re-run on finished DBs.)
+    return deep_positions_done(c)
 
 
 def deep_beacons_run(c):
@@ -381,8 +414,7 @@ def deep_clocks_run(c):
 
 
 def fish_multipath_done(c):
-    return (count(c.db, lp.PROGRESS_TABLE, "where Tag_ID = ?", ("__ats_fish_two_stage__",)) > 0
-            and all(count(c.db, "tblDetectionFilterSecondary", "where Tag_ID = ?", (t,)) > 0 for t in c.tags))
+    return not c.pending_mp
 
 
 def classify_ats_fish(primary, pulse_rate):
@@ -408,11 +440,13 @@ def classify_ats_fish(primary, pulse_rate):
 
 
 def fish_multipath_run(c):
-    """Step 8: legacy pulse-rate enumeration and primary ranking, then a distinct ATS timing classifier."""
+    """Step 8: legacy pulse-rate enumeration and primary ranking, then a distinct ATS timing classifier.
+    Runs only for c.pending_mp (tags without a __mp__ marker), so a rerun with added tags does not
+    redo the finished ones."""
     lp.ensure_progress(c.db)
     lp.execute(c.db, "delete from %s where Tag_ID = '__ats_fish_two_stage__'" % lp.PROGRESS_TABLE)
     notes = {}
-    for tag in c.tags:
+    for tag in c.pending_mp:
         primary_folder = lp.fresh_folder(c.work / "multipath_primary")
         data = jsats3d.multipath_data_object(tag, str(c.db), primary_folder)
         if data.empty:
@@ -443,6 +477,7 @@ def fish_multipath_run(c):
                       "primary_later_arrivals": int((primary.multipath == 1).sum()),
                       "secondary_suspect_first_arrivals": int((secondary.dbscan_class == "suspect_reflection").sum()),
                       "unclassified_first_arrivals": int((secondary.dbscan_class == "unclassified_primary").sum())}
+        lp.mark_done(c.db, "__mp__" + tag)  # per-tag: a crash mid-loop resumes at the next pending tag
     lp.mark_done(c.db, "__ats_fish_two_stage__")
     return notes
 
@@ -467,20 +502,15 @@ def speed_of_sound_run(c):
 
 
 def positions_done(c):
-    if "tblPositions_Deng" not in table_names(c.db):
-        return False
-    if any((c.work / "positions").glob("*.csv")):
-        return True
-    # Table exists but may have zero solutions - check for actual Deng solutions
-    n = count(c.db, "tblPositions_Deng", "where comment = ?", ("solution found",))
-    return n > 0
+    return not c.pending_pos
 
 
 def positions_run(c):
-    """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
+    """Step 11: Deng for each pending fish tag with the configured 3D receivers (roots A and B
+    written per tag). Only c.pending_pos is processed, so added tags do not redo the finished ones."""
     out = Path(lp.fresh_folder(c.work / "positions"))
     notes = {}
-    for tag in c.tags:
+    for tag in c.pending_pos:
         pos = lp.deng(c.db, tag, c.receivers_3d, out, c.work / "figures")
         if pos is None:
             raise RuntimeError("check failed: no filtered detections for %s" % tag)
@@ -492,14 +522,25 @@ def positions_run(c):
 
 
 def export_done(c):
-    return "tblPositions_Deng" in table_names(c.db)
+    return not c.pending_pos
 
 
 def export_run(c):
-    """Step 10: load the position files into tblPositions_Deng (the legacy loader deletes the files)."""
+    """Step 10: load the position files into tblPositions_Deng (the legacy loader deletes the files).
+    Append-only per tag: the pending tags' existing rows are deleted first, so a crashed rerun
+    (positions recomputed, export half-applied) cannot duplicate rows; finished tags' rows are untouched."""
+    if c.pending_pos and "tblPositions_Deng" in table_names(c.db):
+        con = sqlite3.connect(c.db)
+        try:
+            con.executemany("delete from tblPositions_Deng where Tag_ID = ?", [(t,) for t in c.pending_pos])
+            con.commit()
+        finally:
+            con.close()
     positions = c.work / "positions"
     lp.widen_table(c.db, "tblPositions_Deng", positions, extra=("solution", "Tag_ID"))
     jsats3d.positions_data_management("Deng", str(positions), str(c.db))
+    for tag in c.pending_pos:
+        lp.mark_done(c.db, "__pos__" + tag)
     total = need_rows(c.db, "tblPositions_Deng")
     found = count(c.db, "tblPositions_Deng", "where comment = 'solution found'")
     return {"rows": total, "solution_found": found,
@@ -508,11 +549,14 @@ def export_run(c):
 
 
 def bathymetry_check_done(c):
-    """Bathymetry check is done when the check columns exist in tblPositions_Deng."""
+    """Bathymetry check is done when the check column exists AND every position row has a value
+    (rows appended by an incremental tag addition are NULL until the check reruns)."""
     if "tblPositions_Deng" not in table_names(c.db):
         return False
     cols = {r[1] for r in lp.query(c.db, "pragma table_info(tblPositions_Deng)").itertuples(index=False, name=None)}
-    return "bathymetry_check" in cols
+    if "bathymetry_check" not in cols:
+        return False
+    return count(c.db, "tblPositions_Deng", "where bathymetry_check is null") == 0
 
 
 def bathymetry_check_run(c):
@@ -650,7 +694,15 @@ def positions_dbscan_enabled(c):
 
 
 def positions_dbscan_done(c):
-    return not positions_dbscan_enabled(c) or "tblPositions_DengDBSCAN" in table_names(c.db)
+    if not positions_dbscan_enabled(c):
+        return True
+    if "tblPositions_DengDBSCAN" not in table_names(c.db):
+        return False
+    # rerun when a tag with solutions is missing from the screened table (incremental addition)
+    src = set(lp.query(c.db, "select distinct Tag_ID from tblPositions_Deng "
+                                "where comment = 'solution found'").Tag_ID)
+    have = set(lp.query(c.db, "select distinct Tag_ID from tblPositions_DengDBSCAN").Tag_ID)
+    return src <= have
 
 
 def ping_acceleration(t, xy, gap_s):
@@ -771,6 +823,18 @@ def build_context(args):
     tags = [t for t in (selection.get("tags") or study_tags) if t in study_tags]
     if not tags:
         raise SystemExit("no study tags with a pulse rate in %s" % db)
+    unregistered = [t for t in (selection.get("tags") or []) if t not in study_tags]
+    if unregistered:
+        print("note: %s in [selection] have no tblTag row with a pulse rate; not positioned "
+              "(stage them with scripts/run_data.py first)" % ", ".join(unregistered))
+    marked, backfilled = tag_markers(db, tags)
+    pending_mp = [t for t in tags if "__mp__" + t not in marked]
+    pending_pos = [t for t in tags if "__pos__" + t not in marked]
+    if backfilled:
+        print("backfilled per-tag progress markers: %s" % ", ".join(backfilled))
+    if pending_mp or pending_pos:
+        print("incremental run: multipath pending %s | Deng+export pending %s"
+              % (", ".join(pending_mp) or "-", ", ".join(pending_pos) or "-"))
     work = lp.resolve_path(db.parent / ("%s_legacy" % db.stem))
     work.mkdir(parents=True, exist_ok=True)
     deng = deep + ([r for r in receivers_3d if r in surface and r != master_rec] if legacy.get("deng_surface", False) else [])  # static only; CFD floats never targets
@@ -779,7 +843,7 @@ def build_context(args):
     return SimpleNamespace(run=run, paths=paths, db=db, work=work, surface=surface, deep=deep, receivers_3d=receivers_3d,
                            receivers_2d=list(legacy.get("receivers_2d") or []), fixed_z_2d=dict(legacy.get("fixed_z_2d_by_tag") or {}),
                            review=lp.REPO / "output" / "2025_review" / db.stem,
-                           reference=[r for r in receivers_3d if r not in deep], reference_2d=[r for r in (legacy.get("receivers_2d") or receivers_3d) if r not in deep], tags=tags, deng=deng, deng_tags=deng_tags,
+                           reference=[r for r in receivers_3d if r not in deep], reference_2d=[r for r in (legacy.get("receivers_2d") or receivers_3d) if r not in deep], tags=tags, pending_mp=pending_mp, pending_pos=pending_pos, deng=deng, deng_tags=deng_tags,
                            window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]), drag_plots=drag_plots)
 
 
@@ -852,7 +916,8 @@ def main(argv=None):
     selected = args.only or names[names.index(args.first or names[0]):names.index(args.last or names[-1]) + 1]
     status_path = c.db.parent / ("%s.pipeline_status.json" % c.db.stem)
     status = json.loads(status_path.read_text()) if status_path.exists() else {}
-    status.update({"database": str(c.db), "run_file": str(Path(args.run_file)), "git_head": git_head(), "tags": c.tags})
+    status.update({"database": str(c.db), "run_file": str(Path(args.run_file)), "git_head": git_head(), "tags": c.tags,
+                   "pending_multipath": c.pending_mp, "pending_positions": c.pending_pos})
     steps = status.setdefault("steps", {})
     print("Database %s\nTags %s | master/anchor from run file | window %s to %s | drag_plots=%s" % (c.db, c.tags, c.window_start, c.window_end, c.drag_plots))
     failed = None

@@ -108,6 +108,11 @@ position_3d_box          = true
 # km-scale jump artifacts are still rejected. 10 m recovers 60-80% of the clipped
 # fixes per tag; journal .ai_journal/session/2026-11-15_margin_and_dashboard.md.
 position_3d_box_margin_m = 10.0
+# Optional explicit window (user-set): position_3d_box_xy = [x0, x1, y0, y1] (m, receiver
+# coordinates) overrides the receiver-derived X/Y extent; the margin is then NOT applied
+# (the given coordinates ARE the final window). Z stays [depth_floor_m, 0].
+# Example below = this array's strict receiver volume (20 positioned receivers, no margin).
+# position_3d_box_xy = [437.93, 540.80, 36.92, 139.41]
 # Emissions heard by >=1 of ALL positioned receivers (entire array incl. the CFD
 # row; owner 2026-11-16) with no final position are written to <TAG>_positions.csv
 # as product='present_unpositioned' rows (empty XYZ, reason = outside_3d_box |

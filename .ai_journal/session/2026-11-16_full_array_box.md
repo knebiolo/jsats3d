@@ -257,11 +257,9 @@ pipeline while keeping the 2019 code runnable. Verified the full import graph
 (run_data -> _2025_pipeline/legacy_pipeline/parse_ats; _2025_pipeline ->
 beacon_pairwise_dbscan + clock_jump_pre + ent_analysis subprocess; figures ->
 ent_analysis + drag_test_figures helpers; tests). Result:
-- DELETED: scripts/adapt_2025_to_legacy.py — early-Sept CSV->legacy adapter,
-  superseded by parse_ats_raw_to_legacy.py (the raw-ATS path the pipeline
-  uses). The 2026-10-27 journal's "imported by parse_ats" note was stale;
-  parse_ats no longer imports it. Only code reference was the one-line
-  test_import_adapter in tests/test_smoke.py (removed; docstring updated).
+- DELETED (later RESTORED — see CORRECTION below): scripts/adapt_2025_to_legacy.py.
+  It is a metadata-loader library imported by parse_ats_raw_to_legacy.py, not a
+  superseded one-off. Kept, along with its test_smoke.py line.
 - KEPT per owner: metronome.py, mulitpath.py (Kevin's 2019 drivers, hardcoded
   knebiolo paths; superseded by legacy_pipeline.py functions but preserved
   from the original 2019 tree).
@@ -272,6 +270,18 @@ ent_analysis + drag_test_figures helpers; tests). Result:
   wrong (nothing imports it; the 2025 metronome step is
   beacon_pairwise_dbscan.py). Kevin's notebooks stay per the 09-24 legacy-core
   rule. Tests: 20 pass after the change.
+
+### CORRECTION (2026-11-17): adapt_2025_to_legacy.py is NOT dead code — restored
+The first purge above deleted scripts/adapt_2025_to_legacy.py based on a claim that
+"parse_ats no longer imports it". That claim was WRONG: parse_ats_raw_to_legacy.py
+imports seven metadata functions from it (load_beacon_registry, load_receiver_table,
+load_receiver_gps, load_temperature_string, load_environment, tag_types,
+apply_tag_pulse_rates) via an INDENTED try/except import (lines 21-40) that a
+line-anchored `^import` grep missed. The 2026-10-27 journal's "imported by parse_ats"
+was accurate all along. Caught when the new incremental test imported run_data ->
+parse_ats and failed with ModuleNotFoundError. Both files (the script + the
+test_smoke.py line) restored via `git checkout --`. Lesson: grep for imports must
+allow leading whitespace (try/except import blocks).
 
 ### Second purge (owner follow-up 2026-11-17)
 Owner: keep the pipeline code + median filter, drop the diagnostic/output
