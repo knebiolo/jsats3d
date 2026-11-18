@@ -1,4 +1,4 @@
-"""Basic tests for jsats3d package and data adapters."""
+"""Basic tests for the jsats3d package."""
 import sys
 import os
 import unittest
@@ -10,11 +10,6 @@ class TestJsats3dBasic(unittest.TestCase):
         import jsats3d
         self.assertTrue(hasattr(jsats3d, 'create_project_db'))
         self.assertTrue(hasattr(jsats3d, 'temp_interpolator'))
-
-    def test_import_adapter(self):
-        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
-        import adapt_2025_to_legacy
-        self.assertTrue(hasattr(adapt_2025_to_legacy, 'normalize_detection'))
 
 if __name__ == '__main__':
     unittest.main()

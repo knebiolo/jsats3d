@@ -87,3 +87,30 @@ output_dir      = ''
 [figures]
 depth_floor_m        = -16.0
 depth_floor_margin_m = 4.0
+# 3D window screen on root-B solutions BEFORE the per-transmission consensus median
+# (fish_figures_2025.py; PM 2026-11-14: clock-jump corrections dropped, far-off
+# solutions filtered in 3D instead). Window: X/Y = min/max of ALL positioned
+# receivers (the entire array incl. the CFD row; owner 2026-11-16) +
+# position_3d_box_margin_m; Z = the existing [depth_floor_m, 0] plausibility window.
+# Rejected rows are counted in fish_qc.csv (n_outside_box), not written to the CSV.
+# Off = legacy behavior (bit-identical). ENABLED 2026-11-14 after validation on 26E4
+# (June 27-28 jump interval, Arm A unshifted DB): 157/1398 off-array (impossible)
+# consensus fixes removed, 1080 gross solutions rejected, 1271 matched fixes unchanged
+# (drift p99 8.7 m); see output/11142026_box_compare/ and journal
+# .ai_journal/session/2026-11-14_position_box_filter.md.
+position_3d_box          = true
+# 10 m = the existing consensus radius (reused, not fitted). Evidence (2026-11-15,
+# full-study per-tag analysis, output/11152026_4tag_margin/margin_analysis.csv):
+# at 0 margin the box clipped plausible near-edge fixes — dropped-fix distance to
+# the box edge: 26E4 p50 3.1 m (79/127 within 5 m), 9F8C p50 12.8 m (31/34 within
+# 25 m), 1D5A p50 5.1 m (303/730 within 5 m, 669/730 within 25 m), B5ED p50 5.2 m
+# (291/360 within 25 m); no dropped fix > 50 m except 3 for B5ED (max 67 m), so
+# km-scale jump artifacts are still rejected. 10 m recovers 60-80% of the clipped
+# fixes per tag; journal .ai_journal/session/2026-11-15_margin_and_dashboard.md.
+position_3d_box_margin_m = 10.0
+# Emissions heard by >=1 of ALL positioned receivers (entire array incl. the CFD
+# row; owner 2026-11-16) with no final position are written to <TAG>_positions.csv
+# as product='present_unpositioned' rows (empty XYZ, reason = outside_3d_box |
+# not_consensus | no_solution, receiver_sets = distinct receivers), so in-array
+# fish-hours don't look like the fish left the array.
+present_unpositioned     = true

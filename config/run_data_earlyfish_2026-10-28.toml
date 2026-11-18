@@ -87,6 +87,27 @@ output_dir      = ''
 [figures]
 depth_floor_m        = -16.0
 depth_floor_margin_m = 4.0
+# 3D window screen on root-B solutions BEFORE the per-transmission consensus median
+# (fish_figures_2025.py / fish_dashboard_v3.py; PM 2026-11-14: clock-jump corrections
+# dropped, far-off solutions filtered in 3D instead). Window: X/Y = min/max of ALL
+# positioned receivers (the entire array incl. the CFD row; owner 2026-11-16) +
+# position_3d_box_margin_m; Z = the existing [depth_floor_m, 0] plausibility window.
+# Rejected rows are counted in fish_qc.csv (n_outside_box), not written to the CSV.
+# Off = legacy behavior (bit-identical).
+position_3d_box          = true
+# 10 m = the existing consensus radius (reused, not fitted). Evidence 2026-11-15
+# (per-tag, output/11152026_4tag_margin/margin_analysis.csv): at 0 margin the box
+# clipped legitimate near-edge fixes (dropped-fix distance p50 3-13 m, mostly within
+# 25 m, none >50 m except 3 B5ED); 10 m recovers 60-80% of them per tag while
+# still rejecting all km-scale jump artifacts. See journal
+# .ai_journal/session/2026-11-15_margin_and_dashboard.md.
+position_3d_box_margin_m = 10.0
+# Emissions heard by >=1 of ALL positioned receivers (entire array incl. the CFD
+# row; owner 2026-11-16) with no final position are written to <TAG>_positions.csv
+# as product='present_unpositioned' rows (empty XYZ, reason = outside_3d_box |
+# not_consensus | no_solution, receiver_sets = distinct receivers), so in-array
+# fish-hours don't look like the fish left the array.
+present_unpositioned     = true
 
 # ============================================================================
 # Output selection — what to produce during the pipeline run.

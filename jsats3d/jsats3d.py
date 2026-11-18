@@ -1819,6 +1819,31 @@ class position():
                 outside = (sol.Z > np.interp(sol.ToA, surf_t, surf_z)) | (sol.Z < z_floor)
                 sol.loc[found & outside, 'comment'] = 'outside water column - rejected'
 
+        # PM 2026-11-16: 3D box filter -- reject solutions outside the receiver volume
+        # BEFORE they contaminate the per-transmission median consensus. Clock-jump
+        # artifacts can land kilometres from the array (worst documented: 548 km),
+        # while the 3D receiver volume is ~100 m across. X/Y bounds = receiver
+        # footprint with a small margin; Z bounds = surface down to deepest receiver
+        # + ~10 ft padding (catches fish just below the shallowest hydrophone).
+        x_margin_m = 5.0
+        y_margin_m = 5.0
+        z_padding_m = 3.0  # ~10 ft
+        x_min = float(self.ephemeris.X_t.min()) - x_margin_m
+        x_max = float(self.ephemeris.X_t.max()) + x_margin_m
+        y_min = float(self.ephemeris.Y_t.min()) - y_margin_m
+        y_max = float(self.ephemeris.Y_t.max()) + y_margin_m
+        z_max = float(self.WSELfun.y.max()) if self.WSELfun.y.max() > 0 else 0.0
+        z_min = float(self.ephemeris.Z_t.min()) - z_padding_m  # deepest receiver + ~10 ft padding
+        for sol in (SolutionA, SolutionB):
+            sol['X'] = pd.to_numeric(sol['X'], errors='coerce')
+            sol['Y'] = pd.to_numeric(sol['Y'], errors='coerce')
+            sol['Z'] = pd.to_numeric(sol['Z'], errors='coerce')
+            found = sol.comment == 'solution found'
+            outside_x = sol.X.isna() | (sol.X < x_min) | (sol.X > x_max)
+            outside_y = sol.Y.isna() | (sol.Y < y_min) | (sol.Y > y_max)
+            outside_z = sol.Z.isna() | (sol.Z < z_min) | (sol.Z > z_max)
+            sol.loc[found & (outside_x | outside_y | outside_z), 'comment'] = 'outside 3d box - rejected'
+
         self.DengSolutionA_unfiltered = SolutionA
         self.DengSolutionB_unfiltered = SolutionB 
                        
