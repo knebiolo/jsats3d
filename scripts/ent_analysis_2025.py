@@ -95,6 +95,115 @@ def legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2):
     return pd.DataFrame(accepted).sort_values("t0").reset_index(drop=True) if accepted else pd.DataFrame()
 
 
+# --------------------------------------------------------------------------- 3D window screen
+# Clock-jump artifacts land kilometres from the array (worst documented: 548 km),
+# while the 3D receiver volume is ~100 m across. An axis-aligned window around the
+# receiver volume rejects them BEFORE the per-transmission consensus median, instead
+# of relying on the median to survive gross errors. X/Y bounds = receivers_3d min/max
+# (a fish inside the array's coverage cannot be far outside the receiver extent);
+# the Z bound is NOT the receiver Z extent (fish swim above the shallowest hydrophone)
+# but the existing surface/floor plausibility window (0 .. depth_floor_m), so the two
+# already-validated Z thresholds are reused unchanged (PM 2026-11-14: drop clock-jump
+# corrections, filter solutions in 3D before the median).
+
+
+def receiver_3d_box(receivers):
+    """Axis-aligned receiver volume: (xmin, xmax, ymin, ymax, zmin, zmax) from X_t/Y_t/Z_t.
+
+    receivers: DataFrame with X_t, Y_t, Z_t columns (usually a tblReceiver slice for
+    the configured receivers_3d). zmin/zmax describe hydrophone placement, not the
+    fish's depth range -- callers pass the physical Z window (surface/floor) in.
+    """
+    cols = pd.DataFrame(receivers[["X_t", "Y_t", "Z_t"]]).dropna()
+    if cols.empty:
+        raise ValueError("no receivers with finite X_t/Y_t/Z_t")
+    return (float(cols.X_t.min()), float(cols.X_t.max()),
+            float(cols.Y_t.min()), float(cols.Y_t.max()),
+            float(cols.Z_t.min()), float(cols.Z_t.max()))
+
+
+def three_d_box_mask(positions, box, margin_m=0.0):
+    """Boolean mask: True where a Deng row lies inside the axis-aligned 3D window.
+
+    box = (xmin, xmax, ymin, ymax, zmin, zmax); margin_m widens every axis.
+    Non-finite coordinates are rejected (False) -- missing stays missing, never kept.
+    """
+    m = float(margin_m)
+    x0, x1, y0, y1, z0, z1 = (float(v) for v in box)
+    x = pd.to_numeric(positions["X"], errors="coerce").to_numpy()
+    y = pd.to_numeric(positions["Y"], errors="coerce").to_numpy()
+    z = pd.to_numeric(positions["Z"], errors="coerce").to_numpy()
+    return (np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            & (x >= x0 - m) & (x <= x1 + m) & (y >= y0 - m) & (y <= y1 + m)
+            & (z >= z0 - m) & (z <= z1 + m))
+
+
+def spatial_box(figs, receivers, floor_m, box_margin_m):
+    """The 3D window box for the pre-consensus-median screen: (box, effective_margin, source).
+
+    box = (xmin, xmax, ymin, ymax, zmin, z1) with Z always the [depth floor, 0]
+    plausibility window. By default the X/Y extent is the receiver volume
+    (min/max of ALL positioned receivers) and effective_margin = box_margin_m
+    (widened by the mask). [figures] position_3d_box_xy = [x0, x1, y0, y1]
+    overrides the extent with an explicit user-set window; the margin is then 0
+    (the given coordinates ARE the final window).
+    """
+    explicit = figs.get("position_3d_box_xy") or None
+    if explicit:
+        if len(explicit) != 4:
+            raise ValueError("position_3d_box_xy must be [x0, x1, y0, y1], got %r" % (explicit,))
+        x0, x1, y0, y1 = (float(v) for v in explicit)
+        return (x0, x1, y0, y1, float(floor_m), 0.0), 0.0, "explicit position_3d_box_xy"
+    x0, x1, y0, y1, _rzmin, _rzmax = receiver_3d_box(receivers)
+    return (x0, x1, y0, y1, float(floor_m), 0.0), float(box_margin_m), \
+        ("min/max of all positioned receivers (entire array incl. the CFD row) + %.1f m margin; "
+         "%d receivers" % (float(box_margin_m), len(receivers)))
+
+
+def present_unpositioned_rows(detections, solutions, consensus, box_rejected=()):
+    """Emissions of one tag heard inside the array but without a final position.
+
+    detections: one tag's 3D-receiver detections; columns transNo, Rec_ID, seconds_fix.
+    solutions: the tag's root-B 'solution found' rows (any transNo that ever solved).
+    consensus: the final consensus frame (transNo that got a position).
+    box_rejected: iterable of transNo whose EVERY solution fell outside the 3D window
+        (only meaningful when the window screen is on).
+
+    Returns DataFrame(transNo, t0, n_receivers, reason) sorted by t0, where
+        t0           = median detection seconds_fix of the emission
+        n_receivers  = distinct 3D receivers hearing the emission (presence evidence)
+        reason       = 'outside_3d_box'  (solutions existed, all outside the window)
+                     | 'not_consensus'   (solutions existed, none survived consensus)
+                     | 'no_solution'     (no root-B solution at all)
+    Emissions with a consensus position are omitted.
+    """
+    cols = ["transNo", "t0", "n_receivers", "reason"]
+    if detections.empty:
+        return pd.DataFrame(columns=cols)
+    d = (detections.dropna(subset=["transNo"])
+         .groupby("transNo")
+         .agg(t0=("seconds_fix", "median"), n_receivers=("Rec_ID", "nunique"))
+         .reset_index())
+    fixed = (set(consensus["transNo"].astype(float)) if consensus is not None and not consensus.empty else set())
+    solved = (set(pd.to_numeric(solutions["transNo"], errors="coerce").dropna())
+              if solutions is not None and not solutions.empty else set())
+    rejected = set(float(t) for t in box_rejected)
+    rows = []
+    for r in d.itertuples(index=False):
+        t = float(r.transNo)
+        if t in fixed:
+            continue
+        if t in rejected:
+            reason = "outside_3d_box"
+        elif t in solved:
+            reason = "not_consensus"
+        else:
+            reason = "no_solution"
+        rows.append((t, float(r.t0), int(r.n_receivers), reason))
+    out = pd.DataFrame(rows, columns=cols)
+    return out.sort_values("t0").reset_index(drop=True) if len(out) else out
+
+
 # ------------------------------------------------------------------------------------------------ solver
 
 

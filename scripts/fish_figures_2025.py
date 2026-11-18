@@ -14,20 +14,36 @@ Products (under output/pm_figures_2026-10-22/example_fish/):
     <TAG>_3d.png           3D scatter colored by time
     <TAG>_track.gif        2D animated track (PillowWriter; no ffmpeg on this machine)
     <TAG>_track3d.gif      3D animated track (receivers + growing track + red head)
-    <TAG>_positions.csv    client schema, products: consensus | kalman
+    <TAG>_positions.csv    client schema, products: consensus | kalman | present_unpositioned
     fish_qc.csv            per-tag summary: span, max speed, >3 m/s jump flags
 
 All figures show the 20 receivers (ZOI01-11, CFD01-09) as small gray x marks with
 labels -- the client's spatial reference for the array layout.
 
 Track product = the verified item12 chain (identical to drag_test_figures_2025.py,
-2026-10-21 baseline gate), preceded by a physical plausibility gate:
+2026-10-21 baseline gate), preceded by a physical plausibility gate and an optional
+3D window screen (PM 2026-11-14: clock-jump corrections dropped; screen far-off
+solutions in 3D before the median instead):
     root-B Deng 3D solutions
       -> drop Z > 0 (fish are underwater; Z = 0 is the water surface)
       -> drop Z < -16 m (fish cannot be below the bay bottom)
+      -> [optional] 3D window screen (run file [figures] position_3d_box, CLI --box):
+         drop solutions outside X/Y = min/max of ALL positioned receivers (the entire
+         array incl. the CFD row; owner 2026-11-16) + position_3d_box_margin_m
+         and Z = the same [depth floor, 0] plausibility window; rejects clock-jump
+         artifacts (km-scale offsets) before they can pull the per-transmission median
       -> legacy_receiver_set_consensus (|XYZ| < 1000 m, 10 m radius, >=2 receiver sets)
       -> smooth_track (jump 10 m / window 11 / smooth 3, gap 20 s)
       -> kalman_filter_track (2.0, 1.0, 0.5, gap 20 s)
+
+Present-but-unpositioned export (run file [figures] present_unpositioned, default on,
+CLI --presence): emissions heard by >=1 of ALL positioned receivers (the entire
+array incl. the CFD row; owner 2026-11-16; first-arrival detections in
+tblDetectionFilterSecondary) with no final consensus position are written to the same
+<TAG>_positions.csv as product = 'present_unpositioned' rows (X/Y/Z empty, reason =
+outside_3d_box | not_consensus | no_solution, receiver_sets = distinct receivers
+hearing the emission). This keeps in-array fish-hours visible in the client data
+instead of looking like the fish left the array.
 
 The 2026-10-24 first pass plotted raw per-transmission medians of ALL root-B
 solutions; diverged-solution outliers (raw extents up to ~872 km in Z for 26E4
@@ -36,8 +52,9 @@ The chain above is what rejects them. The surface gate additionally removes the
 smaller-scale above-surface mirror solutions (27-51% of raw root-B rows per tag)
 that the chain's 1 km gate does not catch.
 
-The _positions.csv files contain only the final validated products (consensus and
-kalman). Raw Deng solutions are not included -- they are processing artifacts, not
+The _positions.csv files contain the final validated products (consensus and kalman)
+plus present_unpositioned presence rows (empty XYZ, reason recorded) when enabled.
+Raw Deng solutions are not included -- they are processing artifacts, not
 part of the final dataset. Rejection counts are in fish_qc.csv.
 
 Depth floor: the same flat-array geometry produces mirror/parallax solutions BELOW
@@ -60,6 +77,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import argparse
 import sqlite3
 import sys
+import tomllib
 import warnings
 from pathlib import Path
 
@@ -73,7 +91,8 @@ warnings.filterwarnings("ignore")
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from ent_analysis_2025 import legacy_receiver_set_consensus  # noqa: E402  (reference consensus)
+from ent_analysis_2025 import (legacy_receiver_set_consensus,  # noqa: E402  (reference consensus)
+                               spatial_box, three_d_box_mask, present_unpositioned_rows)
 from drag_test_figures_2025 import (smooth_track, kalman_filter_track,  # noqa: E402  (item12 chain copies)
                                     resolve_depth_floor, run_file_from_status)
 
@@ -118,6 +137,15 @@ def main():
                          "else deepest receiver Z minus margin)")
     ap.add_argument("--tags", nargs="+", default=None,
                     help="tags to generate figures for (default: all study tags in DB)")
+    ap.add_argument("--box", choices=["auto", "on", "off"], default="auto",
+                    help="3D window screen around the receiver volume before the consensus median "
+                         "(auto = run file [figures] position_3d_box, default off)")
+    ap.add_argument("--box-margin-m", type=float, default=None,
+                    help="margin (m) widening every axis of the 3D window "
+                         "(default: [figures] position_3d_box_margin_m, else 0)")
+    ap.add_argument("--presence", choices=["auto", "on", "off"], default="auto",
+                    help="write present_unpositioned rows to the client CSV "
+                         "(auto = run file [figures] present_unpositioned, default on)")
     args = ap.parse_args()
     db, out = Path(args.db), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -125,6 +153,16 @@ def main():
     floor_m, floor_src = resolve_depth_floor(db, args.depth_floor_m, run_file)
     print("depth floor: %.2f m (%s)%s" % (floor_m, floor_src,
           ("  run file: %s" % run_file) if run_file else ""))
+    # ---- [figures] options for the 3D window screen + presence export
+    figs = {}
+    if run_file is not None:
+        with open(run_file, "rb") as fh:
+            run_cfg = tomllib.load(fh)
+        figs = run_cfg.get("figures", {}) or {}
+    box_on = figs.get("position_3d_box", False) if args.box == "auto" else (args.box == "on")
+    box_margin = float(args.box_margin_m if args.box_margin_m is not None
+                       else figs.get("position_3d_box_margin_m", 0.0))
+    presence_on = figs.get("present_unpositioned", True) if args.presence == "auto" else (args.presence == "on")
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
     rec = pd.read_sql("select Rec_ID, X_t, Y_t, Z_t from tblReceiver", con).set_index("Rec_ID")
     p = pd.read_sql("select * from tblPositions_Deng where comment = 'solution found'", con)
@@ -148,6 +186,34 @@ def main():
         con.close()
         return 1
 
+    # ---- 3D window: X/Y = min/max of ALL positioned receivers in tblReceiver —
+    # the ENTIRE array incl. the CFD row (owner 2026-11-16: the spatial filter covers
+    # the whole receiver area) — + margin; Z = the [depth floor, 0] plausibility
+    # window (fish can be above the shallowest hydrophone, so the receiver Z extent
+    # is NOT the fish Z bound).
+    recs_all = rec[rec[["X_t", "Y_t"]].notna().all(axis=1)]
+    box = None
+    if box_on:
+        box, box_margin, box_src = spatial_box(figs, recs_all, floor_m, box_margin)
+        print("3D window: X [%.2f, %.2f]  Y [%.2f, %.2f]  Z [%.2f, 0.00]  (%s)"
+              % (box[0] - box_margin, box[1] + box_margin, box[2] - box_margin, box[3] + box_margin,
+                 floor_m, box_src))
+    else:
+        print("3D window: OFF (legacy behavior; enable with --box on or [figures] position_3d_box)")
+
+    # ---- presence source: first-arrival detections on the full array
+    # (all positioned receivers incl. the CFD row; owner 2026-11-16)
+    det = None
+    if presence_on:
+        tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
+        det_table = "tblDetectionFilterSecondary" if "tblDetectionFilterSecondary" in tables \
+            else "tblDetectionRaw"
+        if det_table == "tblDetectionRaw":
+            print("note: tblDetectionFilterSecondary missing; presence from tblDetectionRaw (full scan)")
+        det = pd.read_sql("select Tag_ID, transNo, Rec_ID, seconds_fix from %s" % det_table, con)
+        det["transNo"] = pd.to_numeric(det.transNo, errors="coerce")
+        det["seconds_fix"] = pd.to_numeric(det.seconds_fix, errors="coerce")
+
     qc_rows = []
     for tag in tags:
         print("=" * 64)
@@ -164,6 +230,18 @@ def main():
         n_above = int((raw.Z > 0).sum())
         n_below = int((raw.Z < floor_m).sum())
         sub = raw[(raw.Z <= 0) & (raw.Z >= floor_m)].copy()
+        # ---- 3D window screen (before the median): reject far-off solutions.
+        # Rejected rows are flagged here and counted in fish_qc.csv; they are not
+        # written to the client CSV (processing artifacts), same as the Z gate.
+        n_outside_box = 0
+        box_rejected = set()
+        if box_on:
+            inb = np.asarray(three_d_box_mask(raw, box, box_margin))
+            any_in = pd.Series(inb,
+                               index=pd.to_numeric(raw.transNo, errors="coerce")).groupby(level=0).any()
+            box_rejected = {float(t) for t in any_in[~any_in].index.dropna()}
+            n_outside_box = int((~three_d_box_mask(sub, box, box_margin)).sum())
+            sub = sub[three_d_box_mask(sub, box, box_margin)].copy()
         # ---- verified item12 chain: consensus -> smooth -> Kalman
         g = legacy_receiver_set_consensus(sub)
         gs, n_rej = smooth_track(g, jump_limit_m=10.0, jump_window=11, smooth_window=3)
@@ -187,10 +265,22 @@ def main():
                 float(np.hypot(cur.x - prev.x, cur.y - prev.y)), float(cur.t0 - prev.t0)))
         t0, t1 = gk.t0.iloc[0], gk.t0.iloc[-1]
         span_h = (t1 - t0) / 3600.0
+        # ---- present-but-unpositioned: heard on the full array, no final position
+        pres = pd.DataFrame(columns=["transNo", "t0", "n_receivers", "reason"])
+        if presence_on and det is not None:
+            det_tag = det[(det.Tag_ID == tag) & (det.Rec_ID.isin(recs_all.index))]
+            pres = present_unpositioned_rows(det_tag[["transNo", "Rec_ID", "seconds_fix"]],
+                                             raw, g, box_rejected)
+        pres_reasons = pres.reason.value_counts().to_dict() if len(pres) else {}
         qc_rows.append(dict(tag=tag, n_solutions=int(len(raw)), n_above_surface=int(n_above),
                             n_below_floor=int(n_below), depth_floor_m=round(float(floor_m), 2),
+                            n_outside_box=int(n_outside_box),
                             n_consensus=int(len(g)), n_smooth_rejected=int(n_rej),
                             n_kalman=int(len(gk)),
+                            n_present_unpositioned=int(len(pres)),
+                            n_present_outside_box=int(pres_reasons.get("outside_3d_box", 0)),
+                            n_present_not_consensus=int(pres_reasons.get("not_consensus", 0)),
+                            n_present_no_solution=int(pres_reasons.get("no_solution", 0)),
                             first_obs=iso_utc(pd.Series([t0])).iloc[0],
                             last_obs=iso_utc(pd.Series([t1])).iloc[0], span_h=round(span_h, 1),
                             first_X_m=round(float(gk.x.iloc[0]), 1), first_Y_m=round(float(gk.y.iloc[0]), 1),
@@ -199,8 +289,12 @@ def main():
                             z_min_m=round(float(gk.z.min()), 2), z_max_m=round(float(gk.z.max()), 2),
                             n_jumps_gt_3ms=int(len(jump_idx)),
                             jump_summary="; ".join(summary_parts)[:500]))
-        print("  solutions=%d (above-surface dropped=%d, below-floor<%.2f m dropped=%d)  consensus=%d  smooth_rejected=%d  kalman=%d"
-              % (len(raw), n_above, floor_m, n_below, len(g), n_rej, len(gk)))
+        print("  solutions=%d (above-surface dropped=%d, below-floor<%.2f m dropped=%d, outside-3D-box dropped=%d)  consensus=%d  smooth_rejected=%d  kalman=%d"
+              % (len(raw), n_above, floor_m, n_below, n_outside_box, len(g), n_rej, len(gk)))
+        if presence_on:
+            print("  present_unpositioned=%d (outside_box=%d, not_consensus=%d, no_solution=%d)"
+                  % (len(pres), pres_reasons.get("outside_3d_box", 0),
+                     pres_reasons.get("not_consensus", 0), pres_reasons.get("no_solution", 0)))
         print("  span=%.1f h  first=%s (%.0f,%.0f)  last=%s (%.0f,%.0f)  max_v=%.2f m/s  jumps>%g m/s: %d  Z range [%.1f, %.1f] m"
               % (span_h, qc_rows[-1]["first_obs"], gk.x.iloc[0], gk.y.iloc[0],
                  qc_rows[-1]["last_obs"], gk.x.iloc[-1], gk.y.iloc[-1],
@@ -310,23 +404,38 @@ def main():
         plt.close(fig)
         print("  gif3d: %s frames" % len(idx))
 
-        # ---- client CSV (consensus + kalman only; raw solutions are NOT included)
+        # ---- client CSV (consensus + kalman + present_unpositioned; raw
+        # Deng solutions are NOT included -- processing artifacts)
         con_df = pd.DataFrame({
             "tag": tag, "t_iso_utc": iso_utc(g.t0), "t_s": g.t0.round(3),
             "X_m": g.x.round(3), "Y_m": g.y.round(3), "Z_m": g.z.round(3),
             "product": "consensus", "root": "B", "dim": "3D", "in_hull": "",
             "transNo": g.transNo, "r0": "", "r1": "", "r2": "", "r3": "",
-            "receiver_set": "", "receiver_sets": g.receiver_sets, "n_combinations": g.n_combinations})
+            "receiver_set": "", "receiver_sets": g.receiver_sets, "n_combinations": g.n_combinations,
+            "reason": ""})
         kal_df = pd.DataFrame({
             "tag": tag, "t_iso_utc": iso_utc(gk.t0), "t_s": gk.t0.round(3),
             "X_m": gk.x.round(3), "Y_m": gk.y.round(3), "Z_m": gk.z.round(3),
             "product": "kalman", "root": "B", "dim": "3D", "in_hull": "",
             "transNo": gk.transNo, "r0": "", "r1": "", "r2": "", "r3": "",
-            "receiver_set": "", "receiver_sets": "", "n_combinations": ""})
-        pd.concat([con_df, kal_df], ignore_index=True, sort=False).to_csv(
+            "receiver_set": "", "receiver_sets": "", "n_combinations": "", "reason": ""})
+        parts = [con_df, kal_df]
+        if presence_on and len(pres):
+            # XYZ left EMPTY on purpose: the fish was present but not positioned
+            # (missing = NULL/unresolved, never fabricated).
+            pres_df = pd.DataFrame({
+                "tag": tag, "t_iso_utc": iso_utc(pres.t0), "t_s": pres.t0.round(3),
+                "X_m": np.nan, "Y_m": np.nan, "Z_m": np.nan,
+                "product": "present_unpositioned", "root": "", "dim": "3D", "in_hull": "",
+                "transNo": [int(t) if float(t).is_integer() else t for t in pres.transNo],
+                "r0": "", "r1": "", "r2": "", "r3": "",
+                "receiver_set": "", "receiver_sets": pres.n_receivers, "n_combinations": "",
+                "reason": pres.reason})
+            parts.append(pres_df)
+        pd.concat(parts, ignore_index=True, sort=False).to_csv(
             out / ("%s_positions.csv" % tag), index=False)
-        print("  csv: %s_positions.csv (%d consensus + %d kalman rows)"
-              % (tag, len(con_df), len(kal_df)))
+        print("  csv: %s_positions.csv (%d consensus + %d kalman + %d present_unpositioned rows)"
+              % (tag, len(con_df), len(kal_df), len(pres) if presence_on else 0))
 
     pd.DataFrame(qc_rows).to_csv(out / "fish_qc.csv", index=False)
     con.close()
