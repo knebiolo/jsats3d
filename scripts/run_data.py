@@ -297,29 +297,38 @@ def study_row(study, start, end):
             value("master_receiver"), value("synch_time_start") or start, value("synch_time_end") or end]
 
 
-def finish_database(db, study, start, end, signal_proxies, pulse_rates=None):
+def finish_database(db, study, start, end, signal_proxies, pulse_rates=None, run_2025=False, data_format="ats", study_tags=None):
     """Fill tblStudyParameters, pulse rates from the run file, optional ATS stand-ins for SNR/NBW, and indexes."""
     connection = sqlite3.connect(db)
     try:
+        # D: Fast SQLite settings for the build phase — default journal + no sync + 1 GB cache.
+        # The DB is rebuilt from scratch, so crash safety doesn't matter.
+        connection.execute("PRAGMA synchronous = OFF")
+        connection.execute("PRAGMA cache_size = -1000000")  # ~1 GB
         connection.execute("DROP TABLE IF EXISTS tblStudyParameters")
         connection.execute("CREATE TABLE tblStudyParameters(UTC_Conv INTEGER, BM_Elev REAL, BM_Elev_Units TEXT, "
                            "Output_Units TEXT, masterReceiver TEXT, synch_time_start TIMESTAMP, synch_time_end TIMESTAMP)")
         connection.execute("INSERT INTO tblStudyParameters VALUES (?,?,?,?,?,?,?)", study_row(study, start, end))
+        # Apply config-provided pulse rates first.
         for tag, rate in (pulse_rates or {}).items():
             updated = connection.execute("UPDATE tblTag SET pulseRate = ? WHERE Tag_ID = ?", (float(rate), tag.upper())).rowcount
             print("pulseRate %s = %s s%s" % (tag.upper(), rate, "" if updated else " (tag not in tblTag, ignored)"))
         filled = 0
-        if signal_proxies:
-            # PROVISIONAL (Kevin to approve): ATS has no SNR/NBW. Legacy multipath_classifier keeps SNR > 0 and
-            # trains on Amplitude, NBW, SNR. Amplitude is already SigStr.
+        # C: Skip SNR/NBW UPDATE only for ATS + 2025 pipeline.
+        # - ATS 2025: multipath_classifier is never called, SNR not needed.
+        # - ATS legacy: multipath_classifier keeps SNR > 0, so SNR must be filled.
+        # - 2019 legacy: tblDetectionRaw has no SigStr/Threshold columns, UPDATE would fail.
+        if data_format == "ats" and run_2025:
+            print("ATS + 2025: skipping SNR/NBW UPDATE (not used)")
+        else:
             filled = connection.execute(
                 "UPDATE tblDetectionRaw SET SNR = SigStr - Threshold, "
                 "NBW = CAST(CASE WHEN instr(trim(BitPeriod), ' ') > 0 "
                 "THEN substr(trim(BitPeriod), 1, instr(trim(BitPeriod), ' ') - 1) ELSE trim(BitPeriod) END AS REAL) "
                 "WHERE SNR IS NULL AND SigStr IS NOT NULL AND Threshold IS NOT NULL").rowcount
-        # Legacy queries every tag and receiver with WHERE Tag_ID / Rec_ID; indexes change speed, not results.
+        # E: Drop idx_raw_tag_rec — it's a prefix of idx_raw_tag_rec_seconds.
         raw_columns = {row[1] for row in connection.execute("PRAGMA table_info(tblDetectionRaw)")}
-        indexes = [("idx_raw_tag_rec", ("Tag_ID", "Rec_ID")), ("idx_raw_rec", ("Rec_ID",)),
+        indexes = [("idx_raw_rec", ("Rec_ID",)),
                    ("idx_raw_tag_rec_seconds", ("Tag_ID", "Rec_ID", "seconds")),
                    ("idx_raw_tag_seconds", ("Tag_ID", "seconds"))]
         for name, columns in indexes:
@@ -327,12 +336,65 @@ def finish_database(db, study, start, end, signal_proxies, pulse_rates=None):
                 connection.execute("CREATE INDEX IF NOT EXISTS %s ON tblDetectionRaw (%s)" %
                                    (name, ", ".join(columns)))
         connection.commit()
+        # Calculate missing pulse rates from data (uses indexes, fast).
+        if study_tags:
+            _calculate_pulse_rates_from_indexed(connection, study_tags)
+        # Switch to WAL at the end, then checkpoint to reclaim space.
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         connection.close()
     print("tblStudyParameters: %s" % dict(zip(STUDY_COLUMNS, study_row(study, start, end))))
-    if signal_proxies:
+    if filled:
         print("PROVISIONAL: %s rows given SNR = SigStr - Threshold, NBW = BitPeriod (pending Kevin)" % filled)
     return filled
+
+
+def _calculate_pulse_rates_from_indexed(conn, study_tags):
+    """Estimate pulse rates from tblDetectionRaw using existing indexes.
+
+    For each study tag, groups detections by receiver, sorts by timestamp,
+    computes inter-detection gaps, and takes the median of gaps within
+    a reasonable pulse-rate window. Uses the (Tag_ID, Rec_ID, seconds) index.
+    Updates tblTag with any missing rates.
+    """
+    import numpy as np
+
+    PULSE_RATE_MIN_S = 1.0
+    PULSE_RATE_MAX_S = 10.0
+    calc_rates = {}
+    for tag in study_tags:
+        tag = tag.upper()
+        # Fill only missing rates: a rate from the run file or the config workbook always wins.
+        existing = conn.execute("SELECT pulseRate FROM tblTag WHERE Tag_ID = ?", (tag,)).fetchone()
+        if existing is not None and existing[0] is not None:
+            continue
+        rows = conn.execute(
+            "SELECT Rec_ID, seconds FROM tblDetectionRaw "
+            "WHERE Tag_ID = ? ORDER BY Rec_ID, seconds",
+            (tag,),
+        ).fetchall()
+        if not rows:
+            continue
+        gaps = []
+        current_rec = None
+        last_time = None
+        for rec_id, sec in rows:
+            if rec_id != current_rec:
+                current_rec = rec_id
+                last_time = sec
+                continue
+            gap = sec - last_time
+            if PULSE_RATE_MIN_S <= gap <= PULSE_RATE_MAX_S:
+                gaps.append(gap)
+            last_time = sec
+        if gaps:
+            rate = float(np.median(gaps))
+            calc_rates[tag] = rate
+            conn.execute("UPDATE tblTag SET pulseRate = ? WHERE Tag_ID = ?", (rate, tag))
+            print("pulseRate %s = %.3f s (from %d gaps, calculated from indexed data)" % (tag, rate, len(gaps)))
+    if calc_rates:
+        conn.commit()
 
 
 def git_state():
@@ -380,7 +442,7 @@ def select_inputs(data_format, paths, selection):
 
 
 def print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
-                      species_codes, repaired, unresolved, study, legacy, outputs):
+                      species_codes, repaired, unresolved, study, legacy, outputs, run):
     print("Run file:    %s" % run_file)
     print("Data format: %s" % data_format)
     print("Output DB:   %s" % output_db)
@@ -396,19 +458,24 @@ def print_run_summary(run_file, output_db, data_format, start, end, selection, t
             print("WARNING PTAGIS code %r skipped: %s" % (raw, reason))
     else:
         print("Teknologic import takes every tag inside the [study] sync window (legacy behaviour); choose tags to position with [legacy] study_tags.")
-    if legacy.get("run"):
-        run_2025 = bool(legacy.get("run_2025_pipeline", False))
+    if legacy.get("run") or run.get("run_pipeline"):
+        run_2025 = bool(legacy.get("run_2025_pipeline") or run.get("run_2025_pipeline", False))
         pipeline_name = "2025 pipeline" if run_2025 else "legacy"
+        pos = run.get("positioning", {})
         print("Pipeline:    %s (master %s, surface %s, deep %s, method %s, env %s)"
-              % (pipeline_name, study.get("master_receiver"), legacy.get("surface_receivers"), legacy.get("deep_receivers"),
-                 legacy.get("method", "KNN") if not run_2025 else "ATS timing", legacy.get("env") or "jsat_legacy"))
+              % (pipeline_name, study.get("master_receiver"),
+                 legacy.get("surface_receivers") or pos.get("surface_receivers", []),
+                 legacy.get("deep_receivers") or pos.get("deep_receivers", []),
+                 legacy.get("method", "KNN") if not run_2025 else "ATS timing",
+                 legacy.get("env") or "jsat_legacy"))
     if outputs:
         enabled = [k for k, v in outputs.items() if isinstance(v, bool) and v]
         print("Outputs:     %s" % (", ".join(enabled) if enabled else "none (defaults: positions only)"))
 
 
-def build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags):
+def build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags, run):
     ats = data_format == "ats"
+    run_2025 = bool(legacy.get("run_2025_pipeline") or run.get("run_2025_pipeline", False))
     steps = []
     if not args.skip_build:
         if ats:
@@ -416,15 +483,16 @@ def build_steps(args, run_file, data_format, paths, selection, study, legacy, db
             steps.append(("parse ATS raw files", parser_command(paths, start, end, serials, tags)))
         else:
             steps.append(("legacy 2019 import", legacy_command(legacy, "import-2019", run_file)))
-    proxies = ats and bool(legacy.get("signal_proxies", False))
+    pos = run.get("positioning", {})
+    proxies = ats and bool(legacy.get("signal_proxies") or pos.get("signal_proxies", False))
     rates = study.get("pulse_rates") or {}
-    steps.append(("study parameters and indexes", lambda: finish_database(output_db, study, start, end, proxies, rates)))
-    if legacy.get("run"):
+    study_tag_list = list(selection.get("tags") or [])
+    steps.append(("study parameters and indexes", lambda: finish_database(output_db, study, start, end, proxies, rates, run_2025=run_2025, data_format=data_format, study_tags=study_tag_list)))
+    if legacy.get("run") or run.get("run_pipeline"):
         missing = [key for key in ("bm_elev", "master_receiver") if str(study.get(key, "")).strip() == ""]
         if missing:
-            raise ValueError("[legacy] run needs [study] %s: legacy clock_fix_object reads BM_Elev "
+            raise ValueError("run needs [study] %s: legacy clock_fix_object reads BM_Elev "
                              "(converts it by units) and masterReceiver" % " and ".join(missing))
-        run_2025 = bool(legacy.get("run_2025_pipeline", False))
         if run_2025:
             drag_plots = outputs.get("drag_plots", True)
             steps.append(("2025 pipeline", pipeline_2025_command(run_file, drag_plots=drag_plots)))
@@ -474,8 +542,8 @@ def main(argv=None):
     data_format = run["data_format"]
     species_codes, repaired, unresolved, tags, serials = select_inputs(data_format, paths, selection)
     print_run_summary(run_file, output_db, data_format, start, end, selection, tags,
-                      species_codes, repaired, unresolved, study, legacy, outputs)
-    steps = build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags)
+                      species_codes, repaired, unresolved, study, legacy, outputs, run)
+    steps = build_steps(args, run_file, data_format, paths, selection, study, legacy, dbscan, outputs, output_db, start, end, tags, run)
     if args.dry_run:
         print("Dry run: nothing run. Steps: %s" % "; ".join(name for name, _ in steps))
         return 0

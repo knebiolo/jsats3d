@@ -89,7 +89,9 @@ def legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2):
         if nearby.receiver_set.nunique() < minimum_sets:
             continue
         med = nearby[["X", "Y", "Z", "t0"]].median()
+        std = nearby[["X", "Y", "Z"]].std()
         accepted.append({"transNo": trans_no, "x": med.X, "y": med.Y, "z": med.Z, "t0": med.t0,
+                         "x_std": std.X, "y_std": std.Y, "z_std": std.Z,
                          "receiver_sets": int(nearby.receiver_set.nunique()),
                          "candidate_sets": int(group.receiver_set.nunique()), "n_combinations": int(len(nearby))})
     return pd.DataFrame(accepted).sort_values("t0").reset_index(drop=True) if accepted else pd.DataFrame()

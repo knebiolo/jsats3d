@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from scipy.spatial import ConvexHull, Delaunay
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -606,12 +607,182 @@ def process(run, paths, resume=False):
         print("tblPositions_Deng2D: %s solutions found" % load_2d_positions(db, positions_2d, float(legacy["fixed_z_2d"])))
 
 
+def export_all_positions(db, out_csv, utc_conv=-7):
+    """Export a single consolidated CSV of all fish tag positions.
+
+    Includes extra rows for epochs that had detections but no valid Deng solution,
+    so downstream analyses do not falsely assume the fish left the area.
+
+    Columns: AT_code, datetime_utc, x_m, y_m, z_m, x_std, y_std, z_std,
+             n_solutions, in_convexhull, in_3Darea
+
+    Usage:
+        python scripts/legacy_pipeline.py export-all config/run_data.toml --out output/all_positions.csv
+    """
+    print("=" * 60)
+    print("Export all positions -> %s" % out_csv)
+    print("=" * 60)
+
+    # Load successful Deng solutions
+    positions = query(db, "SELECT * FROM tblPositions_Deng WHERE comment = 'solution found'")
+    print("  %d successful Deng solutions" % len(positions))
+
+    if not positions.empty:
+        for col in ("X", "Y", "Z", "ToA", "T01", "transNo"):
+            if col in positions.columns:
+                positions[col] = pd.to_numeric(positions[col], errors="coerce")
+        if "t0" not in positions.columns and "ToA" in positions.columns and "T01" in positions.columns:
+            positions["t0"] = positions["ToA"] - positions["T01"]
+        valid_cols = [c for c in ("X", "Y", "Z", "t0", "transNo") if c in positions.columns]
+        valid = positions[valid_cols].notna().all(axis=1) & np.isfinite(positions[valid_cols]).all(axis=1)
+        positions = positions[valid].reset_index(drop=True)
+
+    # Load all detections
+    det_cols = [r[1] for r in query(db, "pragma table_info(tblDetectionFilterSecondary)").itertuples(index=False, name=None)]
+    want = [c for c in ("Tag_ID", "transNo", "seconds_fix") if c in det_cols]
+    if len(want) >= 2:
+        detections = query(db, "SELECT %s FROM tblDetectionFilterSecondary" % ", ".join(want))
+        if "transNo" in detections.columns:
+            detections["transNo"] = pd.to_numeric(detections["transNo"], errors="coerce")
+        detections = detections.dropna(subset=["transNo"])
+    else:
+        detections = pd.DataFrame()
+    print("  %d detection rows in tblDetectionFilterSecondary" % len(detections))
+
+    # Load receivers for convex hull
+    receivers = query(db, "SELECT Rec_ID, X_t, Y_t, Z_t FROM tblReceiver")
+    hull_2d = Delaunay(receivers[["X_t", "Y_t"]].values) if len(receivers) >= 3 else None
+    hull_3d = ConvexHull(receivers[["X_t", "Y_t", "Z_t"]].values) if len(receivers) >= 4 else None
+    print("  %d receivers; 2D hull: %s, 3D hull: %s" % (
+        len(receivers), "yes" if hull_2d is not None else "no", "yes" if hull_3d is not None else "no"))
+
+    # All (tag, transNo) pairs from detections
+    det_pairs = set()
+    if not detections.empty:
+        det_pairs = set(zip(detections["Tag_ID"].astype(str).astype(object),
+                            detections["transNo"].dropna().astype(int).astype(object)))
+
+    # All (tag, transNo) pairs with successful positions
+    position_pairs = set()
+    if not positions.empty:
+        position_pairs = set(zip(positions["Tag_ID"].astype(str).astype(object),
+                                 positions["transNo"].dropna().astype(int).astype(object)))
+
+    # Epochs with detections but no positioning
+    missing_pairs = det_pairs - position_pairs
+    print("  Epochs with detections but no position: %d" % len(missing_pairs))
+
+    # Build output rows
+    rows = []
+    all_tags = sorted(positions["Tag_ID"].unique()) if not positions.empty else []
+
+    for tag in all_tags:
+        tag_pos = positions[positions["Tag_ID"] == tag]
+        for trans_no in tag_pos["transNo"].unique():
+            sol = tag_pos[tag_pos["transNo"] == trans_no]
+            x_vals = sol["X"].values
+            y_vals = sol["Y"].values
+            z_vals = sol["Z"].values
+
+            x_m = float(np.nanmean(x_vals))
+            y_m = float(np.nanmean(y_vals))
+            z_m = float(np.nanmean(z_vals))
+            x_std = float(np.nanstd(x_vals, ddof=1)) if len(x_vals) > 1 else 0.0
+            y_std = float(np.nanstd(y_vals, ddof=1)) if len(y_vals) > 1 else 0.0
+            z_std = float(np.nanstd(z_vals, ddof=1)) if len(z_vals) > 1 else 0.0
+            n_solutions = int(len(sol))
+
+            # Convert ToA to UTC datetime
+            toa_val = sol["ToA"].iloc[0]
+            if np.isfinite(toa_val):
+                utc_toa = toa_val - (utc_conv * 3600)
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromtimestamp(utc_toa, tz=timezone.utc)
+                    datetime_utc = dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                except Exception:
+                    datetime_utc = ""
+            else:
+                datetime_utc = ""
+
+            # Convex hull checks
+            pt = np.array([x_m, y_m])
+            in_hull_2d = bool(hull_2d.find_simplex(pt) >= 0) if hull_2d is not None else False
+
+            pt3d = np.array([x_m, y_m, z_m])
+            in_hull_3d = False
+            if hull_3d is not None:
+                ok = True
+                for simplex in hull_3d.simplices:
+                    verts = hull_3d.points[simplex]
+                    if verts.shape[0] == 3:
+                        normal = np.cross(verts[1] - verts[0], verts[2] - verts[0])
+                    else:
+                        continue
+                    norm = np.linalg.norm(normal)
+                    if norm < 1e-12:
+                        continue
+                    normal = normal / norm
+                    if np.dot(normal, pt3d - verts[0]) > 1e-6:
+                        ok = False
+                        break
+                in_hull_3d = ok
+
+            rows.append({
+                "AT_code": tag,
+                "datetime_utc": datetime_utc,
+                "x_m": round(x_m, 3),
+                "y_m": round(y_m, 3),
+                "z_m": round(z_m, 3),
+                "x_std": round(x_std, 3),
+                "y_std": round(y_std, 3),
+                "z_std": round(z_std, 3),
+                "n_solutions": n_solutions,
+                "in_convexhull": in_hull_2d,
+                "in_3Darea": in_hull_3d,
+            })
+
+    # Add "no position" rows for detection epochs without solutions
+    for tag, trans_no in sorted(missing_pairs):
+        rows.append({
+            "AT_code": tag,
+            "datetime_utc": "",
+            "x_m": "",
+            "y_m": "",
+            "z_m": "",
+            "x_std": "",
+            "y_std": "",
+            "z_std": "",
+            "n_solutions": 0,
+            "in_convexhull": False,
+            "in_3Darea": False,
+        })
+
+    # Build DataFrame, sort, and write
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values(["AT_code", "datetime_utc"]).reset_index(drop=True)
+
+    out_dir = os.path.dirname(out_csv)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    df_out.to_csv(out_csv, index=False)
+
+    print("\nWrote %d rows to %s" % (len(df_out), out_csv))
+    print("  Position rows: %d tags, %d (tag, transNo) pairs" % (len(all_tags), len(position_pairs)))
+    print("  No-position rows: %d" % len(missing_pairs))
+    return df_out
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["import-2019", "process", "clock-fix-check"])
+    parser.add_argument("command", choices=["import-2019", "process", "clock-fix-check", "export-all"])
     parser.add_argument("run_file")
     parser.add_argument("receivers", nargs="*", help="Receivers for clock-fix-check")
     parser.add_argument("--resume", action="store_true", help="process: continue after an interruption (finished tags are skipped)")
+    parser.add_argument("--out", default=None, help="export-all: output CSV file path (default: <db>_all_positions.csv)")
+    parser.add_argument("--utc-conv", type=float, default=None,
+                        help="export-all: UTC offset in hours (default: from [study] utc_conv)")
     args = parser.parse_args(argv)
     run, paths = read_run_file(args.run_file)
     if args.command == "import-2019":
@@ -620,6 +791,13 @@ def main(argv=None):
         if not args.receivers:
             parser.error("clock-fix-check requires at least one receiver")
         clock_fix_check(paths["output_db"], args.receivers)
+    elif args.command == "export-all":
+        db = paths["output_db"]
+        out_csv = args.out or str(Path(db).with_name("%s_all_positions.csv" % Path(db).stem))
+        utc_conv = args.utc_conv
+        if utc_conv is None:
+            utc_conv = run.get("study", {}).get("utc_conv", -7)
+        export_all_positions(db, out_csv, utc_conv)
     else:
         process(run, paths, resume=args.resume)
     return 0

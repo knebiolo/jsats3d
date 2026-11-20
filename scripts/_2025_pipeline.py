@@ -114,13 +114,13 @@ def prepare_run(c):
 
 
 def clock_jumps_done(c):
-    if not c.run["legacy"].get("apply_clock_jumps", False):
+    if not c._ats.get("apply_clock_jumps", False):
         return True
     return count(c.db, lp.PROGRESS_TABLE, "where Tag_ID = ?", ("__ats_clock_jumps__",)) > 0
 
 
 def clock_jumps_run(c):
-    """Step 1c (experimental; [legacy] apply_clock_jumps = true): correct receiver clock
+    """Step 1c (experimental; [ats_2025_pipeline] apply_clock_jumps = true): correct receiver clock
     jumps BEFORE clock sync (scripts/clock_jump_pre.py). Events from the per-file internal
     offset-change codes in tblDetectionRaw (OffsetChanged/CounterRestart), magnitudes from
     the master-beacon TDoA median +/- clock_jump_window_s per side, applied to
@@ -128,15 +128,15 @@ def clock_jumps_run(c):
     tblClockJumpEvents. Downstream tables are dropped so the pipeline rebuilds them on the
     corrected times. Jumps without an internal code are left to the legacy auto-detect."""
     import clock_jump_pre
-    legacy = c.run["legacy"]
+    ats = c._ats
     master_rec, master_tag = lp.master(c.db)
     period = float(lp.query(c.db, "select pulseRate from tblTag where Tag_ID = ?", (master_tag,)).pulseRate.iloc[0])
     notes, jumps = clock_jump_pre.run(
         str(c.db), list(dict.fromkeys(c.surface + c.deep)), master_rec, master_tag, period,
         c.window_start, c.window_end,
-        window_s=float(legacy.get("clock_jump_window_s", 300)),
-        min_step=float(legacy.get("clock_jump_min_step_s", 0.05)),
-        max_step=float(legacy.get("clock_jump_max_step_s", 5.0)),
+        window_s=float(ats.get("clock_jump_window_s", 300)),
+        min_step=float(ats.get("clock_jump_min_step_s", 0.05)),
+        max_step=float(ats.get("clock_jump_max_step_s", 5.0)),
         apply=True)
     if jumps:
         _invalidate_clock_outputs(c)
@@ -231,7 +231,7 @@ def deep_positions_done(c):
     columns = {row[1] for row in lp.query(c.db, "pragma table_info(tblDeepReceiver_step6_solution)").itertuples(index=False, name=None)}
     if "solution_root" not in columns:
         return False
-    root = c.run["legacy"].get("deep_solution", "B")
+    root = c._positioning.get("deep_solution", "B")
     return all(count(c.db, "tblDeepReceiver_step6_solution", "where Rec_ID = ? and solution_root = ?",
                      (receiver, root)) == 1 for receiver in c.deng)
 
@@ -239,7 +239,7 @@ def deep_positions_done(c):
 def deep_positions_run(c):
     """Step 6: legacy Deng configured-root median for each Deng receiver beacon (deep, then static surface)."""
     rec = lp.query(c.db, "select Rec_ID, Tag_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
-    root = c.run["legacy"].get("deep_solution", "B")
+    root = c._positioning.get("deep_solution", "B")
     if root not in ("A", "B"):
         raise ValueError("deep_solution must be A or B")
     out = Path(lp.fresh_folder(c.work / "deep_receivers"))
@@ -275,7 +275,7 @@ def deep_positions_run(c):
 
 
 def adopt_deep_z_mode(c):
-    return str(c.run["legacy"].get("adopt_deep_z", "solved")).lower()
+    return str(c._positioning.get("adopt_deep_z", "solved")).lower()
 
 
 def adopt_deep_done(c):
@@ -518,14 +518,14 @@ def bathymetry_check_done(c):
 def bathymetry_check_run(c):
     """Step 10b: apply bathymetry-based water column filtering to position solutions.
 
-    Reads [legacy] bathymetry settings:
+    Reads [ats_2025_pipeline] bathymetry settings:
         bathy_path          – path to bathymetry XYZ/CSV/GeoTIFF
         bathy_input_crs     – CRS of the input file (default EPSG:26910)
         water_column        – if true and no bathy data, apply WSEL-only check
     """
-    legacy = c.run["legacy"]
-    bathy_path = legacy.get("bathy_path")
-    water_column = legacy.get("water_column", False)
+    ats = c._ats
+    bathy_path = ats.get("bathy_path")
+    water_column = ats.get("water_column", False)
 
     if not bathy_path and not water_column:
         return {"status": "skipped", "reason": "no bathy_path, water_column = false"}
@@ -534,7 +534,7 @@ def bathymetry_check_run(c):
 
     if bathy_path:
         bathy_path = lp.resolve_path(bathy_path)
-        input_crs = legacy.get("bathy_input_crs", "EPSG:26910")
+        input_crs = ats.get("bathy_input_crs", "EPSG:26910")
         print(f"Bathymetry: loading {bathy_path} (CRS: {input_crs})")
         n = bth.load_xyz(str(c.db), bathy_path, input_crs=input_crs)
         print("Bathymetry: checking position solutions")
@@ -546,12 +546,152 @@ def bathymetry_check_run(c):
         return {"status": "water_column_only"}
 
 
+# Step 10c (optional, [positioning] premedian_filter = true): pre-median screen of the Deng solutions of each
+# transmission, so clock-jump artefacts cannot bias the per-transmission median/mean used downstream. Rejected rows
+# stay in tblPositions_Deng with a 'premedian ...' comment (downstream selects comment = 'solution found').
+PREMEDIAN_BOX = "premedian box - rejected"
+PREMEDIAN_OUTLIER = "premedian epoch outlier - rejected"
+PREMEDIAN_UNSUPPORTED = "premedian epoch unsupported - rejected"
+
+
+def premedian_settings(c):
+    p = c._positioning
+    return {"enabled": bool(p.get("premedian_filter", False)),
+            # Box gate on/off, and its Z limits on/off (off = XY-only box).
+            "box": bool(p.get("premedian_box", True)),
+            "box_z": bool(p.get("premedian_box_z", True)),
+            # XY: within this distance outside the convex hull of the 3D receivers (PM 2026-11-16 box used 5 m).
+            "box_margin_m": float(p.get("premedian_box_margin_m", 5.0)),
+            # Z: receiver frame is depth below the surface (Z_t < 0); the surface is Z = 0.
+            "box_z_top_m": float(p.get("premedian_box_z_top_m", 0.0)),
+            "box_z_pad_m": float(p.get("premedian_box_z_pad_m", 3.0)),
+            # Epoch radius: same 10 m as the project's receiver-set consensus (PM 2026-10-14).
+            "radius_m": float(p.get("premedian_radius_m", 10.0)),
+            "min_sets": int(p.get("premedian_min_sets", 2))}
+
+
+def premedian_rejected(c):
+    return count(c.db, "tblPositions_Deng", "where comment like 'premedian%'")
+
+
+def premedian_done(c):
+    if not premedian_settings(c)["enabled"]:
+        return True
+    if "tblPreMedianFilter" not in table_names(c.db) or "tblPositions_Deng" not in table_names(c.db):
+        return False
+    saved = lp.query(c.db, "select total_rows, rejected, settings from tblPreMedianFilter where scope = 'all'")
+    return (not saved.empty and int(saved.total_rows.iloc[0]) == count(c.db, "tblPositions_Deng")
+            and int(saved.rejected.iloc[0]) == premedian_rejected(c)
+            and json.loads(saved.settings.iloc[0]) == premedian_settings(c))
+
+
+def premedian_run(c):
+    """Step 10c (optional): box gate (3D receiver hull + margin, surface to deepest receiver - pad; premedian_box /
+    premedian_box_z switch it or its Z limits off; non-finite solutions are always rejected), then per
+    transmission and root keep the solutions within radius_m (XY) of the densest solution; fewer than min_sets
+    distinct receiver sets rejects the transmission. With the filter on, positions_dbscan uses the ping median."""
+    s = premedian_settings(c)
+    if not s["enabled"]:
+        return {"skipped": "premedian_filter = false (positions unchanged)"}
+    from scipy.spatial import ConvexHull
+    con = sqlite3.connect(c.db)
+    reset = con.execute("update tblPositions_Deng set comment = 'solution found' where comment like 'premedian%'").rowcount
+    con.commit()
+    rec = lp.query(c.db, "select Rec_ID, X_t, Y_t, Z_t from tblReceiver").set_index("Rec_ID")
+    missing = [r for r in c.receivers_3d if r not in rec.index]
+    if missing:
+        con.close()
+        raise RuntimeError("check failed: receivers_3d not in tblReceiver: %s" % missing)
+    rec = rec.loc[c.receivers_3d, ["X_t", "Y_t", "Z_t"]].astype(float)
+    eq = ConvexHull(rec[["X_t", "Y_t"]].to_numpy()).equations
+    z_min = float(rec.Z_t.min()) - s["box_z_pad_m"]
+    pos = lp.query(c.db, "select rowid as rid, Tag_ID, solution, transNo, r0, r1, r2, r3, X, Y, Z "
+                         "from tblPositions_Deng where comment = 'solution found'")
+    for col in ("X", "Y", "Z"):
+        pos[col] = pd.to_numeric(pos[col], errors="coerce")
+    xy = pos[["X", "Y"]].to_numpy(dtype=float)
+    finite = np.isfinite(pos[["X", "Y", "Z"]].to_numpy(dtype=float)).all(axis=1)
+    # Largest signed distance beyond a hull edge (unit normals); <= margin means inside the mitred margin band.
+    beyond = np.max(np.nan_to_num(xy) @ eq[:, :2].T + eq[:, 2], axis=1)
+    box_bad = ~finite
+    if s["box"]:
+        box_bad = box_bad | (beyond > s["box_margin_m"])
+        if s["box_z"]:
+            box_bad = box_bad | (pos.Z.to_numpy() > s["box_z_top_m"]) | (pos.Z.to_numpy() < z_min)
+    reason = pd.Series("", index=pos.index)
+    reason[box_bad] = PREMEDIAN_BOX
+    keep = pos[~box_bad]
+    sets = pd.Series(["+".join(r) for r in np.sort(keep[["r0", "r1", "r2", "r3"]].astype(str).to_numpy(), axis=1)],
+                     index=keep.index)
+    r2 = s["radius_m"] ** 2
+    for _, g in keep.groupby(["Tag_ID", "solution", "transNo"], sort=False):
+        p = g[["X", "Y"]].to_numpy(dtype=float)
+        d2 = ((p[:, None, :] - p[None, :, :]) ** 2).sum(axis=-1)
+        near = d2 <= r2
+        n = near.sum(axis=1)
+        ties = np.flatnonzero(n == n.max())
+        best = ties[np.argmin([d2[i][near[i]].sum() for i in ties])]
+        inside = near[best]
+        if sets.loc[g.index[inside]].nunique() < s["min_sets"]:
+            reason[g.index] = PREMEDIAN_UNSUPPORTED
+        else:
+            reason[g.index[~inside]] = PREMEDIAN_OUTLIER
+    flagged = reason[reason != ""]
+    con.executemany("update tblPositions_Deng set comment = ? where rowid = ?",
+                    list(zip(flagged.to_numpy(), pos.loc[flagged.index, "rid"].astype(int).tolist())))
+    # Audit: per tag/root and per receiver (share of the receiver's solutions that were rejected).
+    pos["reason"] = reason
+    rows = []
+    for (tag, root), g in pos.groupby(["Tag_ID", "solution"]):
+        rows.append({"scope": "tag_root", "Tag_ID": tag, "solution": root, "Rec_ID": None, "found_before": len(g),
+                     "box": int((g.reason == PREMEDIAN_BOX).sum()), "outlier": int((g.reason == PREMEDIAN_OUTLIER).sum()),
+                     "unsupported": int((g.reason == PREMEDIAN_UNSUPPORTED).sum()),
+                     "kept_transmissions": int(g[g.reason == ""].transNo.nunique()),
+                     "transmissions_before": int(g.transNo.nunique())})
+    members = pos[["r0", "r1", "r2", "r3"]].astype(str)
+    for r in sorted(set(members.to_numpy().ravel()) - {"nan", "None"}):
+        g = pos[members.eq(r).any(axis=1)]
+        rows.append({"scope": "receiver", "Tag_ID": None, "solution": None, "Rec_ID": r, "found_before": len(g),
+                     "box": int((g.reason == PREMEDIAN_BOX).sum()), "outlier": int((g.reason == PREMEDIAN_OUTLIER).sum()),
+                     "unsupported": int((g.reason == PREMEDIAN_UNSUPPORTED).sum()),
+                     "kept_transmissions": None, "transmissions_before": None})
+    summary = pd.DataFrame(rows)
+    summary["rejected_share"] = (summary.box + summary.outlier + summary.unsupported) / summary.found_before.clip(lower=1)
+    total = int(con.execute("select count(*) from tblPositions_Deng").fetchone()[0])
+    summary = pd.concat([summary, pd.DataFrame([{"scope": "all", "found_before": len(pos), "box": int(box_bad.sum()),
+                                                  "outlier": int((reason == PREMEDIAN_OUTLIER).sum()),
+                                                  "unsupported": int((reason == PREMEDIAN_UNSUPPORTED).sum())}])],
+                        ignore_index=True)
+    summary["total_rows"] = total
+    summary["rejected"] = len(flagged)
+    summary["settings"] = json.dumps(s)
+    summary.to_sql("tblPreMedianFilter", con, if_exists="replace", index=False)
+    # Downstream products were built from the unfiltered solutions.
+    con.execute("drop table if exists tblPositions_DengDBSCAN")
+    con.commit()
+    con.close()
+    (plot_dbscan_folder(c) / "item12_pipeline_summary.csv").unlink(missing_ok=True)
+    print("PRE-MEDIAN FILTER: %d of %d found solutions rejected (box %d, epoch outlier %d, unsupported %d); "
+          "%d earlier premedian flags reset; settings %s" % (len(flagged), len(pos), int(box_bad.sum()),
+          int((reason == PREMEDIAN_OUTLIER).sum()), int((reason == PREMEDIAN_UNSUPPORTED).sum()), reset, s), flush=True)
+    worst = summary[summary.scope == "receiver"].sort_values("rejected_share", ascending=False).head(5)
+    print("PRE-MEDIAN FILTER: highest receiver rejection shares: %s" % ", ".join(
+        "%s %.0f%%" % (r, 100 * v) for r, v in zip(worst.Rec_ID, worst.rejected_share)), flush=True)
+    return {"rejected": len(flagged), "found_before": len(pos), "box": int(box_bad.sum()),
+            "outlier": int((reason == PREMEDIAN_OUTLIER).sum()), "unsupported": int((reason == PREMEDIAN_UNSUPPORTED).sum()),
+            "by_tag_root": summary[summary.scope == "tag_root"][["Tag_ID", "solution", "found_before", "rejected_share",
+                                                                  "transmissions_before", "kept_transmissions"]].to_dict("records"),
+            "receiver_rejected_share": {r: round(float(v), 3) for r, v in zip(worst.Rec_ID, worst.rejected_share)},
+            "settings": s}
+
+
 
 
 
 
 def positions_2d_done(c):
-    if not c.run["legacy"].get("known_depth_diagnostics", False):
+    legacy_pl = c.run.get("legacy_pipeline", {})
+    if not legacy_pl.get("known_depth_diagnostics", False):
         return True
     known_depth_tags = [tag for tag in c.tags if tag in c.fixed_z_2d]
     return not known_depth_tags or "tblPositions_Deng2D" in table_names(c.db)
@@ -559,7 +699,8 @@ def positions_2d_done(c):
 
 def positions_2d_run(c):
     """Legacy Deng2D (every receiver set of three, roots A and B) with fish Z fixed per tag, over receivers_2d."""
-    if not c.run["legacy"].get("known_depth_diagnostics", False):
+    legacy_pl = c.run.get("legacy_pipeline", {})
+    if not legacy_pl.get("known_depth_diagnostics", False):
         return {"skipped": "known-depth diagnostic disabled; final positions use legacy 3D Deng"}
     known_depth_tags = [tag for tag in c.tags if tag in c.fixed_z_2d]
     if not known_depth_tags:
@@ -623,12 +764,14 @@ def plot_drag_2d_folder(c):
 
 
 def plot_drag_2d_done(c):
-    return not c.run["legacy"].get("known_depth_diagnostics", False) or (plot_drag_2d_folder(c) / "item12_pipeline_summary.csv").exists()
+    legacy_pl = c.run.get("legacy_pipeline", {})
+    return not legacy_pl.get("known_depth_diagnostics", False) or (plot_drag_2d_folder(c) / "item12_pipeline_summary.csv").exists()
 
 
 def plot_drag_2d_run(c):
     """Optional: scores and plots Deng2D (fish Z fixed) root-A centroids against the drag GPS."""
-    if not c.run["legacy"].get("known_depth_diagnostics", False):
+    legacy_pl = c.run.get("legacy_pipeline", {})
+    if not legacy_pl.get("known_depth_diagnostics", False):
         return {"skipped": "known_depth_diagnostics = false"}
     if not {"FC36", "FFD3"} <= set(c.tags):
         return {"skipped": "ENT truth is available only for FC36 and FFD3"}
@@ -646,7 +789,7 @@ def plot_drag_2d_run(c):
 
 
 def positions_dbscan_enabled(c):
-    return bool(c.run["legacy"].get("positions_dbscan", False))
+    return bool(c._positioning.get("positions_dbscan", False))
 
 
 def positions_dbscan_done(c):
@@ -669,20 +812,20 @@ def ping_acceleration(t, xy, gap_s):
 
 def positions_dbscan_run(c):
     """Optional screen of root-B pings; keeps every root row of the transmissions that fall in a cluster.
-    [legacy] dbscan_mode 'distance' (default): DBSCAN on per-transmission XY.
+    [positioning] dbscan_mode 'distance' (default): DBSCAN on per-transmission XY.
     'acceleration': DBSCAN on XY, depth * dbscan_depth_weight and horizontal acceleration * dbscan_accel_scale (m per m/s^2)."""
     if not positions_dbscan_enabled(c):
         return {"skipped": "positions_dbscan = false (legacy steps unchanged)"}
     from sklearn.cluster import DBSCAN
-    legacy = c.run["legacy"]
-    mode = str(legacy.get("dbscan_mode", "distance")).lower()
+    pos_cfg = c._positioning
+    mode = str(pos_cfg.get("dbscan_mode", "distance")).lower()
     if mode not in ("distance", "acceleration"):
         raise ValueError("dbscan_mode must be 'distance' or 'acceleration', got %r" % mode)
-    eps = float(legacy.get("dbscan_eps_m", 8.0 if mode == "acceleration" else 5.0))
-    min_samples = int(legacy.get("dbscan_min_samples", 5))
-    accel_scale = float(legacy.get("dbscan_accel_scale", 5.0))
-    depth_weight = float(legacy.get("dbscan_depth_weight", 1.0))
-    gap_s = float(legacy.get("dbscan_accel_gap_s", 12.0))
+    eps = float(pos_cfg.get("dbscan_eps_m", 8.0 if mode == "acceleration" else 5.0))
+    min_samples = int(pos_cfg.get("dbscan_min_samples", 5))
+    accel_scale = float(pos_cfg.get("dbscan_accel_scale", 5.0))
+    depth_weight = float(pos_cfg.get("dbscan_depth_weight", 1.0))
+    gap_s = float(pos_cfg.get("dbscan_accel_gap_s", 12.0))
     pos = lp.query(c.db, "select * from tblPositions_Deng where comment = 'solution found'")
     root = pos[pos.solution == "B"]
     if mode == "acceleration":
@@ -692,12 +835,15 @@ def positions_dbscan_run(c):
         root = root.assign(t0=root.ToA - root.T01)
         root = root[np.isfinite(root[["X", "Y", "Z", "t0"]]).all(axis=1) & root[["X", "Y", "Z"]].abs().lt(1000).all(axis=1)]
     kept, notes = [], {}
+    # With the pre-median filter on, the ping position is the median of the surviving solutions (robust); otherwise
+    # the original mean (unchanged behaviour).
+    agg = "median" if premedian_settings(c)["enabled"] else "mean"
     for tag, rows in root.groupby("Tag_ID"):
         if mode == "distance":
-            ping = rows.groupby("transNo")[["X", "Y"]].mean()
+            ping = rows.groupby("transNo")[["X", "Y"]].agg(agg)
             features = ping.to_numpy(dtype=float)
         else:
-            ping = rows.groupby("transNo").agg(X=("X", "mean"), Y=("Y", "mean"), Z=("Z", "mean"), t0=("t0", "median")).sort_values("t0")
+            ping = rows.groupby("transNo").agg(X=("X", agg), Y=("Y", agg), Z=("Z", agg), t0=("t0", "median")).sort_values("t0")
             accel = ping_acceleration(ping.t0.to_numpy(), ping[["X", "Y"]].to_numpy(), gap_s)
             accel = np.where(np.isnan(accel), np.nanmedian(accel) if np.isfinite(accel).any() else 0.0, accel)
             features = np.column_stack([ping.X, ping.Y, depth_weight * ping.Z, accel_scale * accel])
@@ -747,6 +893,7 @@ STEPS = [("prepare", "1b", prepare_done, prepare_run), ("clock_jumps", "1c", clo
          ("speed_of_sound", "9", speed_of_sound_done, speed_of_sound_run),
          ("positions", "11", positions_done, positions_run), ("export", "10", export_done, export_run),
          ("bathymetry_check", "10b", bathymetry_check_done, bathymetry_check_run),
+         ("premedian", "10c", premedian_done, premedian_run),
          ("positions_2d", "11b", positions_2d_done, positions_2d_run),
          ("plot_drag", "12", plot_drag_done, plot_drag_run),
          ("plot_drag_2d", "12c", plot_drag_2d_done, plot_drag_2d_run),
@@ -761,9 +908,19 @@ def build_context(args):
     db = lp.resolve_path(args.db) if args.db else paths["output_db"]
     if not db.exists():
         raise SystemExit("database %s not found; run scripts/run_data.py with this run file first" % db)
-    legacy, study, selection = run["legacy"], run["study"], run["selection"]
-    surface, deep = list(legacy["surface_receivers"]), list(legacy["deep_receivers"])
-    receivers_3d = list(legacy["receivers_3d"])
+    # Support both new config sections ([positioning], [ats_2025_pipeline]) and legacy ([legacy]).
+    positioning = run.get("positioning", {})
+    ats_settings = run.get("ats_2025_pipeline", {})
+    legacy = run.get("legacy", {})
+    # Merge: new sections take priority, fall back to legacy for backward compat.
+    merged_pos = {}
+    merged_pos.update(legacy)
+    merged_pos.update(positioning)
+    merged_ats = {}
+    merged_ats.update(ats_settings)
+    study, selection = run["study"], run["selection"]
+    surface, deep = list(merged_pos.get("surface_receivers") or []), list(merged_pos.get("deep_receivers") or [])
+    receivers_3d = list(merged_pos.get("receivers_3d") or [])
     master_rec, _ = lp.master(db)
     if master_rec not in surface:
         raise SystemExit("master receiver %s must be in surface_receivers" % master_rec)
@@ -773,14 +930,20 @@ def build_context(args):
         raise SystemExit("no study tags with a pulse rate in %s" % db)
     work = lp.resolve_path(db.parent / ("%s_legacy" % db.stem))
     work.mkdir(parents=True, exist_ok=True)
-    deng = deep + ([r for r in receivers_3d if r in surface and r != master_rec] if legacy.get("deng_surface", False) else [])  # static only; CFD floats never targets
+    deng = deep + ([r for r in receivers_3d if r in surface and r != master_rec]
+                   if merged_pos.get("deng_surface", False) else [])  # static only; CFD floats never targets
     deng_tags = {r: lp.query(db, "select Tag_ID from tblReceiver where Rec_ID = ?", (r,)).Tag_ID.iloc[0] for r in deng}
     drag_plots = not getattr(args, "no_drag_plots", False)
     return SimpleNamespace(run=run, paths=paths, db=db, work=work, surface=surface, deep=deep, receivers_3d=receivers_3d,
-                           receivers_2d=list(legacy.get("receivers_2d") or []), fixed_z_2d=dict(legacy.get("fixed_z_2d_by_tag") or {}),
+                           receivers_2d=list(merged_pos.get("receivers_2d") or []),
+                           fixed_z_2d=dict(merged_pos.get("fixed_z_2d_by_tag") or {}),
                            review=lp.REPO / "output" / "2025_review" / db.stem,
-                           reference=[r for r in receivers_3d if r not in deep], reference_2d=[r for r in (legacy.get("receivers_2d") or receivers_3d) if r not in deep], tags=tags, deng=deng, deng_tags=deng_tags,
-                           window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]), drag_plots=drag_plots)
+                           reference=[r for r in receivers_3d if r not in deep],
+                           reference_2d=[r for r in (merged_pos.get("receivers_2d") or receivers_3d) if r not in deep],
+                           tags=tags, deng=deng, deng_tags=deng_tags,
+                           window_start=str(study["synch_time_start"]), window_end=str(study["synch_time_end"]),
+                           drag_plots=drag_plots,
+                           _positioning=merged_pos, _ats=merged_ats)
 
 
 def init_whatif(source, target, swaps):

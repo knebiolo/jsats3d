@@ -75,40 +75,6 @@ RECEIVER_METADATA_COLUMNS = {
 }
 
 
-def parse_args():
-    root = r"K:\Jobs\5662\001\Data\DataTrans\2025_Data"
-    detection_dir = os.path.join(
-        root, "CowlitzAT2025_Data_Deliverables", "2_AT_detection_datasets"
-    )
-    default_output = os.path.join(root, "jsats3d_2025_staging.db")
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--detection-dir", default=detection_dir)
-    parser.add_argument("--output-db", default=default_output)
-    parser.add_argument("--chunksize", type=int, default=250_000)
-    parser.add_argument("--tag", help="Only stage one tag code")
-    parser.add_argument("--tags", nargs="+", help="Stage multiple tag codes")
-    parser.add_argument(
-        "--beacon-window",
-        nargs=2,
-        metavar=("START", "END"),
-        help="Stage configured local beacon detections in this datetime window",
-    )
-    parser.add_argument(
-        "--drop-incomplete-receivers",
-        action="store_true",
-        help="Exclude receivers missing beacon Tag_ID or complete X/Y/Z geometry",
-    )
-    parser.add_argument("--config-xlsx", default=os.path.join(root, "CowlitzAT2025_Data_Deliverables", "1_array_metadata", "cowlitz_2025_AT_config.xlsx"))
-    parser.add_argument("--covariate-csv", default=os.path.join(root, "Master Covariate Table", "2025 Master Covariate Table_20251212.csv"))
-    parser.add_argument("--temperature-csv", default=os.path.join(root, "Temperature", "2025_Temp_String_Data_5min_interpolated.csv"))
-    parser.add_argument("--hobo-dir", default=os.path.join(root, "Tag Drag Period", "DD_N"))
-    parser.add_argument(
-        "--files",
-        nargs="+",
-        default=["master_df_test.csv", "master_df_study.csv", "master_df_beacon.csv", "master_df_unknown.csv"],
-    )
-    return parser.parse_args()
-
 
 def load_receiver_table(gps_path, config_path):
     gps = pd.read_csv(gps_path, usecols=["receiverName", "easting", "northing"])
@@ -289,12 +255,16 @@ def drop_incomplete_receivers(receiver_table):
     return kept, pd.DataFrame(dropped_rows, columns=["Rec_ID", "reason"])
 
 
-def apply_tag_pulse_rates(tags, beacon_registry, ffd3_rate=3.33):
+def apply_tag_pulse_rates(tags, beacon_registry, ffd3_rate=3.33, db_path=None):
     result = tags.merge(beacon_registry[["Tag_ID", "pulseRate"]], on="Tag_ID", how="left")
     result["pulseRate"] = pd.to_numeric(result["pulseRate"], errors="coerce")
     result.loc[result["Tag_ID"] == "FFD3", "pulseRate"] = ffd3_rate
     for tag, rate in PROVISIONAL_STUDY_PULSE_RATES.items():
         result.loc[(result["Tag_ID"] == tag) & result["pulseRate"].isna(), "pulseRate"] = rate
+    # Tags still missing a rate after config + provisional values — log a warning.
+    missing = result[result["pulseRate"].isna()]["Tag_ID"].tolist()
+    if missing:
+        print("WARNING: tags with no pulseRate (check [study] pulse_rates in run file): %s" % missing)
     return result
 
 

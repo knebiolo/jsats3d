@@ -432,7 +432,7 @@ def _parse_worker(task, tags=None, start=None, end=None):
 
 
 
-def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers, temperature_csv, hobo_dir):
+def write_legacy_metadata(connection, config_path, gps_path, covariate_path, receivers, temperature_csv, hobo_dir, db_path):
     receiver_table = load_receiver_table(gps_path, config_path)
     receiver_table = receiver_table[receiver_table["Rec_ID"].isin(receivers)]
     receiver_gps = load_receiver_gps(gps_path, receiver_table)
@@ -444,7 +444,7 @@ def write_legacy_metadata(connection, config_path, gps_path, covariate_path, rec
     beacon_registry = load_beacon_registry(config_path)
     raw_tags = pd.read_sql("select distinct Tag_ID from tblDetectionRaw", connection)
     raw_tags["TagType"] = tag_types(raw_tags["Tag_ID"], beacon_registry)
-    raw_tags = apply_tag_pulse_rates(raw_tags, beacon_registry)
+    raw_tags = apply_tag_pulse_rates(raw_tags, beacon_registry, db_path=db_path)
     raw_tags.to_sql("tblTag", connection, if_exists="replace", index=False)
     print("Created tblTag: %s rows" % len(raw_tags))
     missing_rate = raw_tags[raw_tags.pulseRate.isna()].Tag_ID.tolist()
@@ -509,7 +509,15 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
+    # Delete stale WAL/SHM files from any previous run.
+    for suffix in ("-wal", "-shm"):
+        p = output.with_name(output.name + suffix)
+        if p.exists():
+            p.unlink()
     connection = sqlite3.connect(output)
+    # D: Fast SQLite settings for ATS parsing — default journal + no sync + 1 GB cache.
+    connection.execute("PRAGMA synchronous = OFF")
+    connection.execute("PRAGMA cache_size = -1000000")  # ~1 GB
     connection.execute(
         "CREATE TABLE tblDetectionRaw (%s)" % ", ".join(DETECTION_DB_COLUMNS)
     )
@@ -562,6 +570,7 @@ def main():
                 set(targets["Receiver Name"]),
                 args.temperature_csv or str(data_root / "Temperature" / "2025_Temp_String_Data_5min_interpolated.csv"),
                 args.hobo_dir or str(data_root / "Tag Drag Period" / "DD_N"),
+                str(output),
             )
         connection.commit()
     finally:
