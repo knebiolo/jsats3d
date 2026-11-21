@@ -826,8 +826,9 @@ def positions_dbscan_run(c):
     accel_scale = float(pos_cfg.get("dbscan_accel_scale", 5.0))
     depth_weight = float(pos_cfg.get("dbscan_depth_weight", 1.0))
     gap_s = float(pos_cfg.get("dbscan_accel_gap_s", 12.0))
-    pos = lp.query(c.db, "select * from tblPositions_Deng where comment = 'solution found'")
-    root = pos[pos.solution == "B"]
+    # Only the columns the screen needs (the full table can hold tens of millions of rows - 100-fish run MemoryError).
+    root = lp.query(c.db, "select Tag_ID, transNo, X, Y, Z, ToA, T01 from tblPositions_Deng "
+                          "where comment = 'solution found' and solution = 'B'")
     if mode == "acceleration":
         if "T01" not in root:
             raise ValueError("acceleration mode needs T01 in tblPositions_Deng")
@@ -850,9 +851,17 @@ def positions_dbscan_run(c):
         labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(features)
         kept_trans = set(ping.index[labels != -1])
         notes[tag] = {"mode": mode, "transmissions": int(len(ping)), "kept": int(len(kept_trans)), "eps_m": eps, "min_samples": min_samples}
-        kept.append(pos[(pos.Tag_ID == tag) & pos.transNo.isin(kept_trans)])
+        kept.extend((tag, float(t)) for t in kept_trans)
+    del root
+    # Copy every 'solution found' row (both roots, all columns) of the kept transmissions inside SQLite.
     con = sqlite3.connect(c.db)
-    pd.concat(kept).to_sql("tblPositions_DengDBSCAN", con, if_exists="replace", index=False)
+    con.execute("drop table if exists temp.dbscan_kept")
+    con.execute("create temp table dbscan_kept (Tag_ID TEXT, transNo REAL, primary key (Tag_ID, transNo))")
+    con.executemany("insert into temp.dbscan_kept values (?, ?)", kept)
+    con.execute("drop table if exists tblPositions_DengDBSCAN")
+    con.execute("create table tblPositions_DengDBSCAN as select p.* from tblPositions_Deng p "
+                "join temp.dbscan_kept k on p.Tag_ID = k.Tag_ID and cast(p.transNo as real) = k.transNo "
+                "where p.comment = 'solution found'")
     con.commit()
     con.close()
     return notes
@@ -926,6 +935,10 @@ def build_context(args):
         raise SystemExit("master receiver %s must be in surface_receivers" % master_rec)
     study_tags = lp.query(db, "select Tag_ID from tblTag where TagType = 'study' and pulseRate is not null").Tag_ID.tolist()
     tags = [t for t in (selection.get("tags") or study_tags) if t in study_tags]
+    no_rate = [t for t in (selection.get("tags") or []) if t not in study_tags]
+    if no_rate:
+        print("WARNING: %d selected tag(s) skipped - no pulse rate (run file, workbook or calculated from the data): %s"
+              % (len(no_rate), no_rate), flush=True)
     if not tags:
         raise SystemExit("no study tags with a pulse rate in %s" % db)
     work = lp.resolve_path(db.parent / ("%s_legacy" % db.stem))

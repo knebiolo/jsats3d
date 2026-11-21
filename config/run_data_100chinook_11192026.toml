@@ -55,11 +55,13 @@ run               = true
 run_2025_pipeline = true   # true = use _2025_pipeline.py, false = use legacy_pipeline.py
 env               = 'jsat_legacy'
 method            = 'KNN'
-surface_receivers = ['ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10', 'ZOI11',
-                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+surface_receivers = ['ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10', 'ZOI11',
+                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
 deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
-receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
-                     'ZOI11', 'CFD01']   # 2026-11-19: ZOI11 + CFD01 added (project lead); only change from the 10/29 run
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'ZOI11', 'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+# 2026-11-19 20:58 project lead: use ALL 20 receivers (surface = all non-deep; 3D = all). The 11-19 17:03 run of this
+# file used the earlier lists (surface without ZOI04/CFD05; 3D = ZOI01-03, ZOI05-11, CFD01) - see journal.
 receivers_2d      = []
 fixed_z_2d        = ''
 fixed_z_2d_by_tag = {}

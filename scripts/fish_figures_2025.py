@@ -333,7 +333,9 @@ def main():
     print("per-fish figures: %s" % ", ".join(p for p in FISH_PRODUCTS if p in products))
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
     rec = pd.read_sql("select Rec_ID, X_t, Y_t, Z_t from tblReceiver", con).set_index("Rec_ID")
-    p = pd.read_sql("select * from tblPositions_Deng where comment = 'solution found'", con)
+    # Root-B solved rows, only the columns the chain uses (full table can be tens of millions of rows).
+    p = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, ToA, T01, in_hull "
+                    "from tblPositions_Deng where comment = 'solution found' and solution = 'B'", con)
     p["t0"] = pd.to_numeric(p.ToA, errors="coerce") - pd.to_numeric(p.T01, errors="coerce")
     for c in ("X", "Y", "Z", "t0"):
         p[c] = pd.to_numeric(p[c], errors="coerce")
