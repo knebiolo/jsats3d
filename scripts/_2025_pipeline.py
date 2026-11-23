@@ -476,16 +476,87 @@ def positions_done(c):
     return n > 0
 
 
+OUTSIDE_ARRAY = "outside receiver array - rejected"
+
+
+def deng_settings(c):
+    """[positioning] options for step 11 (all off by default = legacy behaviour):
+    deng_max_receivers  – > 0: solve each transmission with only its N earliest-arriving receivers (fewer receiver
+                          combinations; 20 receivers give up to 4,845 per ping, 8 give 70)
+    deng_keep_deep      – with the cap, if none of the N heard first is deep, swap the Nth for the earliest deep
+                          receiver that heard the ping (default true; shallow-only sets give poor Z)
+    deng_hull_filter    – reject solutions more than deng_hull_margin_m (XY) outside the 3D receiver hull
+                          (comment OUTSIDE_ARRAY; poor-geometry extrapolations)"""
+    p = c._positioning
+    return {"max_receivers": int(p.get("deng_max_receivers", 0) or 0),
+            "keep_deep": bool(p.get("deng_keep_deep", True)),
+            "hull_filter": bool(p.get("deng_hull_filter", False)),
+            "hull_margin_m": float(p.get("deng_hull_margin_m", 5.0))}
+
+
+def cap_receivers(tag_data, max_receivers, deep=()):
+    """Keep each transmission's max_receivers earliest detections (by seconds_fix). With deep receivers given, a
+    transmission whose kept set has none gets its latest kept detection replaced by its earliest deep detection.
+    Returns (capped frame, number of transmissions given a deep receiver)."""
+    df = tag_data.sort_values("seconds_fix", kind="stable")
+    rank = df.groupby("transNo").cumcount()
+    keep, late = df[rank < max_receivers], df[rank >= max_receivers]
+    swapped = 0
+    if len(deep) and len(late):
+        has_deep = keep.Rec_ID.isin(deep).groupby(keep.transNo).any()
+        add = late[late.transNo.isin(has_deep.index[~has_deep]) & late.Rec_ID.isin(deep)].drop_duplicates("transNo")
+        if len(add):
+            drop = keep.index[keep.transNo.isin(add.transNo) & (rank.loc[keep.index] == max_receivers - 1)]
+            keep = pd.concat([keep.drop(drop), add]).sort_values("seconds_fix", kind="stable")
+            swapped = len(add)
+    return keep.reset_index(drop=True), swapped
+
+
+def reject_outside_hull(out, tag, hull_eq, margin_m):
+    """Mark solved rows of the tag's Deng CSVs more than margin_m (XY) outside the hull; returns rows rejected."""
+    rejected = 0
+    for root in ("A", "B"):
+        f = Path(out) / ("%s_solution%s.csv" % (tag, root))
+        if not f.exists():
+            continue
+        d = pd.read_csv(f, index_col=0, dtype=str, keep_default_na=False)
+        found = d.comment == "solution found"
+        xy = d.loc[found, ["X", "Y"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        bad = ~(np.max(xy @ hull_eq[:, :2].T + hull_eq[:, 2], axis=1) <= margin_m)
+        d.loc[d.index[found][bad], "comment"] = OUTSIDE_ARRAY
+        d.to_csv(f)
+        rejected += int(bad.sum())
+    return rejected
+
+
 def positions_run(c):
     """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
     out = Path(lp.fresh_folder(c.work / "positions"))
-    notes = {}
+    s = deng_settings(c)
+    print("DENG options: %s" % s, flush=True)
+    hull_eq = None
+    if s["hull_filter"]:
+        from scipy.spatial import ConvexHull
+        rec = lp.query(c.db, "select Rec_ID, X_t, Y_t from tblReceiver").set_index("Rec_ID")
+        hull_eq = ConvexHull(rec.loc[c.receivers_3d, ["X_t", "Y_t"]].astype(float).to_numpy()).equations
+    notes = {"settings": s}
     for tag in c.tags:
-        pos = lp.deng(c.db, tag, c.receivers_3d, out, c.work / "figures")
-        if pos is None:
+        pos = jsats3d.position(tag, c.receivers_3d, str(c.db), str(out), str(c.work / "figures"))
+        if pos.tag_data.empty:
             raise RuntimeError("check failed: no filtered detections for %s" % tag)
-        notes[tag] = {"A_found": int((pos.DengSolutionA_unfiltered.comment == "solution found").sum()),
-                      "B_found": int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())}
+        note = {}
+        if s["max_receivers"] > 0:
+            pos.tag_data, note["deep_swapped"] = cap_receivers(pos.tag_data, s["max_receivers"],
+                                                               c.deep if s["keep_deep"] else ())
+        t = time.time()
+        pos.Deng()
+        note["deng_s"] = round(time.time() - t, 1)
+        note["A_found"] = int((pos.DengSolutionA_unfiltered.comment == "solution found").sum())
+        note["B_found"] = int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())
+        if hull_eq is not None:
+            note["outside_array"] = reject_outside_hull(out, tag, hull_eq, s["hull_margin_m"])
+        print("DENG %s: %s" % (tag, note), flush=True)
+        notes[tag] = note
     if not any(out.glob("*.csv")):
         raise RuntimeError("check failed: Deng wrote no position files")
     return notes

@@ -75,6 +75,12 @@ premedian_box_z_top_m  = 0.0
 premedian_box_z_pad_m  = 3.0
 premedian_radius_m     = 12.0
 premedian_min_sets     = 2
+# 2026-11-20 22:35 project lead: cap each ping at its 8 earliest receivers (earliest deep swapped in when none of the
+# 8 is deep) and reject solutions > 5 m outside the 20-receiver hull (cap8_test: 46-295 s per tag vs hours uncapped).
+deng_max_receivers     = 8
+deng_keep_deep         = true
+deng_hull_filter       = true
+deng_hull_margin_m     = 5.0
 work_dir          = ''
 
 [legacy_pipeline]
