@@ -233,19 +233,21 @@ def metronome(db, tag, work, method):
     index_table(db, "tblMetronomeSecondFiltered", "idx_metronome_second_rec_tag_seconds", ("Rec_ID", "Tag_ID", "seconds"))
 
 
-def clock_fix(db, receivers, work):
+def clock_fix(db, receivers, work, *, segmented_clock_dbscan=False):
     """clock_fix_serial.py for every receiver in the list, then load tblDetectionClockFixed."""
     scratch = fresh_folder(work / "clock_fix_scratch")
     figures = work / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     for rec in receivers:
         print("Clock fix: receiver %s" % rec)
-        jsats3d.clock_fix(jsats3d.clock_fix_object(rec, receivers, str(db), scratch, str(figures)))
+        clock = jsats3d.clock_fix_object(rec, receivers, str(db), scratch, str(figures))
+        clock.segmented_clock_dbscan = segmented_clock_dbscan
+        jsats3d.clock_fix(clock)
     widen_table(db, "tblDetectionClockFixed", scratch)
     jsats3d.epoch_fix_data_management(scratch, str(db))
 
 
-def clock_fix_check(db, receivers):
+def clock_fix_check(db, receivers, *, segmented_clock_dbscan=False):
     """Run clock fix only when it cannot append over existing clock-fixed results."""
     tables = query(db, "select name from sqlite_master where type = 'table'").name.tolist()
     if "tblDetectionClockFixed" in tables:
@@ -254,7 +256,7 @@ def clock_fix_check(db, receivers):
     selected = list(dict.fromkeys([master_rec] + receivers))
     print("Clock-fix check: master %s (beacon %s); receivers %s" % (master_rec, master_tag, selected))
     with tempfile.TemporaryDirectory(prefix="jsats3d_clock_fix_") as temporary:
-        clock_fix(db, selected, Path(temporary))
+        clock_fix(db, selected, Path(temporary), segmented_clock_dbscan=segmented_clock_dbscan)
     if "tblDetectionClockFixed" not in query(db, "select name from sqlite_master where type = 'table'").name.tolist():
         print("tblDetectionClockFixed was not created")
         return

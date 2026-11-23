@@ -196,7 +196,8 @@ def clock_surface_done(c):
 
 def clock_surface_run(c):
     """Step 4: surface clock fix against the master beacon (config positions)."""
-    lp.clock_fix_check(c.db, c.surface)
+    lp.clock_fix_check(c.db, c.surface,
+                       segmented_clock_dbscan=bool(c._ats.get("segmented_clock_dbscan", False)))
     n = need_rows(c.db, "tblDetectionClockFixed")
     missing = [r for r in c.surface if count(c.db, "tblDetectionClockFixed", "where Rec_ID = ?", (r,)) == 0]
     return {"clock_fixed_rows": n, "surface_receivers_without_rows": missing}
@@ -358,7 +359,8 @@ def deep_clocks_run(c):
                 (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
     metronome_run(c)
     receivers = list(dict.fromkeys(c.surface + c.deep))
-    lp.clock_fix(c.db, receivers, c.work)
+    lp.clock_fix(c.db, receivers, c.work,
+                 segmented_clock_dbscan=bool(c._ats.get("segmented_clock_dbscan", False)))
     dup = int(lp.query(c.db, "select count(*) n from (select 1 from tblDetectionClockFixed group by Rec_ID, Tag_ID, seconds "
                               "having count(*) > 1)").n.iloc[0])
     if dup:
