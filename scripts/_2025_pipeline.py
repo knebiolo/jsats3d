@@ -190,17 +190,76 @@ def metronome_run(c):
             "tblMetronomeSecondFiltered": need_rows(c.db, "tblMetronomeSecondFiltered")}
 
 
+def clock_options(c):
+    """[ats_2025_pipeline] clock options passed to the legacy clock fix. segmented_clock_dbscan (default false = the
+    unchanged five-pass filter); clock_step_s (0.05 s, residual change that counts as a step; site specific) and
+    clock_jump_max_gap_s (600 s, longest beacon gap a midpoint hold may span) apply only when it is true."""
+    a = c._ats
+    return {"segmented_clock_dbscan": bool(a.get("segmented_clock_dbscan", False)),
+            "clock_step_s": float(a.get("clock_step_s", jsats3d.CLOCK_STEP_S)),
+            "clock_jump_max_gap_s": float(a.get("clock_jump_max_gap_s", jsats3d.CLOCK_JUMP_MAX_GAP_S))}
+
+
+def annotate_clock_segments(c):
+    """Evidence for each segmented-clock step (tblClockSegments, step boundaries only):
+    internal_event - the receiver logged OffsetChanged/CounterRestart (tblDetectionRaw) between the last pre-step and
+                     first post-step beacon observation (+/- one beacon period); NULL when the columns are absent
+    cross_receiver_steps - other receivers with a step whose interval overlaps (a master-clock step shows on all)."""
+    if "tblClockSegments" not in table_names(c.db):
+        return {}
+    con = sqlite3.connect(c.db)
+    try:
+        seg = pd.read_sql("select rowid rid, * from tblClockSegments", con)
+        period = float(pd.read_sql("select pulseRate from tblTag where Tag_ID = (select Tag_ID from tblReceiver "
+                                   "where Rec_ID = (select masterReceiver from tblStudyParameters))", con).pulseRate.iloc[0])
+        raw_cols = {r[1] for r in con.execute("pragma table_info(tblDetectionRaw)")}
+        flags = [col for col in ("OffsetChanged", "CounterRestart") if col in raw_cols]
+        events = (pd.read_sql("select Rec_ID, seconds from tblDetectionRaw where %s" %
+                              " or ".join("%s = 1" % col for col in flags), con) if flags else None)
+        steps = seg[seg.boundary_before.isin(["step", "step_outage"])].copy()
+        steps["lo"] = steps.first_obs - steps.gap_before_s
+        steps["hi"] = steps.first_obs
+        internal, cross = {}, {}
+        for row in steps.itertuples():
+            others = steps[(steps.Rec_ID != row.Rec_ID) & (steps.lo <= row.hi) & (steps.hi >= row.lo)]
+            cross[row.rid] = int(others.Rec_ID.nunique())
+            if events is not None:
+                e = events[(events.Rec_ID == row.Rec_ID) & (events.seconds >= row.lo - period) &
+                           (events.seconds <= row.hi + period)]
+                internal[row.rid] = int(len(e) > 0)
+        cols = {r[1] for r in con.execute("pragma table_info(tblClockSegments)")}
+        for col in ("internal_event", "cross_receiver_steps"):
+            if col not in cols:
+                con.execute('alter table tblClockSegments add column "%s"' % col)
+        con.executemany("update tblClockSegments set cross_receiver_steps = ?, internal_event = ? where rowid = ?",
+                        [(cross[r], internal.get(r), int(r)) for r in cross])
+        con.commit()
+    finally:
+        con.close()
+    lev = seg[seg.method != "isolated_multipath"]
+    return {"segments": int(len(lev)), "steps_held": int((seg.boundary_before == "step").sum()),
+            "steps_beyond_max_gap": int((seg.boundary_before == "step_outage").sum()),
+            "isolated_multipath_removed": int((seg.method == "isolated_multipath").sum()),
+            "fallback_linear": int((lev.method == "linear").sum()), "fallback_constant": int((lev.method == "constant").sum()),
+            "unsupported": int((lev.method == "none").sum()),
+            "steps_with_internal_event": int(sum(v for v in internal.values() if v)),
+            "steps_seen_on_other_receivers": int(sum(1 for v in cross.values() if v))}
+
+
 def clock_surface_done(c):
     return count(c.db, "tblDetectionClockFixed") > 0
 
 
 def clock_surface_run(c):
     """Step 4: surface clock fix against the master beacon (config positions)."""
-    lp.clock_fix_check(c.db, c.surface,
-                       segmented_clock_dbscan=bool(c._ats.get("segmented_clock_dbscan", False)))
+    opts = clock_options(c)
+    lp.clock_fix_check(c.db, c.surface, **opts)
     n = need_rows(c.db, "tblDetectionClockFixed")
     missing = [r for r in c.surface if count(c.db, "tblDetectionClockFixed", "where Rec_ID = ?", (r,)) == 0]
-    return {"clock_fixed_rows": n, "surface_receivers_without_rows": missing}
+    notes = {"clock_fixed_rows": n, "surface_receivers_without_rows": missing}
+    if opts["segmented_clock_dbscan"]:
+        notes["clock_segments"] = annotate_clock_segments(c)
+    return notes
 
 
 def deep_beacons_done(c):
@@ -359,8 +418,7 @@ def deep_clocks_run(c):
                 (c.review / ("item12_pipeline3d_3D_legacy_B_%s_%s%s.png" % (line, tag, suffix))).unlink(missing_ok=True)
     metronome_run(c)
     receivers = list(dict.fromkeys(c.surface + c.deep))
-    lp.clock_fix(c.db, receivers, c.work,
-                 segmented_clock_dbscan=bool(c._ats.get("segmented_clock_dbscan", False)))
+    lp.clock_fix(c.db, receivers, c.work, **clock_options(c))
     dup = int(lp.query(c.db, "select count(*) n from (select 1 from tblDetectionClockFixed group by Rec_ID, Tag_ID, seconds "
                               "having count(*) > 1)").n.iloc[0])
     if dup:
@@ -378,6 +436,8 @@ def deep_clocks_run(c):
                       "drift_us_per_s": round(float(slope) * 1e6, 3),
                       "rms_about_line_ms": round(float(np.sqrt(np.mean((corr - (slope * t0 + icpt)) ** 2))) * 1e3, 3),
                       "steps_over_1ms": int((steps > 1e-3).sum()), "largest_step_ms": round(float(steps.max()) * 1e3, 1)}
+    if clock_options(c)["segmented_clock_dbscan"]:
+        notes["clock_segments"] = annotate_clock_segments(c)
     lp.mark_done(c.db, "__ats_phase2__")
     return notes
 
@@ -531,6 +591,40 @@ def reject_outside_hull(out, tag, hull_eq, margin_m):
     return rejected
 
 
+CLOCK_FLAG_COLUMNS = ("clock_low_support", "clock_low_support_receivers", "clock_min_support")
+
+
+def flag_clock_support(out, tag, tag_data, min_support=None):
+    """Segmented-clock flag on every Deng row (both roots) of the tag: clock_low_support = 1 when a receiver of the
+    row's combination (r0-r3) had a clock segment with fewer than min_support beacon observations at that
+    transmission; clock_low_support_receivers lists them (';'); clock_min_support is the smallest support of the
+    four. Rows are kept (downstream filters may exclude flagged rows explicitly). Returns flagged root-B rows."""
+    min_support = jsats3d.CLOCK_MIN_SUPPORT if min_support is None else min_support
+    td = tag_data.dropna(subset=["transNo"])
+    td = td.assign(clock_support=pd.to_numeric(td.clock_support, errors="coerce"))
+    sup = td.assign(key=td.transNo.astype(float).round().astype(int).astype(str) + "|" + td.Rec_ID.astype(str)) \
+        .groupby("key").clock_support.min()
+    flagged = 0
+    for root in ("A", "B"):
+        f = Path(out) / ("%s_solution%s.csv" % (tag, root))
+        if not f.exists():
+            continue
+        d = pd.read_csv(f, index_col=0, dtype=str, keep_default_na=False)
+        trans = pd.to_numeric(d.transNo, errors="coerce").round()
+        prefix = trans.map(lambda t: "%d" % t if np.isfinite(t) else "nan") + "|"
+        recs = d[["r0", "r1", "r2", "r3"]].astype(str)
+        s = np.column_stack([(prefix + recs[col]).map(sup).astype(float).to_numpy() for col in recs.columns])
+        low = np.nan_to_num(s, nan=np.inf) < min_support
+        d["clock_low_support"] = low.any(axis=1).astype(int)
+        d["clock_low_support_receivers"] = [";".join(sorted(set(r[l]))) for r, l in zip(recs.to_numpy(), low)]
+        mins = np.where(np.isfinite(s).any(axis=1), np.nanmin(np.where(np.isfinite(s), s, np.inf), axis=1), np.nan)
+        d["clock_min_support"] = pd.Series(mins, index=d.index).map(lambda v: "" if np.isnan(v) else "%d" % v)
+        d.to_csv(f)
+        if root == "B":
+            flagged = int(((d.comment == "solution found") & (d.clock_low_support == 1)).sum())
+    return flagged
+
+
 def positions_run(c):
     """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
     out = Path(lp.fresh_folder(c.work / "positions"))
@@ -557,6 +651,8 @@ def positions_run(c):
         note["B_found"] = int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())
         if hull_eq is not None:
             note["outside_array"] = reject_outside_hull(out, tag, hull_eq, s["hull_margin_m"])
+        if "clock_support" in pos.tag_data.columns:
+            note["clock_low_support_B"] = flag_clock_support(out, tag, pos.tag_data)
         print("DENG %s: %s" % (tag, note), flush=True)
         notes[tag] = note
     if not any(out.glob("*.csv")):

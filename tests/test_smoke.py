@@ -43,14 +43,15 @@ class TestSegmentedClockExperiment(unittest.TestCase):
         import numpy as np
         import pandas as pd
         from jsats3d.jsats3d import _segmented_clock_dbscan, _interpolate_clock_segments
+        # multi-step resync 0 -> 1 -> 0.5 (a one-knot excursion back to the same level is isolated multipath instead)
         observations = pd.DataFrame({"seconds": [0, 60, 120, 180, 240, 300, 600, 660, 720],
-                                     "ToA_error": [0, 0, 0, 1, 0, 0, 0, 0, 0],
-                                     "DDoA": [0, 0, 0, 1500, 0, 0, 0, 0, 0]})
+                                     "ToA_error": [0, 0, 0, 1, 0.5, 0.5, 0.5, 0.5, 0.5]})
+        observations["DDoA"] = observations.ToA_error * 1500
         result = _segmented_clock_dbscan(observations, 60)
         self.assertEqual(result.seconds.tolist(), observations.seconds.tolist())
         result["seconds_residual"] = result.ToA_error
         corrected = _interpolate_clock_segments(result, np.array([149, 150, 180, 209, 210, 450]))
-        np.testing.assert_allclose(corrected, [0, 1, 1, 1, 0, np.nan], equal_nan=True)
+        np.testing.assert_allclose(corrected, [0, 1, 1, 1, 0.5, np.nan], equal_nan=True)
 
     def test_multi_point_segment_keeps_linear_interpolation(self):
         import numpy as np

@@ -4,16 +4,27 @@ jsats3d was developed by Kleinschmidt to assist researchers with cleaning and ma
 
 Just open up the Project Notebook and get started
 
-For a local 2025 clock-filter experiment, set `segmented_clock_dbscan = true` in
-`[ats_2025_pipeline]`. This splits the observed beacon residual curve at changes
-of at least 50 ms or gaps longer than three beacon periods, then applies one
-DBSCAN pass per segment with the actual final timestamp included. Segments with
-one or two knots are reported and retained without density screening. Within
-multi-point segments, fish clock corrections retain linear interpolation. At a
-jump, endpoint residuals are held constant up to the midpoint between the last
-pre-jump and first post-jump beacon observations; a single-knot segment uses a
-constant residual only over its estimated segment. These midpoint jump times
-are assumptions, not measured events. Gaps without a measured residual step
-remain unsupported and are reported and excluded. The option is experimental and defaults to
-false, preserving the existing five-pass 2019/2025 behavior. Use a separate
-database and regenerate clock-fixed and downstream results when changing it.
+For the 2025 step-aware clock filter, set `segmented_clock_dbscan = true` in
+`[ats_2025_pipeline]` (default false keeps the existing five-pass 2019/2025
+behavior). The beacon residual curve is split at changes of at least
+`clock_step_s` (0.05 s, a Cowlitz 2025 starting point, not a universal
+threshold) or gaps longer than three beacon periods, after removing isolated
+multipath (a one- or two-observation excursion that returns to the same level).
+DBSCAN (`min_samples = 3`) runs once per segment with the actual final timestamp
+included. Within multi-point segments fish corrections use linear interpolation.
+At a step whose beacon gap is at most `clock_jump_max_gap_s` (600 s), each side
+holds its endpoint residual to the midpoint between the last pre-step and first
+post-step observation; these midpoint jump times are estimates, not measured
+events. Segment support: three or more retained beacon observations is normal;
+two (linear) or one (constant) is accepted only next to such a step; anything
+else is unsupported, and fish detections in unsupported time, outages and steps
+across longer gaps are excluded rather than bridged. `tblClockSegments` records
+every segment's support, boundaries, fallback method, whether its boundaries are
+estimated, and step evidence (receiver internal events, steps on other receivers).
+Deng rows whose receiver combination uses a segment with fewer than three
+observations get `clock_low_support`, `clock_low_support_receivers` and
+`clock_min_support`; the flags carry through export, position DBSCAN, the
+per-transmission consensus and `fish_positions.csv`. Flagged positions are kept.
+Use a separate database and regenerate clock-fixed and downstream results when
+changing the option. `tests/clock_segment_comparison.py` compares a baseline and a
+segmented copy of one build.
