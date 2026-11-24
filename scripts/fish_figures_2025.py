@@ -113,10 +113,6 @@ STATUS_FEW = "too few receivers"          # < 4 of the positioning receivers hea
 STATUS_FAILED = "solver failed"           # no root-B Deng solution
 STATUS_OUT = "out of water"               # every solution above the surface (Z > 0) or below the depth floor
 STATUS_DISAGREE = "solutions disagree"    # in-water solutions, but < 2 receiver sets within 10 m (consensus)
-# Segmented-clock runs ([ats_2025_pipeline] segmented_clock_dbscan): per-position flag aggregated over the
-# solutions in the consensus (a receiver used had a clock segment with < 3 beacon observations). Appended only when
-# tblPositions_Deng carries them; flagged positions are kept.
-CLOCK_FLAG_COLUMNS = ("clock_low_support", "clock_low_support_receivers", "clock_min_support")
 
 
 def write_fish_positions(con, out, tags, consensus, floor_m):
@@ -158,8 +154,7 @@ def write_fish_positions(con, out, tags, consensus, floor_m):
         d = det[det.Tag_ID == tag][["transNo", "t_first", "n_receivers", "n3d", "n_found", "n_wet"]].copy()
         g = consensus.get(tag)
         cols = ["transNo", "t0", "x", "y", "z", "x_std", "y_std", "z_std", "n_combinations"]
-        flags = [c for c in CLOCK_FLAG_COLUMNS if g is not None and c in g.columns]
-        g = g[cols + flags].copy() if g is not None and len(g) else pd.DataFrame(columns=cols)
+        g = g[cols].copy() if g is not None and len(g) else pd.DataFrame(columns=cols)
         g["transNo"] = pd.to_numeric(g.transNo).round(0)
         missing = set(g.transNo) - set(d.transNo)
         if missing:
@@ -176,7 +171,7 @@ def write_fish_positions(con, out, tags, consensus, floor_m):
             in3[pos] = hull3.find_simplex(xyz3) >= 0
         status = np.select([pos.to_numpy(), (m.n3d < 4).to_numpy(), (m.n_found == 0).to_numpy(), (m.n_wet == 0).to_numpy()],
                            [STATUS_POSITIONED, STATUS_FEW, STATUS_FAILED, STATUS_OUT], default=STATUS_DISAGREE)
-        frame = pd.DataFrame({
+        frames.append(pd.DataFrame({
             "AT_code": tag,
             "datetime_utc": pd.to_datetime(t, unit="s", utc=True).strftime("%Y-%m-%dT%H:%M:%S.%f").str[:-3] + "+00:00",
             "x_m": m.x.astype(float).round(3), "y_m": m.y.astype(float).round(3), "z_m": m.z.astype(float).round(3),
@@ -185,15 +180,11 @@ def write_fish_positions(con, out, tags, consensus, floor_m):
             "n_solutions": m.n_combinations.fillna(0).astype(int),
             "in_convexhull": in2, "in_3Darea": in3,
             "n_receivers": m.n_receivers.astype(int), "status": status,
-            "_t": t})
-        for col in flags:
-            frame[col] = m[col].to_numpy()
-        frames.append(frame)
+            "_t": t}))
         print("  %s: %d epochs heard, %d positioned; %s" % (tag, len(m), int(pos.sum()),
               ", ".join("%s %d" % (k, v) for k, v in pd.Series(status).value_counts().items() if k != STATUS_POSITIONED)))
     table = pd.concat(frames, ignore_index=True).sort_values(["AT_code", "_t"]).drop(columns="_t")
-    extra = [c for c in CLOCK_FLAG_COLUMNS if c in table.columns]
-    table[OUTPUT_COLUMNS + extra].to_csv(out / OUTPUT_FILE, index=False)
+    table[OUTPUT_COLUMNS].to_csv(out / OUTPUT_FILE, index=False)
     print("wrote %s: %d rows (%d positioned) for %d tags; hull receivers: %s"
           % (OUTPUT_FILE, len(table), int(table.x_m.notna().sum()), len(tags), ", ".join(rec.index)))
     return table, list(rec.index)
@@ -343,11 +334,8 @@ def main():
     con = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True)
     rec = pd.read_sql("select Rec_ID, X_t, Y_t, Z_t from tblReceiver", con).set_index("Rec_ID")
     # Root-B solved rows, only the columns the chain uses (full table can be tens of millions of rows).
-    pos_cols = {r[1] for r in con.execute("pragma table_info(tblPositions_Deng)")}
-    flag_cols = [c for c in CLOCK_FLAG_COLUMNS if c in pos_cols]   # segmented-clock runs only
-    p = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, ToA, T01, in_hull%s "
-                    "from tblPositions_Deng where comment = 'solution found' and solution = 'B'"
-                    % "".join(", " + c for c in flag_cols), con)
+    p = pd.read_sql("select Tag_ID, transNo, solution, r0, r1, r2, r3, X, Y, Z, ToA, T01, in_hull "
+                    "from tblPositions_Deng where comment = 'solution found' and solution = 'B'", con)
     p["t0"] = pd.to_numeric(p.ToA, errors="coerce") - pd.to_numeric(p.T01, errors="coerce")
     for c in ("X", "Y", "Z", "t0"):
         p[c] = pd.to_numeric(p[c], errors="coerce")
@@ -424,8 +412,6 @@ def main():
                             z_min_m=round(float(gk.z.min()), 2), z_max_m=round(float(gk.z.max()), 2),
                             n_jumps_gt_3ms=int(len(jump_idx)),
                             jump_summary="; ".join(summary_parts)[:500]))
-        if "clock_low_support" in g.columns:
-            qc_rows[-1]["n_consensus_clock_low_support"] = int(g.clock_low_support.sum())
         print("  solutions=%d (above-surface dropped=%d, below-floor<%.2f m dropped=%d)  consensus=%d  smooth_rejected=%d  kalman=%d"
               % (len(raw), n_above, floor_m, n_below, len(g), n_rej, len(gk)))
         print("  span=%.1f h  first=%s (%.0f,%.0f)  last=%s (%.0f,%.0f)  max_v=%.2f m/s  jumps>%g m/s: %d  Z range [%.1f, %.1f] m"

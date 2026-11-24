@@ -90,19 +90,10 @@ def legacy_receiver_set_consensus(positions, radius_m=10.0, minimum_sets=2):
             continue
         med = nearby[["X", "Y", "Z", "t0"]].median()
         std = nearby[["X", "Y", "Z"]].std()
-        row = {"transNo": trans_no, "x": med.X, "y": med.Y, "z": med.Z, "t0": med.t0,
-               "x_std": std.X, "y_std": std.Y, "z_std": std.Z,
-               "receiver_sets": int(nearby.receiver_set.nunique()),
-               "candidate_sets": int(group.receiver_set.nunique()), "n_combinations": int(len(nearby))}
-        if "clock_low_support" in nearby.columns:
-            # segmented-clock flags, aggregated over the solutions that make this position only
-            low = pd.to_numeric(nearby.clock_low_support, errors="coerce").fillna(0) > 0
-            recs = sorted({r for v in nearby.clock_low_support_receivers[low].fillna("").astype(str)
-                           for r in v.split(";") if r})
-            row.update(clock_low_support=int(low.any()), clock_low_support_receivers=";".join(recs),
-                       clock_low_support_solutions=int(low.sum()),
-                       clock_min_support=pd.to_numeric(nearby.clock_min_support, errors="coerce").min())
-        accepted.append(row)
+        accepted.append({"transNo": trans_no, "x": med.X, "y": med.Y, "z": med.Z, "t0": med.t0,
+                         "x_std": std.X, "y_std": std.Y, "z_std": std.Z,
+                         "receiver_sets": int(nearby.receiver_set.nunique()),
+                         "candidate_sets": int(group.receiver_set.nunique()), "n_combinations": int(len(nearby))})
     return pd.DataFrame(accepted).sort_values("t0").reset_index(drop=True) if accepted else pd.DataFrame()
 
 

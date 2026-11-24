@@ -335,8 +335,7 @@ class multipath_data_object():
                 if 'tblDetectionClockFixed' in clk_tables:
                     clock_columns = {r[1] for r in conn.execute("pragma table_info(tblDetectionClockFixed)")}
                     segment_column = "".join(", " + name for name in
-                                             ("clock_segment", "clock_segment_start", "clock_segment_end",
-                                              "clock_segment_support")
+                                             ("clock_segment", "clock_segment_start", "clock_segment_end")
                                              if name in clock_columns)
                     clk = pd.read_sql(
                         "SELECT Rec_ID, seconds, seconds_residual%s FROM tblDetectionClockFixed" % segment_column, conn)
@@ -351,18 +350,14 @@ class multipath_data_object():
                                                    knots['seconds_residual'].to_numpy(float))
                     applied = 0
                     no_curve = set()
-                    if "clock_segment" in clk.columns:
-                        # segment support (beacon observations) per detection, for the low-support position flags
-                        self.data['clock_support'] = np.nan
                     for rec_id in self.data['Rec_ID'].unique():
                         mask = self.data['Rec_ID'] == rec_id
                         t = pd.to_numeric(self.data.loc[mask, 'seconds_fix'], errors='coerce')
                         if rec_id in clock_knots:
                             ts, rs = clock_knots[rec_id]
                             if "clock_segment" in clk.columns:
-                                corr, support = _interpolate_clock_segments(
-                                    clk[clk.Rec_ID == rec_id], t.to_numpy(float), return_support=True)
-                                self.data.loc[mask, 'clock_support'] = support
+                                corr = _interpolate_clock_segments(
+                                    clk[clk.Rec_ID == rec_id], t.to_numpy(float))
                                 invalid = ~np.isfinite(corr)
                                 if invalid.any():
                                     print("  WARNING: %s: excluding %d fish detections outside supported clock segments" %
@@ -922,16 +917,9 @@ def _clock_fix_interpolation_knots(receiver_dat, value_column):
     return receiver_dat.drop_duplicates("seconds", keep="first").sort_values("seconds")
 
 
-CLOCK_STEP_S = 0.05          # residual change treated as a clock step (Cowlitz 2025 starting point, site specific)
-CLOCK_JUMP_MAX_GAP_S = 600.0  # longest beacon gap a midpoint hold may span across a step
-CLOCK_MIN_SUPPORT = 3         # beacon observations for a normally supported clock segment
-
-
-def _interpolate_clock_segments(knots, times, return_support=False):
-    """Interpolate within levels and hold endpoints to estimated midpoint jump boundaries.
-    return_support: also return each time's segment support (retained beacon observations; NaN = no segment)."""
+def _interpolate_clock_segments(knots, times):
+    """Interpolate within levels and hold endpoints to estimated midpoint jump boundaries."""
     result = np.full(len(times), np.nan)
-    support = np.full(len(times), np.nan)
     for _, segment in knots.dropna(subset=["clock_segment"]).groupby("clock_segment"):
         segment = _clock_fix_interpolation_knots(segment, "seconds_residual")
         ts = segment.seconds.to_numpy(float)
@@ -943,122 +931,51 @@ def _interpolate_clock_segments(knots, times, return_support=False):
                 raise ValueError("clock segment boundaries do not contain its observations")
         mask = (times >= start) & (times <= end)
         result[mask] = np.interp(times[mask], ts, segment.seconds_residual.to_numpy(float))
-        if "clock_segment_support" in segment and segment.clock_segment_support.notna().any():
-            support[mask] = float(segment.clock_segment_support.iloc[0])
-        else:
-            support[mask] = len(ts)
-    return (result, support) if return_support else result
+    return result
 
 
-def _clock_level_groups(knots, step_s):
-    """Group consecutive knots into levels split at residual changes >= step_s."""
-    new = knots.ToA_error.diff().abs() >= step_s
-    return new.cumsum().to_numpy()
-
-
-def _drop_isolated_clock_spikes(knots, period, step_s, max_knots=2):
-    """Remove isolated multipath: a level of <= max_knots observations that steps away and back, i.e. the levels on
-    both sides agree within step_s and neither side is separated by an outage. A short level whose neighbours differ
-    (a multi-step resync, as 26E4 ZOI02 2025-06-28 01:03) is a real clock level and is kept."""
-    spikes = []
-    while True:
-        groups = _clock_level_groups(knots, step_s)
-        levels = [knots.iloc[np.flatnonzero(groups == g)] for g in np.unique(groups)]
-        drop = None
-        for k in range(1, len(levels) - 1):
-            prev, cur, nxt = levels[k - 1], levels[k], levels[k + 1]
-            if len(cur) > max_knots:
-                continue
-            gaps_ok = (cur.seconds.iloc[0] - prev.seconds.iloc[-1] <= 3 * period
-                       and nxt.seconds.iloc[0] - cur.seconds.iloc[-1] <= 3 * period)
-            if gaps_ok and abs(nxt.ToA_error.iloc[0] - prev.ToA_error.iloc[-1]) < step_s:
-                drop = cur
-                break
-        if drop is None:
-            return knots, spikes
-        spikes.append(dict(first_obs=float(drop.seconds.iloc[0]), last_obs=float(drop.seconds.iloc[-1]),
-                           n_observed=int(len(drop)), residual_s=float(drop.ToA_error.median())))
-        knots = knots.drop(drop.index)
-
-
-def _segmented_clock_dbscan(receiver_dat, period, step_s=CLOCK_STEP_S, max_jump_gap_s=CLOCK_JUMP_MAX_GAP_S,
-                            summary=None):
-    """Experimental 2025 clock filter: one DBSCAN pass per stable clock level instead of five whole-record passes.
-
-    Levels split at residual steps >= step_s; isolated multipath excursions are removed
-    first. At a step whose gap is <= max_jump_gap_s each side holds its endpoint residual to the midpoint (an
-    estimated jump time). Support (retained beacon observations): >= 3 normal; 2 linear and 1 constant only for
-    jump-related levels; otherwise the level is unsupported and dropped (fish times in it are excluded, never bridged).
-    summary: optional list that receives one provenance dict per level and per removed spike."""
+def _segmented_clock_dbscan(receiver_dat, period):
+    """Experimental single-pass filter within observed clock levels; 50 ms matches jump detection."""
     if not np.isfinite(period) or period <= 0:
         raise ValueError("segmented clock DBSCAN requires a finite positive pulse period")
     knots = _clock_fix_interpolation_knots(receiver_dat, "ToA_error")
     if not np.isfinite(knots[["seconds", "DDoA", "ToA_error"]].to_numpy(float)).all():
         raise ValueError("segmented clock DBSCAN requires finite clock observations")
-    knots, spikes = _drop_isolated_clock_spikes(knots, period, step_s)
-    knots = knots.assign(clock_segment=_clock_level_groups(knots, step_s))
+    boundaries = knots.ToA_error.diff().abs() >= 0.05
+    knots = knots.assign(clock_segment=boundaries.cumsum())
     spans = knots.groupby("clock_segment").agg(
-        first_obs=("seconds", "min"), last_obs=("seconds", "max"), n_observed=("seconds", "size"),
+        clock_segment_start=("seconds", "min"), clock_segment_end=("seconds", "max"),
         first_error=("ToA_error", "first"), last_error=("ToA_error", "last"))
-    spans = spans.assign(clock_segment_start=spans.first_obs, clock_segment_end=spans.last_obs,
-                         start_estimated=False, end_estimated=False, boundary_before="record_start",
-                         boundary_after="record_end", step_before_s=np.nan, step_after_s=np.nan, gap_before_s=np.nan,
-                         gap_after_s=np.nan)
     for i in range(1, len(spans)):
         previous, current = spans.index[i - 1], spans.index[i]
-        step = spans.at[current, "first_error"] - spans.at[previous, "last_error"]
-        gap = spans.at[current, "first_obs"] - spans.at[previous, "last_obs"]
-        kind = "outage" if abs(step) < step_s else ("step" if gap <= max_jump_gap_s else "step_outage")
-        spans.at[previous, "boundary_after"], spans.at[current, "boundary_before"] = kind, kind
-        spans.at[previous, "step_after_s"], spans.at[current, "step_before_s"] = step, step
-        spans.at[previous, "gap_after_s"], spans.at[current, "gap_before_s"] = gap, gap
-        if kind == "step":
-            midpoint = (spans.at[previous, "last_obs"] + spans.at[current, "first_obs"]) / 2
-            spans.at[previous, "clock_segment_end"], spans.at[current, "clock_segment_start"] = midpoint, midpoint
-            spans.at[previous, "end_estimated"], spans.at[current, "start_estimated"] = True, True
-    spans["jump_related"] = (spans.boundary_before == "step") | (spans.boundary_after == "step")
-    spans["support"], spans["method"], spans["screened"] = 0, "none", False
+        if abs(spans.at[current, "first_error"] - spans.at[previous, "last_error"]) >= 0.05:
+            midpoint = (spans.at[previous, "clock_segment_end"] +
+                        spans.at[current, "clock_segment_start"]) / 2
+            spans.at[previous, "clock_segment_end"] = midpoint
+            spans.at[current, "clock_segment_start"] = midpoint
     kept = []
     for segment_id, segment in knots.groupby("clock_segment"):
-        retained = segment
-        if len(segment) >= CLOCK_MIN_SUPPORT:
-            ts = np.append(np.arange(segment.seconds.min(), segment.seconds.max(), period), segment.seconds.max())
-            ddoa = np.interp(ts, segment.seconds, segment.DDoA)
-            distances = np.hypot(np.diff(ts), np.diff(ddoa))
-            eps = np.nextafter(float(np.quantile(distances, 0.90)), np.inf)
-            labels = DBSCAN(eps=eps, min_samples=3, metric="euclidean").fit_predict(np.column_stack((ts, ddoa)))
-            grid_index = np.searchsorted(ts, segment.seconds.to_numpy(float), side="left")
-            retained = segment[labels[grid_index] >= 0]
-            spans.at[segment_id, "screened"] = True
-        n = len(retained)
-        if n >= CLOCK_MIN_SUPPORT:
-            method = "supported"
-        elif n and spans.at[segment_id, "jump_related"]:
-            method = "linear" if n == 2 else "constant"
-            print("  NOTE: jump-related clock segment %s: %d beacon observation(s), %s fallback" % (segment_id, n, method))
-        else:
-            method = "none"
-            print("  WARNING: clock segment %s unsupported (%d of %d observations retained, not jump-related); "
-                  "fish times in it are excluded" % (segment_id, n, len(segment)))
-            retained = retained.iloc[0:0]
-        spans.at[segment_id, "support"], spans.at[segment_id, "method"] = len(retained), method
+        if len(segment) < 3:
+            print("  WARNING: clock segment %s has only %d knots; retained without density screening" %
+                  (segment_id, len(segment)))
+            kept.append(segment)
+            continue
+        ts = np.append(np.arange(segment.seconds.min(), segment.seconds.max(), period), segment.seconds.max())
+        ddoa = np.interp(ts, segment.seconds, segment.DDoA)
+        distances = np.hypot(np.diff(ts), np.diff(ddoa))
+        eps = np.nextafter(float(np.quantile(distances, 0.90)), np.inf)
+        labels = DBSCAN(eps=eps, min_samples=3, metric="euclidean").fit_predict(np.column_stack((ts, ddoa)))
+        grid_index = np.searchsorted(ts, segment.seconds.to_numpy(float), side="left")
+        retained = segment[labels[grid_index] >= 0]
+        print("  Clock segment %s: %d/%d knots retained (one pass, eps=%.6f)" %
+              (segment_id, len(retained), len(segment), eps))
         kept.append(retained)
-    if summary is not None:
-        cols = ["first_obs", "last_obs", "clock_segment_start", "clock_segment_end", "n_observed", "support", "method",
-                "screened", "jump_related", "start_estimated", "end_estimated", "boundary_before", "boundary_after",
-                "step_before_s", "step_after_s", "gap_before_s", "gap_after_s"]
-        summary.extend(spans[cols].reset_index().to_dict("records"))
-        summary.extend(dict(s, clock_segment=None, support=0, method="isolated_multipath", screened=False,
-                            jump_related=False) for s in spikes)
     if not kept or sum(len(segment) for segment in kept) == 0:
         raise ValueError("segmented clock DBSCAN left no supported knots")
     retained = pd.concat(kept)
-    spans = spans.rename(columns={"support": "clock_segment_support", "method": "clock_segment_method"})
-    retained = retained.join(spans[["clock_segment_start", "clock_segment_end", "clock_segment_support",
-                                    "clock_segment_method"]], on="clock_segment")
+    retained = retained.join(spans[["clock_segment_start", "clock_segment_end"]], on="clock_segment")
     # Preserve duplicate detections and attach the segment label by their unique timestamp.
-    columns = ["seconds", "clock_segment", "clock_segment_start", "clock_segment_end", "clock_segment_support",
-               "clock_segment_method"]
+    columns = ["seconds", "clock_segment", "clock_segment_start", "clock_segment_end"]
     return receiver_dat.merge(retained[columns], on="seconds", how="inner").sort_values("seconds")
 
 
@@ -1182,12 +1099,7 @@ def clock_fix(clock_fix_object):
                 '''
                 segmented_clock = getattr(clock_fix_object, "segmented_clock_dbscan", False)
                 if segmented_clock:
-                    clock_fix_object.clock_segments = []
-                    receiver_dat = _segmented_clock_dbscan(
-                        receiver_dat, clock_fix_object.master_pulse_rate,
-                        step_s=getattr(clock_fix_object, "clock_step_s", CLOCK_STEP_S),
-                        max_jump_gap_s=getattr(clock_fix_object, "clock_jump_max_gap_s", CLOCK_JUMP_MAX_GAP_S),
-                        summary=clock_fix_object.clock_segments)
+                    receiver_dat = _segmented_clock_dbscan(receiver_dat, clock_fix_object.master_pulse_rate)
                     receiver_dat["DBSCAN_multi"] = 1
                 iters = 0 if segmented_clock else 5
                 for i in np.arange(0,iters,1):
@@ -1474,17 +1386,6 @@ def clock_fix(clock_fix_object):
                     curr_rec_dat['clock_segment'] = 0
                     curr_rec_dat['clock_segment_start'] = curr_rec_dat.seconds.min()
                     curr_rec_dat['clock_segment_end'] = curr_rec_dat.seconds.max()
-                    # the master clock is the reference: every detection supports it
-                    curr_rec_dat['clock_segment_support'] = len(curr_rec_dat)
-                    curr_rec_dat['clock_segment_method'] = 'master'
-                    clock_fix_object.clock_segments = [dict(
-                        clock_segment=0, first_obs=float(curr_rec_dat.seconds.min()),
-                        last_obs=float(curr_rec_dat.seconds.max()),
-                        clock_segment_start=float(curr_rec_dat.seconds.min()),
-                        clock_segment_end=float(curr_rec_dat.seconds.max()), n_observed=len(curr_rec_dat),
-                        support=len(curr_rec_dat), method='master', screened=False, jump_related=False,
-                        start_estimated=False, end_estimated=False, boundary_before='record_start',
-                        boundary_after='record_end')]
                 curr_rec_dat['seconds_fix'] = curr_rec_dat.seconds - curr_rec_dat.seconds_residual
                 #curr_rec_dat = curr_rec_dat[(curr_rec_dat.seconds_fix > min_temp_time) & (curr_rec_dat.seconds_fix < max_temp_time)]
                 times = curr_rec_dat.seconds_fix.values

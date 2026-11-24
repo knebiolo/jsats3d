@@ -47,7 +47,7 @@ warnings.filterwarnings("ignore")
 
 DERIVED_TABLES = [
     "tblMetronomeUnfiltered", "tblMetronomeFiltered", "tblMetronomeSecondFiltered",
-    "tblDetectionClockFixed", "tblDetectionFilterPrimary", "tblDetectionFilterSecondary", "tblClockSegments",
+    "tblDetectionClockFixed", "tblDetectionFilterPrimary", "tblDetectionFilterSecondary",
 ]
 
 # Receivers whose Z is fixed to tape-measured depth (from config Excel Hydrophone Depth ft -> meters).
@@ -233,44 +233,21 @@ def metronome(db, tag, work, method):
     index_table(db, "tblMetronomeSecondFiltered", "idx_metronome_second_rec_tag_seconds", ("Rec_ID", "Tag_ID", "seconds"))
 
 
-def clock_fix(db, receivers, work, *, segmented_clock_dbscan=False, clock_step_s=None, clock_jump_max_gap_s=None):
-    """clock_fix_serial.py for every receiver in the list, then load tblDetectionClockFixed.
-    Segmented (2025 option): each receiver's clock levels (support, boundaries, fallback method, estimated jump
-    times) replace that receiver's rows in tblClockSegments."""
+def clock_fix(db, receivers, work, *, segmented_clock_dbscan=False):
+    """clock_fix_serial.py for every receiver in the list, then load tblDetectionClockFixed."""
     scratch = fresh_folder(work / "clock_fix_scratch")
     figures = work / "figures"
     figures.mkdir(parents=True, exist_ok=True)
-    segments = []
     for rec in receivers:
         print("Clock fix: receiver %s" % rec)
         clock = jsats3d.clock_fix_object(rec, receivers, str(db), scratch, str(figures))
         clock.segmented_clock_dbscan = segmented_clock_dbscan
-        if clock_step_s is not None:
-            clock.clock_step_s = float(clock_step_s)
-        if clock_jump_max_gap_s is not None:
-            clock.clock_jump_max_gap_s = float(clock_jump_max_gap_s)
         jsats3d.clock_fix(clock)
-        segments.extend(dict(s, Rec_ID=rec) for s in getattr(clock, "clock_segments", None) or [])
     widen_table(db, "tblDetectionClockFixed", scratch)
     jsats3d.epoch_fix_data_management(scratch, str(db))
-    if segmented_clock_dbscan and segments:
-        frame = pd.DataFrame(segments)
-        connection = sqlite3.connect(db)
-        try:
-            if connection.execute("select 1 from sqlite_master where name = 'tblClockSegments'").fetchone():
-                connection.execute("delete from tblClockSegments where Rec_ID in (%s)" % ",".join("?" * len(receivers)),
-                                   list(receivers))
-                existing = [r[1] for r in connection.execute("pragma table_info(tblClockSegments)")]
-                for column in frame.columns:
-                    if column not in existing:
-                        connection.execute('alter table tblClockSegments add column "%s"' % column)
-            frame.to_sql("tblClockSegments", connection, if_exists="append", index=False)
-            connection.commit()
-        finally:
-            connection.close()
 
 
-def clock_fix_check(db, receivers, *, segmented_clock_dbscan=False, clock_step_s=None, clock_jump_max_gap_s=None):
+def clock_fix_check(db, receivers, *, segmented_clock_dbscan=False):
     """Run clock fix only when it cannot append over existing clock-fixed results."""
     tables = query(db, "select name from sqlite_master where type = 'table'").name.tolist()
     if "tblDetectionClockFixed" in tables:
@@ -279,8 +256,7 @@ def clock_fix_check(db, receivers, *, segmented_clock_dbscan=False, clock_step_s
     selected = list(dict.fromkeys([master_rec] + receivers))
     print("Clock-fix check: master %s (beacon %s); receivers %s" % (master_rec, master_tag, selected))
     with tempfile.TemporaryDirectory(prefix="jsats3d_clock_fix_") as temporary:
-        clock_fix(db, selected, Path(temporary), segmented_clock_dbscan=segmented_clock_dbscan,
-                  clock_step_s=clock_step_s, clock_jump_max_gap_s=clock_jump_max_gap_s)
+        clock_fix(db, selected, Path(temporary), segmented_clock_dbscan=segmented_clock_dbscan)
     if "tblDetectionClockFixed" not in query(db, "select name from sqlite_master where type = 'table'").name.tolist():
         print("tblDetectionClockFixed was not created")
         return
