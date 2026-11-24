@@ -8,8 +8,10 @@ For the 2025 step-aware clock filter, set `segmented_clock_dbscan = true` in
 `[ats_2025_pipeline]` (default false keeps the existing five-pass 2019/2025
 behavior). The beacon residual curve is split at changes of at least
 `clock_step_s` (0.05 s, a Cowlitz 2025 starting point, not a universal
-threshold) or gaps longer than three beacon periods, after removing isolated
-multipath (a one- or two-observation excursion that returns to the same level).
+threshold), after removing isolated multipath (a one- or two-observation
+excursion that returns to the same level). A step-free beacon gap does not
+split the curve; the correction is linearly interpolated across it, even when
+the gap is long and unobserved clock changes may have occurred.
 DBSCAN (`min_samples = 3`) runs once per segment with the actual final timestamp
 included. Within multi-point segments fish corrections use linear interpolation.
 At a step whose beacon gap is at most `clock_jump_max_gap_s` (600 s), each side
@@ -17,8 +19,8 @@ holds its endpoint residual to the midpoint between the last pre-step and first
 post-step observation; these midpoint jump times are estimates, not measured
 events. Segment support: three or more retained beacon observations is normal;
 two (linear) or one (constant) is accepted only next to such a step; anything
-else is unsupported, and fish detections in unsupported time, outages and steps
-across longer gaps are excluded rather than bridged. `tblClockSegments` records
+else is unsupported, and fish detections in unsupported time and steps across
+longer gaps are excluded rather than bridged. `tblClockSegments` records
 every segment's support, boundaries, fallback method, whether its boundaries are
 estimated, and step evidence (receiver internal events, steps on other receivers).
 Deng rows whose receiver combination uses a segment with fewer than three

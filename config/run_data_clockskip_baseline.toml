@@ -67,6 +67,9 @@ segmented_clock_dbscan = false   # step-aware clock filter (2025 option; false =
 clock_step_s           = 0.05   # residual change counted as a clock step (site-specific starting point)
 clock_jump_max_gap_s   = 600.0  # longest beacon gap a midpoint hold may span
 
+[positioning]
+deng_max_receivers = 0  # use all available receiver combinations
+
 [dbscan]
 run             = false
 beacon_receiver = 'ZOI08'

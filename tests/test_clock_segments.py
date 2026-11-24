@@ -59,14 +59,20 @@ class SegmentedClock(unittest.TestCase):
         self.assertEqual(seg.method.tolist().count("isolated_multipath"), 1)
         np.testing.assert_allclose(_interpolate_clock_segments(out, np.array([3 * P])), [0.0])
 
-    def test_short_level_between_outages_is_unsupported(self):
+    def test_step_free_long_gaps_remain_in_one_segment(self):
         obs = beacons([0, 64, 128, 1000, 1064, 2000, 2064, 2128], [0] * 8)
         out, seg = fit(obs)
-        self.assertNotIn(1000, out.seconds.tolist())
-        self.assertEqual(seg[seg.n_observed == 2].method.item(), "none")
+        self.assertEqual(out.seconds.tolist(), obs.seconds.tolist())
+        self.assertEqual(seg.method.tolist(), ["supported"])
         corr, support = _interpolate_clock_segments(out, np.array([1032.0, 64.0]), return_support=True)
-        self.assertTrue(np.isnan(corr[0]) and np.isnan(support[0]))     # no correction invented
-        self.assertEqual(support[1], 3)
+        np.testing.assert_allclose(corr, [0.0, 0.0])
+        np.testing.assert_allclose(support, [8, 8])
+
+    def test_subthreshold_change_is_interpolated_across_long_gap(self):
+        obs = beacons([0, 64, 128, 1000, 1064, 1128], [0, 0, 0, 0.049, 0.049, 0.049])
+        out, seg = fit(obs)
+        self.assertEqual(len(seg), 1)
+        np.testing.assert_allclose(_interpolate_clock_segments(out, np.array([564.0])), [0.0245])
 
     def test_step_across_long_gap_is_not_bridged(self):
         obs = beacons([0, 64, 128, 1500, 1564, 1628], [0, 0, 0, 1, 1, 1])

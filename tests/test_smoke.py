@@ -39,7 +39,7 @@ class TestSegmentedClockExperiment(unittest.TestCase):
         result = _interpolate_clock_segments(knots, np.array([-1, 0, 30, 120, 210, 240, 241]))
         np.testing.assert_allclose(result, [np.nan, 0.01, 0.01, np.nan, 0.5, 0.5, np.nan], equal_nan=True)
 
-    def test_single_knot_level_is_held_to_midpoints_but_outage_is_not_filled(self):
+    def test_single_knot_level_is_held_and_step_free_gap_is_interpolated(self):
         import numpy as np
         import pandas as pd
         from jsats3d.jsats3d import _segmented_clock_dbscan, _interpolate_clock_segments
@@ -51,7 +51,7 @@ class TestSegmentedClockExperiment(unittest.TestCase):
         self.assertEqual(result.seconds.tolist(), observations.seconds.tolist())
         result["seconds_residual"] = result.ToA_error
         corrected = _interpolate_clock_segments(result, np.array([149, 150, 180, 209, 210, 450]))
-        np.testing.assert_allclose(corrected, [0, 1, 1, 1, 0.5, np.nan], equal_nan=True)
+        np.testing.assert_allclose(corrected, [0, 1, 1, 1, 0.5, 0.5])
 
     def test_multi_point_segment_keeps_linear_interpolation(self):
         import numpy as np

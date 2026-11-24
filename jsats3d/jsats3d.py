@@ -950,9 +950,9 @@ def _interpolate_clock_segments(knots, times, return_support=False):
     return (result, support) if return_support else result
 
 
-def _clock_level_groups(knots, period, step_s):
-    """Group consecutive knots into levels; a new level starts at a residual change >= step_s or a gap > 3 periods."""
-    new = (knots.ToA_error.diff().abs() >= step_s) | (knots.seconds.diff() > 3 * period)
+def _clock_level_groups(knots, step_s):
+    """Group consecutive knots into levels split at residual changes >= step_s."""
+    new = knots.ToA_error.diff().abs() >= step_s
     return new.cumsum().to_numpy()
 
 
@@ -962,7 +962,7 @@ def _drop_isolated_clock_spikes(knots, period, step_s, max_knots=2):
     (a multi-step resync, as 26E4 ZOI02 2025-06-28 01:03) is a real clock level and is kept."""
     spikes = []
     while True:
-        groups = _clock_level_groups(knots, period, step_s)
+        groups = _clock_level_groups(knots, step_s)
         levels = [knots.iloc[np.flatnonzero(groups == g)] for g in np.unique(groups)]
         drop = None
         for k in range(1, len(levels) - 1):
@@ -985,7 +985,7 @@ def _segmented_clock_dbscan(receiver_dat, period, step_s=CLOCK_STEP_S, max_jump_
                             summary=None):
     """Experimental 2025 clock filter: one DBSCAN pass per stable clock level instead of five whole-record passes.
 
-    Levels split at residual steps >= step_s or beacon gaps > 3 periods; isolated multipath excursions are removed
+    Levels split at residual steps >= step_s; isolated multipath excursions are removed
     first. At a step whose gap is <= max_jump_gap_s each side holds its endpoint residual to the midpoint (an
     estimated jump time). Support (retained beacon observations): >= 3 normal; 2 linear and 1 constant only for
     jump-related levels; otherwise the level is unsupported and dropped (fish times in it are excluded, never bridged).
@@ -996,7 +996,7 @@ def _segmented_clock_dbscan(receiver_dat, period, step_s=CLOCK_STEP_S, max_jump_
     if not np.isfinite(knots[["seconds", "DDoA", "ToA_error"]].to_numpy(float)).all():
         raise ValueError("segmented clock DBSCAN requires finite clock observations")
     knots, spikes = _drop_isolated_clock_spikes(knots, period, step_s)
-    knots = knots.assign(clock_segment=_clock_level_groups(knots, period, step_s))
+    knots = knots.assign(clock_segment=_clock_level_groups(knots, step_s))
     spans = knots.groupby("clock_segment").agg(
         first_obs=("seconds", "min"), last_obs=("seconds", "max"), n_observed=("seconds", "size"),
         first_error=("ToA_error", "first"), last_error=("ToA_error", "last"))
