@@ -186,6 +186,9 @@ def main():
     ap.add_argument("--segmented", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-steps", type=int, default=6, help="clock-step events to plot")
+    ap.add_argument("--no-drags", action="store_true", help="skip the drag-line windows (fish databases)")
+    ap.add_argument("--window", nargs=5, action="append", default=[], metavar=("TAG", "START", "END", "HL_START", "HL_END"),
+                    help="extra named window: plot START..END, highlight HL_START..HL_END (e.g. a known gap)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -209,9 +212,20 @@ def main():
             row["%s_in_water_pct" % a] = round(100 * float(d.z.between(FLOOR_M, 0).mean()), 1) if len(d) else np.nan
         return row
 
+    # ---- named windows (e.g. a known gap)
+    for tag, start, end, hs, he in args.window:
+        lo, hi = pd.Timestamp(start).timestamp(), pd.Timestamp(end).timestamp()
+        win = (pd.Timestamp(hs).timestamp(), pd.Timestamp(he).timestamp())
+        label = "window_%s" % hhmm(lo).strftime("%Y%m%d_%H%M")
+        r = pick_receiver(knots, used, *win)
+        plan_figure(p, rec, tag, lo, hi, win, "window", out / ("%s_%s_plan.png" % (tag, label)))
+        event_figure(p, knots, tag, r, lo, hi, win, out / ("%s_%s_event.png" % (tag, label)),
+                     "%s: baseline (5-pass clock DBSCAN) vs midpoint holds; shaded = highlighted window" % tag)
+        rows.append(window_row("window", label, tag, *win))
+
     # ---- drag lines (GPS window)
-    dm = dtf.DataManager(dbs["baseline"])
-    for line in [l for ids in dtf.CATEGORIES.values() for l in ids if l in dm.tracks]:
+    dm = None if args.no_drags else dtf.DataManager(dbs["baseline"])
+    for line in [] if dm is None else [l for ids in dtf.CATEGORIES.values() for l in ids if l in dm.tracks]:
         g0, g1 = float(dm.tracks[line].gtime.min()), float(dm.tracks[line].gtime.max())
         lo, hi = g0 - PAD_S, g1 + PAD_S
         r = pick_receiver(knots, used, lo, hi)

@@ -918,8 +918,12 @@ def _clock_fix_interpolation_knots(receiver_dat, value_column):
 
 
 def _interpolate_clock_segments(knots, times):
-    """Interpolate within levels and hold endpoints to estimated midpoint jump boundaries."""
+    """Interpolate within levels, hold endpoints to estimated midpoint jump boundaries,
+    and borrow the nearest correction for times outside the overall coverage window
+    (before the first beacon hearing or after the last)."""
     result = np.full(len(times), np.nan)
+    overall_start = None
+    overall_end = None
     for _, segment in knots.dropna(subset=["clock_segment"]).groupby("clock_segment"):
         segment = _clock_fix_interpolation_knots(segment, "seconds_residual")
         ts = segment.seconds.to_numpy(float)
@@ -931,6 +935,19 @@ def _interpolate_clock_segments(knots, times):
                 raise ValueError("clock segment boundaries do not contain its observations")
         mask = (times >= start) & (times <= end)
         result[mask] = np.interp(times[mask], ts, segment.seconds_residual.to_numpy(float))
+        if overall_start is None or start < overall_start:
+            overall_start = start
+        if overall_end is None or end > overall_end:
+            overall_end = end
+    # Borrow the nearest correction for times outside the overall coverage window.
+    if overall_start is not None and overall_end is not None:
+        ts_all = knots.dropna(subset=["seconds", "seconds_residual"]).sort_values("seconds")
+        corr_all = np.interp(times, ts_all.seconds.to_numpy(float),
+                             ts_all.seconds_residual.to_numpy(float),
+                             left=ts_all.seconds_residual.iloc[0],
+                             right=ts_all.seconds_residual.iloc[-1])
+        outside = np.isnan(result)
+        result[outside] = corr_all[outside]
     return result
 
 

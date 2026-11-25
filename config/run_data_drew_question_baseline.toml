@@ -1,0 +1,104 @@
+# 2026-11-24 project lead: baseline (5-pass) clock DBSCAN with extrapolation fix.
+# Same 10 fish tags, all 20 receivers, no cap, pre-median ON, full season.
+# Baseline arm for comparison against segmented arm.
+data_format = 'ats'
+overwrite = false
+
+[paths]
+raw_root        = 'C:\jsats_data\raw_data'
+config_xlsx     = 'C:\jsats_data\CowlitzAT2025_Data_Deliverables\1_array_metadata\cowlitz_2025_AT_config.xlsx'
+gps_csv         = 'C:\jsats_data\CowlitzAT2025_Data_Deliverables\4_gps_datasets\master_df_gps.csv'
+covariate_csv   = 'C:\jsats_data\Master Covariate Table\2025 Master Covariate Table_20251212.csv'
+temperature_csv = 'C:\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
+hobo_dir        = 'C:\jsats_data\Tag Drag Period\DD_N'
+released_file   = 'C:\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
+output_db       = 'output\drew question\baseline\baseline.db'
+
+[selection]
+species   = []
+tags      = ['0516', '0957', '0AEA', '15AE', '4C35', '4CCB', '4D92', '5B2D', '9443', 'B04C']
+start     = '2025-06-11 00:00:00'
+end       = '2025-09-17 23:59:59'
+receivers = []
+
+[study]
+utc_conv         = -7
+bm_elev          = 861.5
+bm_elev_units    = 'feet'
+output_units     = 'meters'
+master_receiver  = 'ZOI08'
+synch_time_start = '2025-06-11 00:00:00'
+synch_time_end   = '2025-09-17 23:59:59'
+pulse_rates      = {}   # filled from the data after indexing
+
+[legacy]
+run               = true
+run_2025_pipeline = true
+env               = 'jsat_legacy'
+method            = 'KNN'
+surface_receivers = ['ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10', 'ZOI11',
+                     'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+deep_receivers    = ['ZOI01', 'ZOI02', 'ZOI03']
+receivers_3d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'ZOI11', 'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+receivers_2d      = ['ZOI01', 'ZOI02', 'ZOI03', 'ZOI04', 'ZOI05', 'ZOI06', 'ZOI07', 'ZOI08', 'ZOI09', 'ZOI10',
+                     'ZOI11', 'CFD01', 'CFD02', 'CFD03', 'CFD04', 'CFD05', 'CFD06', 'CFD07', 'CFD08', 'CFD09']
+fixed_z_2d        = ''
+fixed_z_2d_by_tag = {}
+deep_solution     = 'A'
+adopt_deep_z      = 'config'
+known_depth_diagnostics = true
+deng_surface      = false
+positions_dbscan   = true
+dbscan_mode        = 'acceleration'
+dbscan_eps_m       = 8.0
+dbscan_min_samples = 5
+dbscan_accel_scale = 5.0
+dbscan_depth_weight = 1.0
+dbscan_accel_gap_s = 12.0
+study_tags        = []
+signal_proxies    = true
+premedian_filter       = true
+premedian_box          = true
+premedian_box_z        = true
+premedian_box_margin_m = 5.0
+premedian_box_z_top_m  = 0.0
+premedian_box_z_pad_m  = 3.0
+premedian_radius_m     = 12.0
+premedian_min_sets     = 2
+deng_max_receivers     = 0      # no cap: every 4-receiver combination
+deng_keep_deep         = true
+deng_hull_filter       = false
+deng_hull_margin_m     = 5.0
+work_dir          = ''
+
+[legacy_pipeline]
+known_depth_diagnostics = true
+
+[ats_2025_pipeline]
+apply_clock_jumps = false
+bathy_path        = 'C:\jsats_data\Cowlitz_Falls_Model_Geometry_Files_CRS\elev_contour2ras_1m_pts_refined_20240826_utm10n.xyz'
+bathy_input_crs   = 'EPSG:26910'
+water_column      = false
+segmented_clock_dbscan = false   # 5-pass method
+
+[dbscan]
+run             = false
+beacon_receiver = 'ZOI08'
+anchor          = 'ZOI03'
+start           = '2025-06-11 00:00:00'
+end             = '2025-09-17 23:59:59'
+output_dir      = ''
+
+[figures]
+depth_floor_m        = -16.0
+depth_floor_margin_m = 4.0
+fish_products        = ['plan_time', 'depth_time']
+
+[outputs]
+positions             = true
+drag_plots            = false
+fish_figures          = true
+drag_test_figures     = false
+clock_drift_plots     = true
+figure_tags           = []

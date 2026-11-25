@@ -52,3 +52,24 @@
 - Main event: ZOI02 +0.34 s from about 11:22 to 11:37 on 06-10 (FBY-D-2/3/4). The baseline ramps the correction
   linearly across both steps; the segmented filter holds levels. FC36 pings in the window: 240 -> 247.
 - Drags: same ping counts except FBY-D-3/4 (+7/+9, +2/+8).
+
+## 13:00 - 4 fish (26E4, 4D92, 23C1, 45BA; 06-24..06-29)
+- Configs `config/run_data_dbscantest_fish_{base,baseline,segmented}.toml`: copies of the tagged
+  `run_data_earlyfish_2026-10-28.toml` (9 ZOI 3D receivers, no cap, no pre-median).
+  - Changed: tags, window, raw paths -> C:\jsats_data, pulse_rates only 26E4 (others calculated from the data).
+- `tests/clock_segment_comparison.py`: added `--no-drags` and `--window` (named highlight window, used for the 26E4
+  06-28 00:55-01:06 gap).
+- Output in `output\dbscan test\fish\` (`clock_figures`). Launched 13:00.
+- 13:25 result: both arms ok; about 25 min.
+  - Root-B pings (baseline -> segmented): 23C1 6,036 -> 6,916; 26E4 2,032 -> 2,253; 45BA 7,801 -> 7,944;
+    4D92 21,159 -> 22,012. After position DBSCAN: 4,996 -> 5,884, 1,858 -> 2,080, 6,697 -> 6,955, 19,364 -> 20,379.
+    In-water share equal or higher.
+  - First-arrival detections are 8-17% lower with the segmented filter: fish times outside a receiver's
+    first/last beacon segment are excluded instead of extrapolated (Drew's code, unchanged).
+  - 26E4 gap 00:55-01:06: 8 -> 159 pings (in water 38% -> 58%).
+  - 104 step events on positioning receivers. Many are repeated 1 s flips (e.g. ZOI01 06-26 14:00-17:00 between
+    about 1.6 and 2.6 s); each flip becomes its own held level.
+- 14:11: fish_figures_2025.py for both arms, all products, into `output\dbscan test\fish\{baseline,segmented}\figures`.
+  - fish_positions.csv positioned: baseline 19,508 -> segmented 20,780 (26E4 1,498 -> 1,722; 23C1 2,778 -> 3,226;
+    45BA 4,150 -> 4,229; 4D92 11,082 -> 11,603).
+  - Spatial SD median x/y/z: 1.63/2.11/2.77 m -> 1.62/2.07/2.78 m.
