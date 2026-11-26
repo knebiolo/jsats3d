@@ -259,9 +259,13 @@ def check_positions(db_path, wsel_tolerance_m=0.05):
             rec_northing = np.array([float(r[5]) for r in recs])
             rec_zt = np.array([float(r[3]) for r in recs])  # Z_t = local water surface ref
             rec_tree = cKDTree(np.column_stack([rec_easting, rec_northing]))
+            # Pre-compute the mean offset from local X_t/Y_t to UTM easting/northing
+            dx = np.mean(rec_easting - np.array([float(r[1]) for r in recs]))
+            dy = np.mean(rec_northing - np.array([float(r[2]) for r in recs]))
         else:
             rec_tree = None
             rec_zt = None
+            dx = dy = 0.0
 
         # Load WSEL (convert timeStamp to seconds if needed)
         wsel_cols = {r[1] for r in conn.execute("PRAGMA table_info(tblWSEL)").fetchall()}
@@ -280,9 +284,9 @@ def check_positions(db_path, wsel_tolerance_m=0.05):
             wsel_t = np.array([], dtype=np.float64)
             wsel_z = np.array([], dtype=np.float64)
 
-        # Load position solutions
+        # Load position solutions as numpy arrays (vectorized)
         solutions = conn.execute(
-            "SELECT rowid, X, Y, Z, ToA, comment "
+            "SELECT rowid, X, Y, Z, ToA "
             "FROM tblPositions_Deng WHERE comment = 'solution found'"
         ).fetchall()
 
@@ -303,66 +307,75 @@ def check_positions(db_path, wsel_tolerance_m=0.05):
                 )
                 conn.commit()
 
-        # Process each solution
         n_total = len(solutions)
+        print(f"  Processing {n_total:,} solutions (vectorized)...")
 
-        for rowid, sol_x, sol_y, sol_z, toa, comment in solutions:
-            sol_x = float(sol_x)
-            sol_y = float(sol_y)
-            sol_z = float(sol_z)
-            toa = float(toa)
+        # --- Vectorized computation -------------------------------------------
+        rowids = np.array([s[0] for s in solutions], dtype=np.int64)
+        sol_x = np.array([s[1] for s in solutions], dtype=np.float64)
+        sol_y = np.array([s[2] for s in solutions], dtype=np.float64)
+        sol_z = np.array([s[3] for s in solutions], dtype=np.float64)
+        toa = np.array([s[4] for s in solutions], dtype=np.float64)
 
-            # --- Convert local X/Y to UTM for bathymetry lookup ------------
-            # Compute offset from receiver easting/northing vs X_t/Y_t
-            if recs:
-                dx = np.mean([float(r[4]) - float(r[1]) for r in recs])
-                dy = np.mean([float(r[5]) - float(r[2]) for r in recs])
-                utm_x = sol_x + dx
-                utm_y = sol_y + dy
-            else:
-                utm_x, utm_y = sol_x, sol_y
+        # 1. Convert local X/Y to UTM (vectorized)
+        utm_x = sol_x + dx
+        utm_y = sol_y + dy
 
-            # --- Look up local bathymetry -----------------------------------
-            dist, idx = tree.query([utm_x, utm_y], k=1)
-            local_bathy_z = bathy_z_values[idx]
+        # 2. Batch KD-tree query for bathymetry (vectorized)
+        utm_points = np.column_stack([utm_x, utm_y])
+        dist, idx = tree.query(utm_points, k=1)
+        local_bathy_z = bathy_z_values[idx]
 
-            # --- Look up nearest receiver for local water surface reference --
-            if rec_tree is not None:
-                _, rec_idx = rec_tree.query([utm_x, utm_y], k=1)
-                local_water_surface_z = rec_zt[rec_idx]
-            else:
-                local_water_surface_z = None
+        # 3. Batch KD-tree query for nearest receiver Z_t (vectorized)
+        if rec_tree is not None:
+            _, rec_idx = rec_tree.query(utm_points, k=1)
+            local_water_surface_z = rec_zt[rec_idx]
+            has_receiver = True
+        else:
+            local_water_surface_z = np.full(n_total, np.nan)
+            has_receiver = False
 
-            # --- Look up WSEL at time of arrival ----------------------------
-            if len(wsel_t) > 0:
-                wsel_at_t = float(np.interp(toa, wsel_t, wsel_z))
-            else:
-                wsel_at_t = np.nan
+        # 4. Vectorized WSEL lookup via interpolation
+        if len(wsel_t) > 0:
+            wsel_at_t = np.interp(toa, wsel_t, wsel_z)
+        else:
+            wsel_at_t = np.full(n_total, np.nan)
 
-            # --- Check bounds -----------------------------------------------
-            check = "pass"
+        # 5. Vectorized bound checks
+        # Start with all "pass"
+        checks = np.full(n_total, "pass", dtype=object)
+        bathy_z_results = local_bathy_z.copy()
+        wsel_results = wsel_at_t.copy()
 
-            # Above water surface?
-            if not np.isnan(wsel_at_t) and sol_z > wsel_at_t + wsel_tolerance_m:
-                check = "rejected_above_wsel"
-            # Below riverbed? Use local water surface reference
-            elif local_water_surface_z is not None:
-                # Water depth at this location = local_water_surface_z - local_bathy_z
-                # Position is below riverbed if sol_z < local_bathy_z - tolerance
-                # But since sol_z and bathy_z are in different coordinate systems,
-                # we compare sol_z to the water surface reference minus water depth
-                water_depth = local_water_surface_z - local_bathy_z
-                if sol_z < local_water_surface_z - water_depth + wsel_tolerance_m:
-                    check = "rejected_below_bathy"
-                # Simplified: sol_z < local_bathy_z - tolerance (using local offset)
-                elif sol_z < local_bathy_z - wsel_tolerance_m:
-                    check = "rejected_below_bathy"
+        # Above water surface?
+        above_wsel = ~np.isnan(wsel_at_t) & (sol_z > wsel_at_t + wsel_tolerance_m)
+        checks[above_wsel] = "rejected_above_wsel"
 
-            # Store results
-            conn.execute(
+        # Below riverbed? Use local water surface reference
+        # Effective threshold: sol_z < local_bathy_z + tolerance
+        # (the water_depth formulation simplifies to this — see dead-code comment)
+        below_bathy = has_receiver & (sol_z < local_bathy_z + wsel_tolerance_m)
+        # Only mark as rejected_below_bathy if not already rejected for WSEL
+        below_bathy = below_bathy & ~above_wsel
+        checks[below_bathy] = "rejected_below_bathy"
+
+        # --- Batch SQLite update (single executemany call) ---------------------
+        # Convert numpy types to native Python types for SQLite compatibility
+        checks_list = [str(c) for c in checks]
+        wsel_list = [None if np.isnan(v) else float(v) for v in wsel_results]
+        bathy_z_list = [float(v) for v in bathy_z_results]
+        rowids_list = [int(r) for r in rowids]
+
+        update_data = list(zip(checks_list, bathy_z_list, wsel_list, rowids_list))
+
+        # Update in chunks to avoid SQLite parameter limit (999 per statement)
+        chunk_size = 5000
+        for i in range(0, len(update_data), chunk_size):
+            chunk = update_data[i:i + chunk_size]
+            conn.executemany(
                 'UPDATE tblPositions_Deng SET bathymetry_check = ?, '
                 'bathy_z = ?, wsel_at_time = ? WHERE rowid = ?',
-                (check, local_bathy_z, wsel_at_t if not np.isnan(wsel_at_t) else None, rowid)
+                chunk
             )
 
         # Report counts
@@ -411,9 +424,8 @@ def check_positions_simple(db_path, water_column=False):
             return 0
 
         # WSEL-only check (legacy water_column behaviour)
-        print("  No bathymetry data; applying WSEL-only water column check")
         solutions = conn.execute(
-            "SELECT rowid, X, Y, Z, ToA, comment "
+            "SELECT rowid, X, Y, Z, ToA "
             "FROM tblPositions_Deng WHERE comment = 'solution found'"
         ).fetchall()
 
@@ -451,23 +463,50 @@ def check_positions_simple(db_path, water_column=False):
                 )
                 conn.commit()
 
-        n_rejected = 0
-        for rowid, sol_x, sol_y, sol_z, toa, comment in solutions:
-            wsel_at_t = float(np.interp(toa, wsel_t, wsel_z))
-            if sol_z > wsel_at_t or sol_z < z_floor:
-                conn.execute(
-                    'UPDATE tblPositions_Deng SET bathymetry_check = ?, '
-                    'wsel_at_time = ? WHERE rowid = ?',
-                    ('rejected_above_wsel' if sol_z > wsel_at_t else 'rejected_below_floor',
-                     wsel_at_t, rowid)
-                )
-                n_rejected += 1
+        n_total = len(solutions)
+        print(f"  Processing {n_total:,} solutions (vectorized, WSEL-only)...")
 
+        # --- Vectorized computation -------------------------------------------
+        rowids = np.array([s[0] for s in solutions], dtype=np.int64)
+        sol_z = np.array([s[3] for s in solutions], dtype=np.float64)
+        toa = np.array([s[4] for s in solutions], dtype=np.float64)
+
+        # Vectorized WSEL lookup
+        wsel_at_t = np.interp(toa, wsel_t, wsel_z)
+
+        # Vectorized bound checks
+        above_wsel = sol_z > wsel_at_t
+        below_floor = sol_z < z_floor
+        rejected = above_wsel | below_floor
+
+        checks = np.where(rejected,
+                          np.where(above_wsel, "rejected_above_wsel", "rejected_below_floor"),
+                          "pass")
+        wsel_results = wsel_at_t.copy()
+
+        # --- Batch SQLite update ------------------------------------------------
+        # Convert numpy types to native Python types for SQLite compatibility
+        checks_list = [str(c) for c in checks]
+        wsel_list = [float(v) for v in wsel_results]
+        rowids_list = [int(r) for r in rowids]
+
+        update_data = list(zip(checks_list, wsel_list, rowids_list))
+
+        chunk_size = 5000
+        for i in range(0, len(update_data), chunk_size):
+            chunk = update_data[i:i + chunk_size]
+            conn.executemany(
+                'UPDATE tblPositions_Deng SET bathymetry_check = ?, '
+                'wsel_at_time = ? WHERE rowid = ?',
+                chunk
+            )
+
+        n_rejected = int(rejected.sum())
         conn.commit()
         print(f"  Water column check: {n_rejected} rejected, "
-              f"{len(solutions) - n_rejected} passed")
+              f"{n_total - n_rejected} passed")
 
     finally:
         conn.close()
 
-    return len(solutions) if solutions else 0
+    return n_total
