@@ -45,12 +45,245 @@ sys.path.insert(0, str(lp.REPO))  # for `from jsats3d import bathymetry`
 warnings.filterwarnings("ignore")
 jsats3d = lp.jsats3d
 
+# --- Multiprocessing setup ----------------------------------------------------
+# Use 'spawn' on Windows to avoid inheriting large memory from parent process.
+# Each worker gets its own Python interpreter and SQLite connection.
+try:
+    import multiprocessing as mp
+    mp.set_start_method("spawn", force=True)
+except (OSError, ValueError):
+    pass  # already set or not available
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED  # noqa: E402
+
 # Forebay minus collector-entrance mean(S, N): median over the overlap 2025-06-17 00:05-11:10 (journal 2026-10-02).
 WSE_OFFSET_FT = 0.8905
 # Step 8 screen: a first arrival later than this against the rolling median of its own (tag, receiver) series is a
 # suspected reflection (window in transmissions). The boat moves range about 1.2 ms per ping; reflections sit several ms late.
 SUSPECT_WINDOW = 9
 SUSPECT_LATE_S = 0.003
+
+
+# --- Multiprocessing worker functions -----------------------------------------
+# These are called via ProcessPoolExecutor. Each worker runs in its own process
+# with its own SQLite connection and memory space.
+
+
+def _multipath_worker(tag, db_path, work_dir, figures_dir):
+    """Process multipath for one tag. Called by ProcessPoolExecutor.
+
+    Returns dict with results; does NOT write to the database.
+    """
+    import os
+    import jsats3d
+
+    # Each worker gets its own subfolder to avoid file conflicts
+    primary_folder = str(Path(work_dir) / "multipath_primary" / tag)
+    os.makedirs(primary_folder, exist_ok=True)
+
+    data = jsats3d.multipath_data_object(tag, db_path, primary_folder)
+    if data.empty:
+        return {"tag": tag, "error": "no clock-fixed detections"}
+
+    jsats3d.multipath_2(data)
+
+    # Read the primary CSV files directly (table doesn't exist in worker's DB)
+    primary = pd.concat([
+        pd.read_csv(str(f), dtype=str)
+        for f in sorted(Path(primary_folder).glob("*.csv"))
+    ], ignore_index=True) if list(Path(primary_folder).glob("*.csv")) else pd.DataFrame()
+
+    if primary.empty:
+        return {"tag": tag, "error": "no primary data written"}
+
+    # Get pulse rate from DB (read-only, safe across processes)
+    import sqlite3
+    con = sqlite3.connect(db_path)
+    try:
+        rate = float(con.execute(
+            "select pulseRate from tblTag where Tag_ID = ?", (tag,)
+        ).fetchone()[0])
+    finally:
+        con.close()
+
+    secondary = classify_ats_fish(primary[primary.transNo.notna()], rate)
+    return {
+        "tag": tag,
+        "primary_rows": int(len(primary)),
+        "secondary_rows": int(len(secondary)),
+        "transmissions": int(secondary.transNo.nunique()),
+        "primary_later_arrivals": int((primary.multipath == 1).sum()),
+        "secondary_suspect_first_arrivals": int(
+            (secondary.dbscan_class == "suspect_reflection").sum()
+        ),
+        "unclassified_first_arrivals": int(
+            (secondary.dbscan_class == "unclassified_primary").sum()
+        ),
+        "primary_df": primary,
+        "secondary_df": secondary,
+    }
+
+
+def _deng_worker(
+    tag,
+    receivers_3d,
+    db_path,
+    out_dir,
+    figures_dir,
+    max_receivers,
+    keep_deep,
+    hull_eq,
+    hull_margin_m,
+    deep_receivers,
+):
+    """Run Deng positioning for one tag. Called by ProcessPoolExecutor.
+
+    Returns dict with results and memory usage stats.
+    """
+    import time
+    import jsats3d
+
+    # Track memory usage
+    mem_before = _get_mem_mb()
+
+    pos = jsats3d.position(tag, receivers_3d, db_path, out_dir, figures_dir)
+    if pos.tag_data.empty:
+        return {"tag": tag, "error": "no detections", "mem_mb": _get_mem_mb() - mem_before}
+
+    # SQLite returns TEXT columns as strings; convert numeric columns to float
+    # so the Deng solver can do arithmetic and comparisons
+    numeric_cols = ["seconds_fix", "transNo", "T01", "T02", "T03", "T04", "T05",
+                    "T06", "T07", "T08", "T09", "T10", "T11", "T12", "T13", "T14",
+                    "T15", "T16", "T17", "T18", "T19", "T20", "T21", "T22", "T23",
+                    "T24", "T25", "T26", "T27", "T28", "T29", "T30", "T31", "T32",
+                    "T33", "T34", "T35", "T36", "T37", "T38", "T39", "T40",
+                    "seconds", "T01", "T02", "T03", "T04", "T05", "T06", "T07",
+                    "T08", "T09", "T10", "T11", "T12", "T13", "T14", "T15", "T16",
+                    "T17", "T18", "T19", "T20"]
+    for col in numeric_cols:
+        if col in pos.tag_data.columns:
+            pos.tag_data[col] = pd.to_numeric(pos.tag_data[col], errors="coerce")
+
+    mem_after_data = _get_mem_mb()
+
+    if max_receivers > 0:
+        pos.tag_data, _ = cap_receivers(
+            pos.tag_data, max_receivers, deep_receivers if keep_deep else ()
+        )
+
+    t = time.time()
+    pos.Deng()
+    deng_time = round(time.time() - t, 1)
+    A_found = int((pos.DengSolutionA_unfiltered.comment == "solution found").sum())
+    B_found = int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())
+    outside = 0
+    if hull_eq is not None:
+        outside = reject_outside_hull(out_dir, tag, hull_eq, hull_margin_m)
+
+    mem_after = _get_mem_mb()
+    return {
+        "tag": tag,
+        "deng_s": deng_time,
+        "A_found": A_found,
+        "B_found": B_found,
+        "outside_array": outside,
+        "mem_mb_after_data": mem_after_data - mem_before,
+        "mem_mb_total": mem_after - mem_before,
+    }
+
+
+def _get_mem_mb():
+    """Get current process memory usage in MB. Returns None if unavailable."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except ImportError:
+        pass
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Linux KB → MB
+    except Exception:
+        pass
+    return None
+
+
+def _get_system_free_mb():
+    """Get system free memory in MB. Returns None if unavailable."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 * 1024)
+    except ImportError:
+        pass
+    return None
+
+
+def _positions_run_parallel(c, out, s, hull_eq, deep_receivers):
+    """Run Deng positioning with memory-aware worker throttling.
+
+    Limits concurrent workers based on available system RAM.
+    Each worker is allowed up to max_mem_mb_per_worker MB.
+    """
+    import time
+    import jsats3d
+
+    max_workers = max(1, min(os.cpu_count() // 2, 6))
+    max_mem_per_worker = 2048  # 2 GB per worker max
+    free_mem = _get_system_free_mb()
+    if free_mem is not None:
+        # Calculate max workers based on available RAM
+        ram_limited = int(free_mem / max_mem_per_worker)
+        max_workers = max(1, min(max_workers, ram_limited))
+        print("DENG: memory-aware: %d workers (%.0f MB free, %.0f MB/worker limit)"
+              % (max_workers, free_mem, max_mem_per_worker), flush=True)
+    else:
+        print("DENG: parallel with %d workers (no memory monitoring)" % max_workers, flush=True)
+
+    notes = {"settings": s}
+    tags = list(c.tags)
+    worker_idx = 0
+    active_futures = {}
+    completed = []
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        while worker_idx < len(tags) or active_futures:
+            # Launch new workers if capacity available
+            while len(active_futures) < max_workers and worker_idx < len(tags):
+                tag = tags[worker_idx]
+                worker_idx += 1
+                future = executor.submit(
+                    _deng_worker,
+                    tag,
+                    list(c.receivers_3d),
+                    str(c.db),
+                    str(out),
+                    str(c.work / "figures"),
+                    s["max_receivers"],
+                    s["keep_deep"],
+                    hull_eq,
+                    s["hull_margin_m"],
+                    deep_receivers,
+                )
+                active_futures[future] = tag
+
+            # Wait for at least one worker to complete
+            if active_futures:
+                done_futures, active_futures = wait(active_futures, return_when=FIRST_COMPLETED)
+                for future in done_futures:
+                    tag = active_futures.pop(future)
+                    try:
+                        result = future.result()
+                        completed.append(result)
+                        mem_info = ""
+                        if "mem_mb_total" in result:
+                            mem_info = " | mem: %.1f MB (data: %.1f MB)" % (
+                                result["mem_mb_total"], result["mem_mb_after_data"]
+                            )
+                        print("DENG %s: %s%s" % (tag, result, mem_info), flush=True)
+                        notes[tag] = result
+                    except Exception as e:
+                        notes[tag] = {"error": str(e)}
+                        print("DENG %s FAILED: %s" % (tag, e), flush=True)
+
+    return notes
 
 
 # Drag truth is used only after Deng has solved XYZ.
@@ -90,6 +323,100 @@ def prepare_done(c):
     return "tblReceiver_initial" in t and first is not None and str(first) <= c.window_start
 
 
+def _estimate_pulse_rates(db_path):
+    """Estimate pulse rates for tags that don't have them.
+
+    Queries tblDetectionRaw for detection timestamps, estimates the pulse rate
+    from the most common time gap between detections for each tag. Falls back
+    to 3.0 seconds if estimation fails.
+
+    Returns list of (tag_ID, estimated_rate) tuples.
+    """
+    import sqlite3
+
+    con = sqlite3.connect(db_path)
+    try:
+        # Get tags without pulse rates
+        no_rate = con.execute(
+            "SELECT Tag_ID FROM tblTag WHERE pulseRate IS NULL AND TagType = 'study'"
+        ).fetchall()
+        if not no_rate:
+            return []
+
+        # Get all detection timestamps from tblDetectionRaw
+        raw = con.execute(
+            "SELECT Tag_ID, seconds FROM tblDetectionRaw WHERE Tag_ID IN (%s)"
+            % ",".join("?" * len(no_rate)),
+            [r[0] for r in no_rate],
+        ).fetchall()
+
+        if not raw:
+            # No raw data at all — just default to 3.0s for all
+            estimated = []
+            for tag_id, in no_rate:
+                con.execute(
+                    "UPDATE tblTag SET pulseRate = 3.0 WHERE Tag_ID = ?", (tag_id,)
+                )
+                estimated.append((tag_id, 3.0))
+            return estimated
+
+        # Group by tag and estimate pulse rate from time gaps
+        from collections import defaultdict
+
+        tag_times = defaultdict(list)
+        for tag_id, seconds in raw:
+            tag_times[tag_id].append(seconds)
+
+        estimated = []
+        for tag_id, _ in no_rate:
+            times = sorted(tag_times.get(tag_id, []))
+            if len(times) < 10:
+                # Not enough detections to estimate — default to 3.0s
+                con.execute(
+                    "UPDATE tblTag SET pulseRate = 3.0 WHERE Tag_ID = ?", (tag_id,)
+                )
+                estimated.append((tag_id, 3.0))
+                continue
+
+            # Compute time gaps between consecutive detections
+            gaps = [times[i + 1] - times[i] for i in range(len(times) - 1)]
+            # Filter out very large gaps (likely between different deployment periods)
+            median_gap = np.median(gaps)
+            if median_gap <= 0:
+                con.execute(
+                    "UPDATE tblTag SET pulseRate = 3.0 WHERE Tag_ID = ?", (tag_id,)
+                )
+                estimated.append((tag_id, 3.0))
+                continue
+
+            # Keep gaps within 50% of the median (filters out inter-deployment gaps)
+            valid_gaps = [g for g in gaps if 0.3 * median_gap <= g <= 2.0 * median_gap]
+            if len(valid_gaps) < 5:
+                con.execute(
+                    "UPDATE tblTag SET pulseRate = 3.0 WHERE Tag_ID = ?", (tag_id,)
+                )
+                estimated.append((tag_id, 3.0))
+                continue
+
+            # Estimate pulse rate as the median of valid gaps
+            estimated_rate = float(np.median(valid_gaps))
+            # Round to 1 decimal place
+            estimated_rate = round(estimated_rate, 1)
+            # Clamp to reasonable range (1.0 to 10.0 seconds)
+            estimated_rate = max(1.0, min(10.0, estimated_rate))
+
+            con.execute(
+                "UPDATE tblTag SET pulseRate = ? WHERE Tag_ID = ?",
+                (estimated_rate, tag_id),
+            )
+            estimated.append((tag_id, estimated_rate))
+
+        con.commit()
+        return estimated
+    finally:
+        con.close()
+
+
 def prepare_run(c):
     """Keep the config receiver table and give the window a water level (tblWSEL starts 2025-06-17 in the raw build)."""
     if "tblReceiver_initial" not in table_names(c.db):
@@ -110,6 +437,13 @@ def prepare_run(c):
     in_window = need_rows(c.db, "tblWSEL", "where timeStamp >= '%s' and timeStamp <= '%s'" % (c.window_start, c.window_end))
     if dup:
         raise RuntimeError("check failed: %d duplicate tblWSEL timestamps" % dup)
+
+    # Estimate pulse rates for tags without them
+    estimated = _estimate_pulse_rates(c.db)
+    if estimated:
+        tags_str = ", ".join("%s (%.1fs)" % t for t in estimated)
+        print("WARNING: assigned estimated pulse rates for tags without data: %s" % tags_str, flush=True)
+
     return {"wsel_rows_inserted": len(rows), "wsel_rows_in_window": in_window}
 
 
@@ -410,17 +744,52 @@ def classify_ats_fish(primary, pulse_rate):
 
 
 def fish_multipath_run(c):
-    """Step 8: legacy pulse-rate enumeration and primary ranking, then a distinct ATS timing classifier."""
+    """Step 8: legacy pulse-rate enumeration and primary ranking, then a distinct ATS timing classifier.
+
+    Uses ProcessPoolExecutor for per-tag parallelism. Database writes are
+    done sequentially in the main process after all workers complete.
+    """
     lp.ensure_progress(c.db)
     lp.execute(c.db, "delete from %s where Tag_ID = '__ats_fish_two_stage__'" % lp.PROGRESS_TABLE)
+    n_workers = max(1, min(os.cpu_count() // 2, 4))
     notes = {}
+    if n_workers > 1 and len(c.tags) > 1:
+        print("MULTIPATH: parallel with %d workers for %d tags" % (n_workers, len(c.tags)), flush=True)
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    _multipath_worker, tag, str(c.db), str(c.work), str(c.work / "figures"),
+                ): tag
+                for tag in c.tags
+            }
+            results = {}
+            for future in as_completed(futures):
+                tag = futures[future]
+                try:
+                    results[tag] = future.result()
+                except Exception as e:
+                    results[tag] = {"tag": tag, "error": str(e)}
+                    print("MULTIPATH %s FAILED: %s" % (tag, e), flush=True)
+    else:
+        # Sequential fallback
+        print("MULTIPATH: sequential (%d worker)" % n_workers, flush=True)
+        results = {}
+        for tag in c.tags:
+            results[tag] = _multipath_worker(
+                tag, str(c.db), str(c.work), str(c.work / "figures")
+            )
+
+    # --- Sequential DB writes (one connection, no contention) --------------------
     for tag in c.tags:
-        primary_folder = lp.fresh_folder(c.work / "multipath_primary")
-        data = jsats3d.multipath_data_object(tag, str(c.db), primary_folder)
-        if data.empty:
-            raise RuntimeError("no clock-fixed detections for study tag %s" % tag)
-        jsats3d.multipath_2(data)
-        existing = table_names(c.db)  # read before the delete: a large delete locks other connections
+        res = results.get(tag)
+        if res is None or "error" in res:
+            if res and "error" in res:
+                raise RuntimeError("multipath %s: %s" % (tag, res["error"]))
+            continue
+        # Create tag-specific primary folder for widen_table
+        primary_folder = str(Path(c.work) / "multipath_primary" / tag)
+        # Delete old rows (read table list before delete to avoid lock)
+        existing = table_names(c.db)
         con = sqlite3.connect(c.db)
         try:
             for table in ("tblDetectionFilterPrimary", "tblDetectionFilterSecondary"):
@@ -429,22 +798,26 @@ def fish_multipath_run(c):
             con.commit()
         finally:
             con.close()
+        # Re-import primary from CSV
         lp.widen_table(c.db, "tblDetectionFilterPrimary", primary_folder)
         jsats3d.multipath_data_management(primary_folder, str(c.db), primary=True)
-        primary = lp.query(c.db, "select * from tblDetectionFilterPrimary where Tag_ID = ?", (tag,))
-        rate = float(lp.query(c.db, "select pulseRate from tblTag where Tag_ID = ?", (tag,)).pulseRate.iloc[0])
-        secondary = classify_ats_fish(primary[primary.transNo.notna()], rate)
+        # Write secondary
         con = sqlite3.connect(c.db)
         try:
-            secondary.to_sql("tblDetectionFilterSecondary", con, if_exists="append", index=False, chunksize=1000)
+            res["secondary_df"].to_sql(
+                "tblDetectionFilterSecondary", con, if_exists="append", index=False, chunksize=1000
+            )
             con.commit()
         finally:
             con.close()
-        notes[tag] = {"primary_rows": int(len(primary)), "secondary_rows": int(len(secondary)),
-                      "transmissions": int(secondary.transNo.nunique()),
-                      "primary_later_arrivals": int((primary.multipath == 1).sum()),
-                      "secondary_suspect_first_arrivals": int((secondary.dbscan_class == "suspect_reflection").sum()),
-                      "unclassified_first_arrivals": int((secondary.dbscan_class == "unclassified_primary").sum())}
+        notes[tag] = {
+            "primary_rows": res["primary_rows"],
+            "secondary_rows": res["secondary_rows"],
+            "transmissions": res["transmissions"],
+            "primary_later_arrivals": res["primary_later_arrivals"],
+            "secondary_suspect_first_arrivals": res["secondary_suspect_first_arrivals"],
+            "unclassified_first_arrivals": res["unclassified_first_arrivals"],
+        }
     lp.mark_done(c.db, "__ats_fish_two_stage__")
     return notes
 
@@ -532,7 +905,11 @@ def reject_outside_hull(out, tag, hull_eq, margin_m):
 
 
 def positions_run(c):
-    """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
+    """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag).
+
+    Uses memory-aware ProcessPoolExecutor: limits concurrent workers based on
+    available system RAM so we never OOM.
+    """
     out = Path(lp.fresh_folder(c.work / "positions"))
     s = deng_settings(c)
     print("DENG options: %s" % s, flush=True)
@@ -542,7 +919,13 @@ def positions_run(c):
         rec = lp.query(c.db, "select Rec_ID, X_t, Y_t from tblReceiver").set_index("Rec_ID")
         hull_eq = ConvexHull(rec.loc[c.receivers_3d, ["X_t", "Y_t"]].astype(float).to_numpy()).equations
     notes = {"settings": s}
-    for tag in c.tags:
+    deep_receivers = list(c.deep) if hasattr(c, "deep") else []
+
+    if len(c.tags) > 1:
+        notes = _positions_run_parallel(c, out, s, hull_eq, deep_receivers)
+    else:
+        # Single tag: sequential (no parallelism needed)
+        tag = c.tags[0]
         pos = jsats3d.position(tag, c.receivers_3d, str(c.db), str(out), str(c.work / "figures"))
         if pos.tag_data.empty:
             raise RuntimeError("check failed: no filtered detections for %s" % tag)
@@ -559,6 +942,7 @@ def positions_run(c):
             note["outside_array"] = reject_outside_hull(out, tag, hull_eq, s["hull_margin_m"])
         print("DENG %s: %s" % (tag, note), flush=True)
         notes[tag] = note
+
     if not any(out.glob("*.csv")):
         raise RuntimeError("check failed: Deng wrote no position files")
     return notes
@@ -1116,7 +1500,7 @@ def main(argv=None):
             continue
         print("\n=== step %s: %s ===" % (label, name), flush=True)
         if done(c):
-            print("already done, skipped", flush=True)
+            print("%s already computed, skipped" % label, flush=True)
             steps.setdefault(name, {})["status"] = "done (skipped, output exists)"
             continue
         began = time.time()

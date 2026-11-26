@@ -16,9 +16,9 @@ output_db       = 'output\20fish\2ofish_run.db'
 
 [selection]
 species   = []
-tags      = ['26E4']
-start     = '2025-06-20 00:00:00'
-end       = '2025-06-30 23:59:59'
+tags      = ['4C35', '4CCB', '26E4']
+start     = '2025-06-18 00:00:00'
+end       = '2025-06-27 23:59:59'
 receivers = []
 
 [study]
@@ -27,8 +27,8 @@ bm_elev          = 861.5
 bm_elev_units    = 'feet'
 output_units     = 'meters'
 master_receiver  = 'ZOI08'
-synch_time_start = '2025-06-11 00:00:00'
-synch_time_end   = '2025-09-17 23:59:59'
+synch_time_start = '2025-06-18 00:00:00'
+synch_time_end   = '2025-06-27 23:59:59'
 pulse_rates      = {}   # filled from the data after indexing
 
 [legacy]
@@ -56,7 +56,7 @@ dbscan_min_samples = 5
 dbscan_accel_scale = 5.0
 dbscan_depth_weight = 1.0
 dbscan_accel_gap_s = 12.0
-study_tags        = ['26E4']
+study_tags        = []
 signal_proxies    = true
 premedian_filter       = true
 premedian_box          = true
@@ -86,14 +86,14 @@ segmented_clock_dbscan = true   # segmented with extrapolation fix
 run             = false
 beacon_receiver = 'ZOI08'
 anchor          = 'ZOI03'
-start           = '2025-06-11 00:00:00'
-end             = '2025-09-17 23:59:59'
+start           = '2025-06-18 00:00:00'
+end             = '2025-06-27 23:59:59'
 output_dir      = ''
 
 [figures]
 depth_floor_m        = -16.0
 depth_floor_margin_m = 4.0
-fish_products        = ['plan_time', 'depth_time']
+fish_products        = []
 
 [outputs]
 positions             = true
