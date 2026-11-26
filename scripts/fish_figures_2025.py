@@ -73,6 +73,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.gridspec as gridspec
 
 warnings.filterwarnings("ignore")
 
@@ -106,7 +108,7 @@ def iso_utc(t):
 # that heard the transmission) and status (positioned, or why not).
 OUTPUT_FILE = "fish_positions.csv"
 OUTPUT_COLUMNS = ["AT_code", "datetime_utc", "x_m", "y_m", "z_m", "x_std", "y_std", "z_std", "n_solutions",
-                  "in_convexhull", "in_3Darea", "n_receivers", "status"]
+                  "in_2Dconvexhull", "in_3Dconvexhull", "n_receivers", "status"]
 # status of each row; the four non-positioned reasons are checked in this order
 STATUS_POSITIONED = "positioned"
 STATUS_FEW = "too few receivers"          # < 4 of the positioning receivers heard it (3D Deng needs 4)
@@ -173,12 +175,13 @@ def write_fish_positions(con, out, tags, consensus, floor_m):
                            [STATUS_POSITIONED, STATUS_FEW, STATUS_FAILED, STATUS_OUT], default=STATUS_DISAGREE)
         frames.append(pd.DataFrame({
             "AT_code": tag,
-            "datetime_utc": pd.to_datetime(t, unit="s", utc=True).strftime("%Y-%m-%dT%H:%M:%S.%f").str[:-3] + "+00:00",
-            "x_m": m.x.astype(float).round(3), "y_m": m.y.astype(float).round(3), "z_m": m.z.astype(float).round(3),
-            "x_std": m.x_std.astype(float).round(3), "y_std": m.y_std.astype(float).round(3),
-            "z_std": m.z_std.astype(float).round(3),
+            "datetime_utc": pd.to_datetime(t, unit="s", utc=True).strftime("%Y-%m-%dT%H:%M:%S").str[:-3] + "+00:00",
+            "x_m": m.x.astype(float).round(1), "y_m": m.y.astype(float).round(1),
+            "z_m": m.z.astype(float).round(1),
+            "x_std": m.x_std.astype(float).round(1), "y_std": m.y_std.astype(float).round(1),
+            "z_std": m.z_std.astype(float).round(1),
             "n_solutions": m.n_combinations.fillna(0).astype(int),
-            "in_convexhull": in2, "in_3Darea": in3,
+            "in_2Dconvexhull": in2, "in_3Dconvexhull": in3,
             "n_receivers": m.n_receivers.astype(int), "status": status,
             "_t": t}))
         print("  %s: %d epochs heard, %d positioned; %s" % (tag, len(m), int(pos.sum()),
@@ -232,7 +235,7 @@ def write_spatial_sd(table, out, rec, hull_ids):
     hull_rec = rec.loc[[r for r in hull_ids if r in rec.index]]
     hull_xy = hull_rec[["X_t", "Y_t"]].astype(float).to_numpy()
     from scipy.spatial import Delaunay
-    grid["in_convexhull"] = Delaunay(hull_xy).find_simplex(nodes) >= 0
+    grid["in_2Dconvexhull"] = Delaunay(hull_xy).find_simplex(nodes) >= 0
     if {"easting", "northing"} <= set(rec.columns):
         grid["easting_m"] = (grid.x_m + float((rec.easting.astype(float) - rec.X_t.astype(float)).median())).round(3)
         grid["northing_m"] = (grid.y_m + float((rec.northing.astype(float) - rec.Y_t.astype(float)).median())).round(3)
@@ -240,8 +243,8 @@ def write_spatial_sd(table, out, rec, hull_ids):
     grid.to_csv(out / "spatial_sd_grid.csv", index=False)
     # Fix-level summary inside / outside the 2D receiver hull.
     rows = []
-    for name, sel in (("all", p.index), ("inside hull", p.index[p.in_convexhull == True]),  # noqa: E712
-                      ("outside hull", p.index[p.in_convexhull == False])):  # noqa: E712
+    for name, sel in (("all", p.index), ("inside hull", p.index[p.in_2Dconvexhull == True]),  # noqa: E712
+                      ("outside hull", p.index[p.in_2Dconvexhull == False])):  # noqa: E712
         for key, col, label in SD_AXES:
             v = p.loc[sel, col].dropna()
             rows.append({"region": name, "axis": label, "n_fixes": len(v),
@@ -258,7 +261,7 @@ def write_spatial_sd(table, out, rec, hull_ids):
         zvals[ok] = grid["%s_sd_median_m" % key].to_numpy()
         Z = zvals.reshape(GX.shape)
         cap = float(np.nanpercentile(Z, 95))
-        inside = float(p.loc[p.in_convexhull == True, col].median())  # noqa: E712
+        inside = float(p.loc[p.in_2Dconvexhull == True, col].median())  # noqa: E712
         for kind in ("pixel", "contour"):
             fig, ax = plt.subplots(figsize=(9.5, 8))
             if kind == "pixel":
@@ -432,37 +435,71 @@ def main():
             ax.set_title(title)
             ax.set_aspect("equal")
 
-        if "plan_time" in products:
-            fig, ax = plt.subplots(figsize=(10, 8))
-            plan_view(ax, "viridis", norm_t,
-                      "%s - plan view, points colored by time (green start, red end)" % tag)
-            fig.colorbar(ax.collections[0], ax=ax, label="time (fraction of span)")
-            fig.savefig(out / ("%s_plan_time.png" % tag), dpi=150, bbox_inches="tight")
-            plt.close(fig)
+        # ---- Combined figure: plan view (top) + depth over time (bottom) ----
+        if "plan_time" in products or "depth_time" in products:
+            fig, (ax_plan, ax_depth) = plt.subplots(
+                2, 1, figsize=(14, 12),
+                gridspec_kw={"height_ratios": [2, 1]},
+                constrained_layout=True,
+            )
 
-        if "plan_depth" in products:
-            fig, ax = plt.subplots(figsize=(10, 8))
-            plan_view(ax, "twilight", gk.z, "%s - plan view, points colored by depth Z (m)" % tag)
-            fig.colorbar(ax.collections[0], ax=ax, label="Z (m)")
-            fig.savefig(out / ("%s_plan_depth.png" % tag), dpi=150, bbox_inches="tight")
-            plt.close(fig)
+            # ---- Top: plan view (square) ----
+            ax_plan.scatter(gk.x, gk.y, c=norm_t, cmap="viridis", s=14, alpha=0.8, zorder=3)
+            draw_receivers_2d(ax_plan, rec)
 
-        # ---- depth over time (fish dashboard v3 depth panel, static; one colour, no temperature bar)
-        if "depth_time" in products:
-            fig, ax = plt.subplots(figsize=(12, 4.5))
+            # First detection = black square, last = red circle
+            ax_plan.plot(gk.x.iloc[0], gk.y.iloc[0], "ks", markersize=9, zorder=5,
+                         label="First Detection")
+            ax_plan.plot(gk.x.iloc[-1], gk.y.iloc[-1], "ro", markersize=9, zorder=5,
+                         label="Last Detection")
+
+            ax_plan.set_xlabel("X (m)")
+            ax_plan.set_ylabel("Y (m)")
+            ax_plan.set_title(tag, fontweight="bold", fontsize=12)
+            ax_plan.set_aspect("equal")
+
+            span_h = round((t1 - t0) / 3600.0, 1)
+            cbar = fig.colorbar(ax_plan.collections[0], ax=ax_plan, label="Fraction of Time Span (Time Span = %.1f Hours)" % span_h, pad=0.02)
+
+            ax_plan.legend(loc="lower left", fontsize=8)
+
+            # ---- Bottom: depth over time ----
             tt = pd.to_datetime(gk.t0, unit="s")
-            colour = TAG_COLORS.get(tag, "#2ca02c")
-            ax.plot(tt, gk.z, "-", color=colour, linewidth=1.6, zorder=2)
-            ax.plot(tt, gk.z, "o", color="#3b2a7a", markersize=2.5, zorder=3)
-            ax.axhline(0, color="0.5", linewidth=0.8, linestyle="--", zorder=1)
-            ax.set_ylim(min(float(gk.z.min()), 0.0) - 0.5, 0.5)
-            ax.invert_yaxis()   # as the dashboard panel: deepest values at the top, surface (Z = 0) at the bottom
-            ax.set_ylabel("Z (m, 0 = water surface)")
-            ax.set_xlabel("local time (PDT)")
-            ax.set_title("%s - fish depth over time" % tag)
-            ax.grid(True, alpha=0.3)
+            ax_depth.plot(tt, -gk.z, "o", color="black", markersize=2, zorder=3,
+                          label="Raw Depth Positions")
+
+            # 5-minute rolling median
+            rolling = pd.DataFrame({"z": -gk.z, "t": tt}).set_index("t")
+            rolling_med = rolling.z.rolling("5min", center=True).median()
+            ax_depth.plot(rolling_med.index, rolling_med.values, "--", color="red", linewidth=2.5,
+                          alpha=0.8, label="5-Min Rolling Median", zorder=4)
+
+            ax_depth.set_ylabel("Depth (m)")
+            ax_depth.set_xlabel("Local Time (PDT) – 2025")
+            ax_depth.set_title("")
+            ax_depth.invert_yaxis()
+            ax_depth.grid(True, alpha=0.3)
+
+            # Date formatting
+            ax_depth.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
             fig.autofmt_xdate()
-            fig.savefig(out / ("%s_depth_time.png" % tag), dpi=150, bbox_inches="tight")
+
+            ax_depth.legend(loc="lower right", fontsize=8)
+
+            # Shared font styling
+            for ax in (ax_plan, ax_depth):
+                ax.tick_params(labelsize=8)
+                for label in ax.get_xticklabels() + ax.get_yticklabels():
+                    label.set_fontsize(8)
+                ax.xaxis.label.set_fontsize(9)
+                ax.yaxis.label.set_fontsize(9)
+                ax.xaxis.label.set_fontweight("bold")
+                ax.yaxis.label.set_fontweight("bold")
+            cbar.ax.tick_params(labelsize=8)
+            cbar.ax.yaxis.label.set_fontsize(9)
+            cbar.ax.yaxis.label.set_fontweight("bold")
+
+            fig.savefig(out / ("%s.png" % tag), dpi=150, bbox_inches="tight")
             plt.close(fig)
 
         if "3d" in products:
