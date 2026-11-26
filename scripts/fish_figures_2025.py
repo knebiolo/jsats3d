@@ -440,8 +440,9 @@ def main():
             fig, (ax_plan, ax_depth) = plt.subplots(
                 2, 1, figsize=(14, 12),
                 gridspec_kw={"height_ratios": [2, 1]},
-                constrained_layout=True,
+                constrained_layout=False,
             )
+            fig.subplots_adjust(hspace=0.4, left=0.12, right=0.92, top=0.92, bottom=0.1)
 
             # ---- Top: plan view (square) ----
             ax_plan.scatter(gk.x, gk.y, c=norm_t, cmap="viridis", s=14, alpha=0.8, zorder=3)
@@ -459,7 +460,8 @@ def main():
             ax_plan.set_aspect("equal")
 
             span_h = round((t1 - t0) / 3600.0, 1)
-            cbar = fig.colorbar(ax_plan.collections[0], ax=ax_plan, label="Fraction of Time Span (Time Span = %.1f Hours)" % span_h, pad=0.02)
+            cbar_ax = fig.add_axes([0.88, 0.55, 0.02, 0.35])
+            cbar = fig.colorbar(ax_plan.collections[0], cax=cbar_ax, label="Fraction of Time Span (Time Span = %.1f Hours)" % span_h)
 
             ax_plan.legend(loc="lower left", fontsize=8)
 
