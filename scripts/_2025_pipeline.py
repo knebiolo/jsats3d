@@ -141,6 +141,42 @@ def _deng_worker(
     """
     import time
     import jsats3d
+    import numpy as np
+
+    # Auto-warm Numba JIT on first call — serialized across workers via a lock file
+    # so only 1 process compiles at a time. Cache is written to disk; others pick
+    # it up without recompiling.
+    _out = Path(out_dir)
+    _lock_path = str(_out.parent / ".numba_compile.lock")
+    _compiled_marker = str(_out.parent / ".numba_compiled")
+    try:
+        got_lock = False
+        for _ in range(30):  # try for up to 30s
+            try:
+                with open(_lock_path, "x") as _lock_fh:
+                    # We created the lock file — we're the first, do compilation
+                    got_lock = True
+                    from jsats3d.jsats3d import _deng_solve_all_numba
+                    _warm_times = np.array([0.0, 0.001, 0.002, 0.003, 0.004])
+                    _warm_pos = np.random.randn(5, 3) * 100
+                    # Simple tetrahedron hull for warm-up (4 vertices, 4 faces)
+                    _warm_hull_simplices = np.array([0.,1.,2., 0.,1.,3., 0.,2.,3., 1.,2.,3.])
+                    _warm_hull_points = np.array([0.,0.,0., 1.,0.,0., 0.,1.,0., 0.,0.,1.])
+                    _deng_solve_all_numba(0, _warm_times, _warm_pos,
+                                          _warm_hull_simplices, 4,
+                                          _warm_hull_points, 4,
+                                          1500.0, 5)
+                    # Mark as compiled
+                    Path(_compiled_marker).touch()
+                    os.unlink(_lock_path)
+                    break
+            except FileExistsError:
+                # Another worker has the lock — check if compilation is done
+                if Path(_compiled_marker).exists():
+                    break
+                time.sleep(1)
+    except Exception:
+        pass  # non-fatal: will compile on first real Deng call
 
     # Track memory usage
     mem_before = _get_mem_mb()
@@ -171,7 +207,7 @@ def _deng_worker(
         )
 
     t = time.time()
-    pos.Deng()
+    pos.Deng(data_format="ats")
     deng_time = round(time.time() - t, 1)
     A_found = int((pos.DengSolutionA_unfiltered.comment == "solution found").sum())
     B_found = int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())
@@ -225,7 +261,7 @@ def _positions_run_parallel(c, out, s, hull_eq, deep_receivers):
     import time
     import jsats3d
 
-    max_workers = max(1, min(os.cpu_count() // 2, 6))
+    max_workers = max(1, min(os.cpu_count() // 2, 3))
     max_mem_per_worker = 2048  # 2 GB per worker max
     free_mem = _get_system_free_mb()
     if free_mem is not None:
@@ -244,6 +280,22 @@ def _positions_run_parallel(c, out, s, hull_eq, deep_receivers):
     completed = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Warm up Numba JIT in the main process before workers start
+        try:
+            import numpy as np
+            from jsats3d.jsats3d import _deng_solve_all_numba
+            warm_times = np.array([0.0, 0.001, 0.002, 0.003, 0.004])
+            warm_pos = np.random.randn(5, 3) * 100
+            # Simple tetrahedron hull for warm-up (4 vertices, 4 faces)
+            warm_hull_simplices = np.array([0.,1.,2., 0.,1.,3., 0.,2.,3., 1.,2.,3.])
+            warm_hull_points = np.array([0.,0.,0., 1.,0.,0., 0.,1.,0., 0.,0.,1.])
+            _deng_solve_all_numba(0, warm_times, warm_pos,
+                                  warm_hull_simplices, 4,
+                                  warm_hull_points, 4,
+                                  1500.0, 5)
+            print("DENG: Numba JIT warm-up done (pre-compiled)", flush=True)
+        except Exception:
+            pass  # non-fatal: workers will compile on first real call
         while worker_idx < len(tags) or active_futures:
             # Launch new workers if capacity available
             while len(active_futures) < max_workers and worker_idx < len(tags):
@@ -266,7 +318,7 @@ def _positions_run_parallel(c, out, s, hull_eq, deep_receivers):
 
             # Wait for at least one worker to complete
             if active_futures:
-                done_futures, active_futures = wait(active_futures, return_when=FIRST_COMPLETED)
+                done_futures, not_done = wait(active_futures, return_when=FIRST_COMPLETED)
                 for future in done_futures:
                     tag = active_futures.pop(future)
                     try:
@@ -934,7 +986,7 @@ def positions_run(c):
             pos.tag_data, note["deep_swapped"] = cap_receivers(pos.tag_data, s["max_receivers"],
                                                                c.deep if s["keep_deep"] else ())
         t = time.time()
-        pos.Deng()
+        pos.Deng(data_format="ats")
         note["deng_s"] = round(time.time() - t, 1)
         note["A_found"] = int((pos.DengSolutionA_unfiltered.comment == "solution found").sum())
         note["B_found"] = int((pos.DengSolutionB_unfiltered.comment == "solution found").sum())

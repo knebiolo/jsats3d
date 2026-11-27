@@ -302,12 +302,12 @@ def tag_multipath(db, tag, work, method):
     return True
 
 
-def deng(db, tag, receivers, out, figures, water_column=False):
+def deng(db, tag, receivers, out, figures, water_column=False, data_format="ats"):
     pos = jsats3d.position(tag, receivers, str(db), str(out), str(figures))
     if pos.tag_data.empty:
         print("WARNING: tag %s has no filtered detections at these receivers; no positions" % tag)
         return None
-    pos.Deng(water_column=water_column)
+    pos.Deng(water_column=water_column, data_format=data_format)
     return pos
 
 
@@ -388,7 +388,7 @@ def position_deep_receivers(db, surface, deep, work, method, solution):
                   % (rec, len(sols), solution, x, y, z_cfg))
         else:
             # Legacy 3D Deng
-            pos = deng(db, tag, surface, out, work / "figures")
+            pos = deng(db, tag, surface, out, work / "figures", data_format="teknologic")
             if pos is None:
                 continue
             sols = pos.DengSolutionA_unfiltered if solution == "A" else pos.DengSolutionB_unfiltered
@@ -596,7 +596,7 @@ def process(run, paths, resume=False):
             continue
         print("Study tag %s" % tag)
         if tag_multipath(db, tag, work, method):
-            deng(db, tag, receivers_3d, positions, work / "figures")
+            deng(db, tag, receivers_3d, positions, work / "figures", data_format="teknologic")
             if receivers_2d:
                 deng_2d(db, tag, receivers_2d, positions_2d, work / "figures", float(legacy["fixed_z_2d"]))
         mark_done(db, tag)

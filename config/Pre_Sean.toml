@@ -12,11 +12,11 @@ covariate_csv   = 'C:\jsats_data\Master Covariate Table\2025 Master Covariate Ta
 temperature_csv = 'C:\jsats_data\Temperature\2025_Temp_String_Data_5min_interpolated.csv'
 hobo_dir        = 'C:\jsats_data\Tag Drag Period\DD_N'
 released_file   = 'C:\jsats_data\CowlitzAT2025_Data_Deliverables\3_PTAGIS_datasets\released_v0.csv'
-output_db       = 'output\20fish\2ofish_run.db'
+output_db       = 'output\\20fish_run.db'
 
 [selection]
 species   = []
-tags      = ['4C35', '4CCB', '26E4']
+tags = ['0516', '065A', '0957', '0AC6', '0AEA', '0B0A', '0E39', '0E76', '0FBD', '0FC7', '15AE', '16F9', '1716', '18E4', '1D5A', '1D8A', '266E', '27FA', '41E0', '46DB', '47A9', '4881', '493F', '4C35', '4CCB']
 start     = '2025-06-18 00:00:00'
 end       = '2025-06-27 23:59:59'
 receivers = []
@@ -25,7 +25,7 @@ receivers = []
 utc_conv         = -7
 bm_elev          = 861.5
 bm_elev_units    = 'feet'
-output_units     = 'meters'
+output_units     = 'meters'20fish
 master_receiver  = 'ZOI08'
 synch_time_start = '2025-06-18 00:00:00'
 synch_time_end   = '2025-06-27 23:59:59'

@@ -329,7 +329,8 @@ def main():
           ("  run file: %s" % run_file) if run_file else ""))
     # Per-fish figures to make: run file [figures] fish_products (default all). fish_positions.csv, fish_qc.csv and
     # the spatial SD outputs are always written.
-    products = set(figures_section(run_file).get("fish_products", FISH_PRODUCTS)) if run_file else set(FISH_PRODUCTS)
+    fp = figures_section(run_file).get("fish_products") if run_file else None
+    products = set(fp) if fp else set(FISH_PRODUCTS)
     unknown = products - set(FISH_PRODUCTS)
     if unknown:
         raise SystemExit("[figures] fish_products: unknown %s (choose from %s)" % (sorted(unknown), list(FISH_PRODUCTS)))

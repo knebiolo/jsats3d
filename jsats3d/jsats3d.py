@@ -34,6 +34,306 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from itertools import combinations
 
+# Numba-accelerated Deng solver (optional, falls back to Python)
+try:
+    from numba import njit
+    _NUMBA_AVAILABLE = True
+    print("NUMBA Deng: Numba available — ATS Deng will use compiled solver")
+except ImportError:
+    _NUMBA_AVAILABLE = False
+    print("NUMBA Deng: Numba not installed — falling back to Python Deng solver")
+
+
+@njit(cache=True)
+def _deng_solve_combo(r0, r1, r2, r3, t_ref, t1, t2, t3, SoS):
+    """Solve Deng's equations for one combination of 4 receivers.
+
+    Returns (T0a, xa, ya, za, T0b, xb, yb, zb) where invalid
+    solutions have T0 <= 0.
+    """
+    R00 = r1[0] - r0[0]
+    R01 = r2[0] - r0[0]
+    R02 = r3[0] - r0[0]
+    R10 = r1[1] - r0[1]
+    R11 = r2[1] - r0[1]
+    R12 = r3[1] - r0[1]
+    R20 = r1[2] - r0[2]
+    R21 = r2[2] - r0[2]
+    R22 = r3[2] - r0[2]
+
+    d1 = round(t1 - t_ref, 6)
+    d2 = round(t2 - t_ref, 6)
+    d3 = round(t3 - t_ref, 6)
+
+    n1 = (r1[0] - r0[0]) ** 2 + (r1[1] - r0[1]) ** 2 + (r1[2] - r0[2]) ** 2
+    n2 = (r2[0] - r0[0]) ** 2 + (r2[1] - r0[1]) ** 2 + (r2[2] - r0[2]) ** 2
+    n3 = (r3[0] - r0[0]) ** 2 + (r3[1] - r0[1]) ** 2 + (r3[2] - r0[2]) ** 2
+    b0 = n1 - SoS ** 2 * d1 ** 2
+    b1 = n2 - SoS ** 2 * d2 ** 2
+    b2 = n3 - SoS ** 2 * d3 ** 2
+
+    det = (R00 * (R11 * R22 - R12 * R21)
+         - R01 * (R10 * R22 - R12 * R20)
+         + R02 * (R10 * R21 - R11 * R20))
+
+    if abs(det) < 1e-15:
+        return -1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0
+
+    inv_det = 1.0 / det
+    Ri00 = (R11 * R22 - R12 * R21) * inv_det
+    Ri01 = (R02 * R21 - R01 * R22) * inv_det
+    Ri02 = (R01 * R12 - R02 * R11) * inv_det
+    Ri10 = (R12 * R20 - R10 * R22) * inv_det
+    Ri11 = (R00 * R22 - R02 * R20) * inv_det
+    Ri12 = (R02 * R10 - R00 * R12) * inv_det
+    Ri20 = (R10 * R21 - R11 * R20) * inv_det
+    Ri21 = (R01 * R20 - R00 * R21) * inv_det
+    Ri22 = (R00 * R11 - R01 * R10) * inv_det
+
+    Rt0 = Ri00 * d1 + Ri01 * d2 + Ri02 * d3
+    Rt1 = Ri10 * d1 + Ri11 * d2 + Ri12 * d3
+    Rt2 = Ri20 * d1 + Ri21 * d2 + Ri22 * d3
+
+    Rb0 = Ri00 * b0 + Ri01 * b1 + Ri02 * b2
+    Rb1 = Ri10 * b0 + Ri11 * b1 + Ri12 * b2
+    Rb2 = Ri20 * b0 + Ri21 * b1 + Ri22 * b2
+
+    RiRiT00 = Ri00 * Ri00 + Ri01 * Ri01 + Ri02 * Ri02
+    RiRiT01 = Ri00 * Ri10 + Ri01 * Ri11 + Ri02 * Ri12
+    RiRiT02 = Ri00 * Ri20 + Ri01 * Ri21 + Ri02 * Ri22
+    RiRiT10 = Ri10 * Ri00 + Ri11 * Ri01 + Ri12 * Ri02
+    RiRiT11 = Ri10 * Ri10 + Ri11 * Ri11 + Ri12 * Ri12
+    RiRiT12 = Ri10 * Ri20 + Ri11 * Ri21 + Ri12 * Ri22
+    RiRiT20 = Ri20 * Ri00 + Ri21 * Ri01 + Ri22 * Ri02
+    RiRiT21 = Ri20 * Ri10 + Ri21 * Ri11 + Ri22 * Ri12
+    RiRiT22 = Ri20 * Ri20 + Ri21 * Ri21 + Ri22 * Ri22
+
+    tRiRiT0 = d1 * RiRiT00 + d2 * RiRiT10 + d3 * RiRiT20
+    tRiRiT1 = d1 * RiRiT01 + d2 * RiRiT11 + d3 * RiRiT21
+    tRiRiT2 = d1 * RiRiT02 + d2 * RiRiT12 + d3 * RiRiT22
+    tRiRiTt = d1 * tRiRiT0 + d2 * tRiRiT1 + d3 * tRiRiT2
+
+    bRiRiT0 = b0 * RiRiT00 + b1 * RiRiT10 + b2 * RiRiT20
+    bRiRiT1 = b0 * RiRiT01 + b1 * RiRiT11 + b2 * RiRiT21
+    bRiRiT2 = b0 * RiRiT02 + b1 * RiRiT12 + b2 * RiRiT22
+    bRiRiTb = b0 * bRiRiT0 + b1 * bRiRiT1 + b2 * bRiRiT2
+
+    a = SoS ** 4 * tRiRiTt - SoS ** 2
+    p = -0.5 * SoS ** 2 * (d1 * Rb0 + d2 * Rb1 + d3 * Rb2)
+    q = 0.25 * (b0 * Rb0 + b1 * Rb1 + b2 * Rb2)
+
+    disc = p ** 2 - a * q
+    if disc < 0 or abs(a) < 1e-15:
+        return -1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0
+
+    sq = np.sqrt(disc)
+    T0a = (-p + sq) / a
+    T0b = (-p - sq) / a
+
+    half_b = 0.5
+    SoS2 = SoS ** 2
+
+    if T0a > 0:
+        S0a = (Ri00 * (half_b * b0 - SoS2 * d1 * T0a) +
+               Ri01 * (half_b * b1 - SoS2 * d2 * T0a) +
+               Ri02 * (half_b * b2 - SoS2 * d3 * T0a))
+        S1a = (Ri10 * (half_b * b0 - SoS2 * d1 * T0a) +
+               Ri11 * (half_b * b1 - SoS2 * d2 * T0a) +
+               Ri12 * (half_b * b2 - SoS2 * d3 * T0a))
+        S2a = (Ri20 * (half_b * b0 - SoS2 * d1 * T0a) +
+               Ri21 * (half_b * b1 - SoS2 * d2 * T0a) +
+               Ri22 * (half_b * b2 - SoS2 * d3 * T0a))
+        xa = r0[0] + S0a
+        ya = r0[1] + S1a
+        za = r0[2] + S2a
+    else:
+        xa, ya, za = 0.0, 0.0, 0.0
+
+    if T0b > 0:
+        S0b = (Ri00 * (half_b * b0 - SoS2 * d1 * T0b) +
+               Ri01 * (half_b * b1 - SoS2 * d2 * T0b) +
+               Ri02 * (half_b * b2 - SoS2 * d3 * T0b))
+        S1b = (Ri10 * (half_b * b0 - SoS2 * d1 * T0b) +
+               Ri11 * (half_b * b1 - SoS2 * d2 * T0b) +
+               Ri12 * (half_b * b2 - SoS2 * d3 * T0b))
+        S2b = (Ri20 * (half_b * b0 - SoS2 * d1 * T0b) +
+               Ri21 * (half_b * b1 - SoS2 * d2 * T0b) +
+               Ri22 * (half_b * b2 - SoS2 * d3 * T0b))
+        xb = r0[0] + S0b
+        yb = r0[1] + S1b
+        zb = r0[2] + S2b
+    else:
+        xb, yb, zb = 0.0, 0.0, 0.0
+
+    return T0a, xa, ya, za, T0b, xb, yb, zb
+
+
+@njit(cache=True)
+def _check_in_hull(point, hull_simplices, hull_simplices_n, hull_points, hull_points_n):
+    """Check if point is inside the convex hull using simplex-based normal checking.
+
+    Matches legacy ENM_jsats3d_Updated behavior: computes a normal from each
+    triangular face and rejects the point if it lies on the "outside" side of
+    any face (dot product > 1e-6).  This is more permissive than the
+    half-space-equation check (tolerance 1e-6 vs 1e-12) and can skip
+    degenerate faces, which is why legacy finds more positioned positions.
+    """
+    tol = 1e-6
+    for s in range(hull_simplices_n):
+        v0_idx = int(hull_simplices[s * 3 + 0])
+        v1_idx = int(hull_simplices[s * 3 + 1])
+        v2_idx = int(hull_simplices[s * 3 + 2])
+        # Three vertices of the triangular face
+        x0, y0, z0 = hull_points[v0_idx * 3 + 0], hull_points[v0_idx * 3 + 1], hull_points[v0_idx * 3 + 2]
+        x1, y1, z1 = hull_points[v1_idx * 3 + 0], hull_points[v1_idx * 3 + 1], hull_points[v1_idx * 3 + 2]
+        x2, y2, z2 = hull_points[v2_idx * 3 + 0], hull_points[v2_idx * 3 + 1], hull_points[v2_idx * 3 + 2]
+        # Cross product: normal = (v1-v0) x (v2-v0)
+        ex = x1 - x0
+        ey = y1 - y0
+        ez = z1 - z0
+        fx = x2 - x0
+        fy = y2 - y0
+        fz = z2 - z0
+        nx = ey * fz - ez * fy
+        ny = ez * fx - ex * fz
+        nz = ex * fy - ey * fx
+        # Skip degenerate faces (collinear vertices)
+        norm_sq = nx * nx + ny * ny + nz * nz
+        if norm_sq < 1e-30:
+            continue
+        # Normalize
+        norm = np.sqrt(norm_sq)
+        nx /= norm
+        ny /= norm
+        nz /= norm
+        # Check if point is on the outside of this face
+        dx = point[0] - x0
+        dy = point[1] - y0
+        dz = point[2] - z0
+        if nx * dx + ny * dy + nz * dz > tol:
+            return 0
+    return 1
+
+
+@njit(cache=True, parallel=True)
+def _deng_solve_all_numba(trans_no, times, positions, hull_simplices, hull_simplices_n,
+                          hull_points, hull_points_n,
+                          sos, n_receivers):
+    """Numba-compiled Deng solver for all combinations in a transmission.
+
+    hull_simplices: flattened array of simplex vertex indices (3 ints per face)
+    hull_points: flattened array of hull vertex coordinates (3 floats per vertex)
+    """
+    max_rows = n_receivers * (n_receivers - 1) * (n_receivers - 2) * (n_receivers - 3) // 6 * 2 + 100
+    sols_a = np.empty((max_rows, 13))
+    sols_b = np.empty((max_rows, 13))
+    n_a = 0
+    n_b = 0
+    sol_no = 0
+
+    for i0 in range(n_receivers):
+        for i1 in range(i0 + 1, n_receivers):
+            for i2 in range(i1 + 1, n_receivers):
+                for i3 in range(i2 + 1, n_receivers):
+                    r0 = positions[i0]
+                    r1 = positions[i1]
+                    r2 = positions[i2]
+                    r3 = positions[i3]
+                    t_ref = times[i0]
+                    t1 = times[i1]
+                    t2 = times[i2]
+                    t3 = times[i3]
+
+                    T0a, xa, ya, za, T0b, xb, yb, zb = _deng_solve_combo(
+                        r0, r1, r2, r3, t_ref, t1, t2, t3, sos
+                    )
+
+                    if T0a > 0:
+                        in_h = _check_in_hull(
+                            np.array([xa, ya, za]),
+                            hull_simplices, hull_simplices_n,
+                            hull_points, hull_points_n
+                        )
+                        sols_a[n_a, 0] = trans_no
+                        sols_a[n_a, 1] = sol_no
+                        sols_a[n_a, 2] = float(i0)
+                        sols_a[n_a, 3] = float(i1)
+                        sols_a[n_a, 4] = float(i2)
+                        sols_a[n_a, 5] = float(i3)
+                        sols_a[n_a, 6] = xa
+                        sols_a[n_a, 7] = ya
+                        sols_a[n_a, 8] = za
+                        sols_a[n_a, 9] = round(t1 - t_ref, 6)
+                        sols_a[n_a, 10] = times[0]
+                        sols_a[n_a, 11] = 1.0
+                        sols_a[n_a, 12] = float(in_h)
+                        n_a += 1
+                    else:
+                        sols_a[n_a, 0] = trans_no
+                        sols_a[n_a, 1] = sol_no
+                        sols_a[n_a, 2] = float(i0)
+                        sols_a[n_a, 3] = float(i1)
+                        sols_a[n_a, 4] = float(i2)
+                        sols_a[n_a, 5] = float(i3)
+                        sols_a[n_a, 6] = 9999.0
+                        sols_a[n_a, 7] = 9999.0
+                        sols_a[n_a, 8] = 9999.0
+                        sols_a[n_a, 9] = 9999.0
+                        sols_a[n_a, 10] = times[0]
+                        sols_a[n_a, 11] = -1.0
+                        sols_a[n_a, 12] = 0.0
+                        n_a += 1
+
+                    if T0b > 0:
+                        in_h = _check_in_hull(
+                            np.array([xb, yb, zb]),
+                            hull_simplices, hull_simplices_n,
+                            hull_points, hull_points_n
+                        )
+                        sols_b[n_b, 0] = trans_no
+                        sols_b[n_b, 1] = sol_no
+                        sols_b[n_b, 2] = float(i0)
+                        sols_b[n_b, 3] = float(i1)
+                        sols_b[n_b, 4] = float(i2)
+                        sols_b[n_b, 5] = float(i3)
+                        sols_b[n_b, 6] = xb
+                        sols_b[n_b, 7] = yb
+                        sols_b[n_b, 8] = zb
+                        sols_b[n_b, 9] = round(t1 - t_ref, 6)
+                        sols_b[n_b, 10] = times[0]
+                        sols_b[n_b, 11] = 1.0
+                        sols_b[n_b, 12] = float(in_h)
+                        n_b += 1
+                    else:
+                        sols_b[n_b, 0] = trans_no
+                        sols_b[n_b, 1] = sol_no
+                        sols_b[n_b, 2] = float(i0)
+                        sols_b[n_b, 3] = float(i1)
+                        sols_b[n_b, 4] = float(i2)
+                        sols_b[n_b, 5] = float(i3)
+                        sols_b[n_b, 6] = 9999.0
+                        sols_b[n_b, 7] = 9999.0
+                        sols_b[n_b, 8] = 9999.0
+                        sols_b[n_b, 9] = 9999.0
+                        sols_b[n_b, 10] = times[0]
+                        sols_b[n_b, 11] = -1.0
+                        sols_b[n_b, 12] = 0.0
+                        n_b += 1
+
+                    sol_no += 1
+
+    if n_a > 0:
+        sols_a = sols_a[:n_a]
+    else:
+        sols_a = np.empty((0, 13))
+    if n_b > 0:
+        sols_b = sols_b[:n_b]
+    else:
+        sols_b = np.empty((0, 13))
+
+    return sols_a, sols_b
+
+
 #import plotly.graph_objects as go
 #import skkda
 #from sklearn.mixture import GMM
@@ -1551,7 +1851,7 @@ class position():
             return z_value
         return z_value + float(self.WSELfun(timestamp)) - ref
     
-    def Deng(self,print_output = False, water_column = False):
+    def Deng(self,print_output = False, water_column = False, data_format = "ats"):
         # water_column: flag solutions above the water surface (WSEL at the transmission) or more than 4 m below
         # the lowest receiver as 'outside water column - rejected'; off by default to keep legacy output unchanged
         def point_in_hull(point,hull):
@@ -1586,6 +1886,9 @@ class position():
         z_by_rec = {}
         for rec_id, z_val in zip(self.ephemeris.Rec_ID, self.ephemeris.Z_t):
             z_by_rec.setdefault(rec_id, z_val)
+        # Convert seconds_fix to numeric (SQLite returns TEXT; coerce bad values to NaN)
+        self.tag_data['seconds_fix'] = pd.to_numeric(self.tag_data['seconds_fix'], errors = 'coerce')
+        self.tag_data.dropna(subset = ['seconds_fix'], inplace = True)
         self.tag_data.sort_values(by = 'seconds_fix', axis = 0, ascending = True, inplace = True)
         by_trans = self.tag_data.groupby('transNo', sort = False).indices
         no_rows = self.tag_data.iloc[0:0]
@@ -1792,108 +2095,155 @@ class position():
                             v = sos(self.interpolator(t))
                             sos_cache[t] = v
                         return v
-                    tested = set()
-                    for (i0, i1, i2, i3) in combinations(range(k), 4):
-                        recs = (recs_arr[i0], recs_arr[i1], recs_arr[i2], recs_arr[i3])
-                        if recs in tested:
-                            continue
-                        sol_no = 0
-                        ref, r1, r2, r3 = recs
-                        t_ref, t1, t2, t3 = times_arr[i0], times_arr[i1], times_arr[i2], times_arr[i3]
-                        r0Pos, r1Pos, r2Pos, r3Pos = pos_arr[i0], pos_arr[i1], pos_arr[i2], pos_arr[i3]
-                        self.z_translation = r0Pos[2]
+
+                    # Use Numba-accelerated solver for ATS data only
+                    if _NUMBA_AVAILABLE and data_format == "ats":
                         if print_output == True:
-                            print ("The position of receiver %s is %s"%(ref,r0Pos))
-                        R = np.array([[r1Pos[0]-r0Pos[0], r2Pos[0]-r0Pos[0], r3Pos[0]-r0Pos[0]],
-                                      [r1Pos[1]-r0Pos[1], r2Pos[1]-r0Pos[1], r3Pos[1]-r0Pos[1]],
-                                      [r1Pos[2]-r0Pos[2], r2Pos[2]-r0Pos[2], r3Pos[2]-r0Pos[2]]])
-                        if print_output == True:
-                            print ("Posisition Matrix R \n %s"%(R))
-                        tdoa_1 = np.round(t1 - t_ref, 6)
-                        tdoa_2 = np.round(t2 - t_ref, 6)
-                        tdoa_3 = np.round(t3 - t_ref, 6)
-                        tv = np.array([tdoa_1, tdoa_2, tdoa_3])
-                        if print_output == True:
-                            print ("Print T matrix \n %s"%(tv))
-                        SoS = sos_at(t_ref)
-                        if print_output == True:
-                            print ("Current Speed of Sound = %s"%(SoS))
-                        b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
-                        b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2)
-                        b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)
-                        bv = np.array([b1, b2, b3])
-                        if print_output == True:
-                            print ("B matrix \n %s"%(bv))
-                        try:
-                            Rinv = np.linalg.inv(R)
-                            RinvT = Rinv.T
-                            # Match legacy shapes: legacy uses np.vstack -> (3,1) column, t.T -> (1,3) row
-                            tv_13 = tv.reshape(1, 3)
-                            tv_31 = tv.reshape(3, 1)
-                            bv_13 = bv.reshape(1, 3)
-                            bv_31 = bv.reshape(3, 1)
-                            # Same expression structure as legacy: t.T * R.I * R.T.I * t
-                            mt = (tv_13 @ Rinv) @ RinvT
-                            a = SoS**4 * (mt @ tv_31) - SoS**2
-                            p = -0.5 * SoS**2 * (mt @ bv_31)
-                            mb = (bv_13 @ Rinv) @ RinvT
-                            q = 0.25 * (mb @ bv_31)
-                            if print_output == True:
-                                print ('a = %s, p = %s, q = %s'%(a,p,q))
-                            discriminant = float((p**2 - a*q).item(0))
-                            coefficient = float(a.item(0))
-                            if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
-                                add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                              'negative quadratic discriminant - no solution',''))
-                                add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                              'negative quadratic discriminant - no solution',''))
-                                sol_no = sol_no + 1
-                                tested.add(recs)
+                            print("NUMBA Deng: using Numba-compiled solver (k=%d receivers, C(k,4) combos)" % k)
+                        # Extract hull simplices and points for simplex-based checking
+                        # (matches legacy ENM_jsats3d_Updated hull check behavior)
+                        hull_simplices = self.convex_hull.simplices.flatten().astype(np.float64)
+                        hull_points = self.convex_hull.points.flatten().astype(np.float64)
+                        hull_simplices_n = len(hull_simplices) // 3
+                        hull_points_n = len(hull_points) // 3
+                        # Precompute SOS once per transmission
+                        SoS = sos_at(times_arr[0])
+                        # Call Numba solver
+                        sols_a, sols_b = _deng_solve_all_numba(
+                            float(j), times_arr, pos_arr,
+                            hull_simplices, hull_simplices_n,
+                            hull_points, hull_points_n,
+                            SoS, k
+                        )
+                        # Convert Numba results to add_row format
+                        # Numba returns: [transNo, solNo, i0, i1, i2, i3, X, Y, Z, T01, ToA, comment, in_hull]
+                        # comment: 1.0 = "solution found", -1.0 = "negative time"
+                        for row in sols_a:
+                            sol_no_n = int(row[1])
+                            i0, i1, i2, i3 = int(row[2]), int(row[3]), int(row[4]), int(row[5])
+                            ref, r1, r2, r3 = recs_arr[i0], recs_arr[i1], recs_arr[i2], recs_arr[i3]
+                            if row[11] > 0:  # solution found
+                                add_row('A', (j, sol_no_n, ref, r1, r2, r3,
+                                              row[6], row[7], row[8], row[9], row[10],
+                                              'solution found', row[12] > 0))
+                            else:
+                                add_row('A', (j, sol_no_n, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative time of arrival - no soluiton',''))
+                        for row in sols_b:
+                            sol_no_n = int(row[1])
+                            i0, i1, i2, i3 = int(row[2]), int(row[3]), int(row[4]), int(row[5])
+                            ref, r1, r2, r3 = recs_arr[i0], recs_arr[i1], recs_arr[i2], recs_arr[i3]
+                            if row[11] > 0:  # solution found
+                                add_row('B', (j, sol_no_n, ref, r1, r2, r3,
+                                              row[6], row[7], row[8], row[9], row[10],
+                                              'solution found', row[12] > 0))
+                            else:
+                                add_row('B', (j, sol_no_n, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                              'negative time of arrival - no soluiton',''))
+                    else:
+                        # Original Python fast path (for teknologic or no Numba)
+                        tested = set()
+                        for (i0, i1, i2, i3) in combinations(range(k), 4):
+                            recs = (recs_arr[i0], recs_arr[i1], recs_arr[i2], recs_arr[i3])
+                            if recs in tested:
                                 continue
-                            sq = float(np.sqrt((p**2 - a*q).item(0)))
-                            T_0a = float(((-p + sq)/a).item(0))
-                            T_0b = float(((-p - sq)/a).item(0))
+                            sol_no = 0
+                            ref, r1, r2, r3 = recs
+                            t_ref, t1, t2, t3 = times_arr[i0], times_arr[i1], times_arr[i2], times_arr[i3]
+                            r0Pos, r1Pos, r2Pos, r3Pos = pos_arr[i0], pos_arr[i1], pos_arr[i2], pos_arr[i3]
+                            self.z_translation = r0Pos[2]
                             if print_output == True:
-                                print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
-                            if np.sign(T_0a) > 0:
-                                S1a = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0a))
-                                S1a0, S1a1, S1a2 = float(S1a[0,0]), float(S1a[1,0]), float(S1a[2,0])
-                                point = np.array([r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2])
-                                in_hull = point_in_hull(point, self.convex_hull)
-                                add_row('A', (j, sol_no, ref, r1, r2, r3,
-                                              r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2,
-                                              T_0a, times_arr[0], 'solution found', in_hull))
+                                print ("The position of receiver %s is %s"%(ref,r0Pos))
+                            R = np.array([[r1Pos[0]-r0Pos[0], r2Pos[0]-r0Pos[0], r3Pos[0]-r0Pos[0]],
+                                          [r1Pos[1]-r0Pos[1], r2Pos[1]-r0Pos[1], r3Pos[1]-r0Pos[1]],
+                                          [r1Pos[2]-r0Pos[2], r2Pos[2]-r0Pos[2], r3Pos[2]-r0Pos[2]]])
+                            if print_output == True:
+                                print ("Posisition Matrix R \n %s"%(R))
+                            tdoa_1 = np.round(t1 - t_ref, 6)
+                            tdoa_2 = np.round(t2 - t_ref, 6)
+                            tdoa_3 = np.round(t3 - t_ref, 6)
+                            tv = np.array([tdoa_1, tdoa_2, tdoa_3])
+                            if print_output == True:
+                                print ("Print T matrix \n %s"%(tv))
+                            SoS = sos_at(t_ref)
+                            if print_output == True:
+                                print ("Current Speed of Sound = %s"%(SoS))
+                            b1 = np.linalg.norm(r1Pos-r0Pos)**2 - (SoS**2 * tdoa_1**2)
+                            b2 = np.linalg.norm(r2Pos-r0Pos)**2 - (SoS**2 * tdoa_2**2)
+                            b3 = np.linalg.norm(r3Pos-r0Pos)**2 - (SoS**2 * tdoa_3**2)
+                            bv = np.array([b1, b2, b3])
+                            if print_output == True:
+                                print ("B matrix \n %s"%(bv))
+                            try:
+                                Rinv = np.linalg.inv(R)
+                                RinvT = Rinv.T
+                                # Match legacy shapes: legacy uses np.vstack -> (3,1) column, t.T -> (1,3) row
+                                tv_13 = tv.reshape(1, 3)
+                                tv_31 = tv.reshape(3, 1)
+                                bv_13 = bv.reshape(1, 3)
+                                bv_31 = bv.reshape(3, 1)
+                                # Same expression structure as legacy: t.T * R.I * R.T.I * t
+                                mt = (tv_13 @ Rinv) @ RinvT
+                                a = SoS**4 * (mt @ tv_31) - SoS**2
+                                p = -0.5 * SoS**2 * (mt @ bv_31)
+                                mb = (bv_13 @ Rinv) @ RinvT
+                                q = 0.25 * (mb @ bv_31)
                                 if print_output == True:
-                                    print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                            else:
+                                    print ('a = %s, p = %s, q = %s'%(a,p,q))
+                                discriminant = float((p**2 - a*q).item(0))
+                                coefficient = float(a.item(0))
+                                if not np.isfinite(discriminant) or discriminant < 0 or coefficient == 0:
+                                    add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                                  'negative quadratic discriminant - no solution',''))
+                                    add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                                  'negative quadratic discriminant - no solution',''))
+                                    sol_no = sol_no + 1
+                                    tested.add(recs)
+                                    continue
+                                sq = float(np.sqrt((p**2 - a*q).item(0)))
+                                T_0a = float(((-p + sq)/a).item(0))
+                                T_0b = float(((-p - sq)/a).item(0))
                                 if print_output == True:
-                                    print ("No solution A found time step %s"%(j))
+                                    print ('T_0a = %s, T_0b = %s'%(T_0a, T_0b))
+                                if np.sign(T_0a) > 0:
+                                    S1a = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0a))
+                                    S1a0, S1a1, S1a2 = float(S1a[0,0]), float(S1a[1,0]), float(S1a[2,0])
+                                    point = np.array([r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2])
+                                    in_hull = point_in_hull(point, self.convex_hull)
+                                    add_row('A', (j, sol_no, ref, r1, r2, r3,
+                                                  r0Pos[0] + S1a0, r0Pos[1] + S1a1, r0Pos[2] + S1a2,
+                                                  T_0a, times_arr[0], 'solution found', in_hull))
+                                    if print_output == True:
+                                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                else:
+                                    if print_output == True:
+                                        print ("No solution A found time step %s"%(j))
+                                    add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                                  'negative time of arrival - no soluiton',''))
+                                if np.sign(T_0b) > 0:
+                                    S1b = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0b))
+                                    S1b0, S1b1, S1b2 = float(S1b[0,0]), float(S1b[1,0]), float(S1b[2,0])
+                                    point = np.array([r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2])
+                                    in_hull = point_in_hull(point, self.convex_hull)
+                                    add_row('B', (j, sol_no, ref, r1, r2, r3,
+                                                  r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2,
+                                                  T_0b, times_arr[0], 'solution found', in_hull))
+                                    if print_output == True:
+                                        print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
+                                else:
+                                    if print_output == True:
+                                        print ("No solution B found time step %s"%(j))
+                                    add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
+                                                  'negative time of arrival - no soluiton',''))
+                            except:
+                                if print_output == True:
+                                    print ("Singular matrix encountered, no solution at transmission %s"%(j))
                                 add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                              'negative time of arrival - no soluiton',''))
-                            if np.sign(T_0b) > 0:
-                                S1b = RinvT @ (0.5 * bv_31 - SoS**2 * (tv_31 * T_0b))
-                                S1b0, S1b1, S1b2 = float(S1b[0,0]), float(S1b[1,0]), float(S1b[2,0])
-                                point = np.array([r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2])
-                                in_hull = point_in_hull(point, self.convex_hull)
-                                add_row('B', (j, sol_no, ref, r1, r2, r3,
-                                              r0Pos[0] + S1b0, r0Pos[1] + S1b1, r0Pos[2] + S1b2,
-                                              T_0b, times_arr[0], 'solution found', in_hull))
-                                if print_output == True:
-                                    print ("Solution Found for fish %s at transmission %s"%(self.tag,j))
-                            else:
-                                if print_output == True:
-                                    print ("No solution B found time step %s"%(j))
+                                              'singular matrix encountered - no soluiton',''))
                                 add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                              'negative time of arrival - no soluiton',''))
-                        except:
-                            if print_output == True:
-                                print ("Singular matrix encountered, no solution at transmission %s"%(j))
-                            add_row('A', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                          'singular matrix encountered - no soluiton',''))
-                            add_row('B', (j, sol_no, ref, r1, r2, r3, 9999.,9999.,9999.,9999.,9999.,
-                                          'singular matrix encountered - no soluiton',''))
-                        sol_no = sol_no + 1
-                        tested.add(recs)
+                                              'singular matrix encountered - no soluiton',''))
+                            sol_no = sol_no + 1
+                            tested.add(recs)
 
             else:
                 if print_output == True:
