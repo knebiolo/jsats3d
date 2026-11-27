@@ -482,7 +482,7 @@ OUTSIDE_ARRAY = "outside receiver array - rejected"
 
 
 def deng_settings(c):
-    """[positioning] options for step 11 (all off by default = legacy behaviour):
+    """[positioning] options for step 10 (all off by default = legacy behaviour):
     deng_max_receivers  – > 0: solve each transmission with only its N earliest-arriving receivers (fewer receiver
                           combinations; 20 receivers give up to 4,845 per ping, 8 give 70)
     deng_keep_deep      – with the cap, if none of the N heard first is deep, swap the Nth for the earliest deep
@@ -532,7 +532,7 @@ def reject_outside_hull(out, tag, hull_eq, margin_m):
 
 
 def positions_run(c):
-    """Step 11: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
+    """Step 10: Deng for each fish tag with the configured 3D receivers (roots A and B written per tag)."""
     out = Path(lp.fresh_folder(c.work / "positions"))
     s = deng_settings(c)
     print("DENG options: %s" % s, flush=True)
@@ -569,7 +569,7 @@ def export_done(c):
 
 
 def export_run(c):
-    """Step 10: load the position files into tblPositions_Deng (the legacy loader deletes the files)."""
+    """Step 11: load the position files into tblPositions_Deng (the legacy loader deletes the files)."""
     positions = c.work / "positions"
     lp.widen_table(c.db, "tblPositions_Deng", positions, extra=("solution", "Tag_ID"))
     jsats3d.positions_data_management("Deng", str(positions), str(c.db))
@@ -589,7 +589,7 @@ def bathymetry_check_done(c):
 
 
 def bathymetry_check_run(c):
-    """Step 10b: apply bathymetry-based water column filtering to position solutions.
+    """Step 11b: apply bathymetry-based water column filtering to position solutions.
 
     Reads [ats_2025_pipeline] bathymetry settings:
         bathy_path          – path to bathymetry XYZ/CSV/GeoTIFF
@@ -619,7 +619,7 @@ def bathymetry_check_run(c):
         return {"status": "water_column_only"}
 
 
-# Step 10c (optional, [positioning] premedian_filter = true): pre-median screen of the Deng solutions of each
+# Step 11c (optional, [positioning] premedian_filter = true): pre-median screen of the Deng solutions of each
 # transmission, so clock-jump artefacts cannot bias the per-transmission median/mean used downstream. Rejected rows
 # stay in tblPositions_Deng with a 'premedian ...' comment (downstream selects comment = 'solution found').
 PREMEDIAN_BOX = "premedian box - rejected"
@@ -659,7 +659,7 @@ def premedian_done(c):
 
 
 def premedian_run(c):
-    """Step 10c (optional): box gate (3D receiver hull + margin, surface to deepest receiver - pad; premedian_box /
+    """Step 11c (optional): box gate (3D receiver hull + margin, surface to deepest receiver - pad; premedian_box /
     premedian_box_z switch it or its Z limits off; non-finite solutions are always rejected), then per
     transmission and root keep the solutions within radius_m (XY) of the densest solution; fewer than min_sets
     distinct receiver sets rejects the transmission. With the filter on, positions_dbscan uses the ping median."""
@@ -973,14 +973,14 @@ STEPS = [("prepare", "1b", prepare_done, prepare_run), ("clock_jumps", "1c", clo
          ("deep_clocks", "7", deep_clocks_done, deep_clocks_run),
          ("fish_multipath", "8", fish_multipath_done, fish_multipath_run),
          ("speed_of_sound", "9", speed_of_sound_done, speed_of_sound_run),
-         ("positions", "11", positions_done, positions_run), ("export", "10", export_done, export_run),
-         ("bathymetry_check", "10b", bathymetry_check_done, bathymetry_check_run),
-         ("premedian", "10c", premedian_done, premedian_run),
-         ("positions_2d", "11b", positions_2d_done, positions_2d_run),
-         ("plot_drag", "12", plot_drag_done, plot_drag_run),
-         ("plot_drag_2d", "12c", plot_drag_2d_done, plot_drag_2d_run),
-         ("positions_dbscan", "11c", positions_dbscan_done, positions_dbscan_run),
-         ("plot_drag_dbscan", "12b", plot_drag_dbscan_done, plot_drag_dbscan_run)]
+         ("positions", "10", positions_done, positions_run), ("export", "11", export_done, export_run),
+         ("bathymetry_check", "11b", bathymetry_check_done, bathymetry_check_run),
+         ("premedian", "11c", premedian_done, premedian_run),
+         ("positions_2d", "12b", positions_2d_done, positions_2d_run),
+         ("plot_drag", "13", plot_drag_done, plot_drag_run),
+         ("plot_drag_2d", "13c", plot_drag_2d_done, plot_drag_2d_run),
+         ("positions_dbscan", "12c", positions_dbscan_done, positions_dbscan_run),
+         ("plot_drag_dbscan", "13b", plot_drag_dbscan_done, plot_drag_dbscan_run)]
 
 
 # ----------------------------------------------------------------------------------------------- driver
